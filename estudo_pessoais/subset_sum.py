@@ -17,32 +17,211 @@ def encontrar_um_subconjunto(numeros, target, tolerancia=0.01):
 # =========================
 
 casos = [
+       
+        {
+        "numeros": [],
+        "target": 0.00
+    },
     {
-        "numeros": [
-            1774.82, 43982.78, 5324.45, 39346.25, 53672.77, 4678.87, 2490.77, 180.00,
-            18304.39, 1800.00, 812.88, 667.77, 591.91, 7951.49, 21175.05, 300.00,
-            4857.07, 1214.40, 20289.41, 0.00, 382.44, 7225.39, 813.00, 335.40
-        ],
-        "target": 115265.02
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
     },
 
-    # 👇 copie esse bloco até completar os 60
     {
-        "numeros": [
-           
-        ],
-        "target": 0000.00
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
     },
 
     {
-        "numeros": [
-             
-        ],
-        "target": 0000.00
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
     }
-
-    
-
 
 ]
 
