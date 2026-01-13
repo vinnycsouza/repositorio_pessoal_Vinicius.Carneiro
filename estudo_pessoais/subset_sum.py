@@ -297,6 +297,46 @@ casos = [
     {
         "numeros": [],
         "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
+    },
+    {
+        "numeros": [],
+        "target": 0.00
     }
 
 ]
