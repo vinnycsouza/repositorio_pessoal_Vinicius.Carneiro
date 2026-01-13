@@ -10,6 +10,7 @@ numeros = [
 # Soma alvo
 target = 115265.02
 
+
 # Filtrar números: ignorar zero e números maiores que o target
 numeros_filtrados = [n for n in numeros if n > 0 and n <= target]
 
