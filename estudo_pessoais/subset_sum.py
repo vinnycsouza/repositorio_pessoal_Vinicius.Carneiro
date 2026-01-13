@@ -19,8 +19,10 @@ def encontrar_um_subconjunto(numeros, target, tolerancia=0.01):
 casos = [
        
         {
-        "numeros": [],
-        "target": 0.00
+        "numeros": [
+             
+         ],
+        "target": 115265.02
     },
     {
         "numeros": [],
