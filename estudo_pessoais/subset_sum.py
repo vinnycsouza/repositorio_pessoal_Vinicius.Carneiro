@@ -3,14 +3,17 @@ from itertools import combinations
 from itertools import combinations
 
 def encontrar_um_subconjunto(numeros, target, tolerancia=0.01):
+    """
+    Retorna APENAS UMA combinação ou None
+    """
+    numeros = sorted(numeros, reverse=True)
+
     for r in range(1, len(numeros) + 1):
         for combo in combinations(numeros, r):
             if abs(sum(combo) - target) < tolerancia:
-                return combo  # 👈 PARA AQUI
+                return combo   # 🔴 para aqui
 
-    return None  # se não encontrar
-
-
+    return None
 
 # =========================
 # DEFINIÇÃO DOS 60 CASOS
@@ -464,16 +467,17 @@ for i, caso in enumerate(casos, start=1):
     numeros = caso["numeros"]
     target = caso["target"]
 
-    # pula casos incompletos sem imprimir nada
+    # pula SOMENTE casos vazios
     if not numeros or target == 0:
         continue
 
     resultado = encontrar_um_subconjunto(numeros, target)
 
+    # imprime UMA vez por caso
+    print(f"\nCaso {i} | Target {target}")
+
     if resultado:
-        print(f"\nCaso {i} | Target {target}")
         print("Combinação encontrada:")
         print(resultado)
-
     else:
-       print("Nenhuma combinação encontrada.")
+        print("Nenhuma combinação encontrada.")
