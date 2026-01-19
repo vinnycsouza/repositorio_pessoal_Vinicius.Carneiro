@@ -2,15 +2,16 @@ from itertools import combinations
 
 # Lista de números
 numeros = [
-   1433.27, 30866.79, 4299.83, 39346.25, 53380.53, 4562.87, 1000.00, 945.00,
-   12985.99, 306.55, 1650.00, 848.22, 52.11, 53.50, 10265.66
+    802.32, 47682.93, 2406.99, 885.76, 44572.62, 30674.68, 601.75, 550.00, 63850.57,
+    1067.11, 252.67, 876.13, 1.62, 11171.40, 7361.83, 21964.45, 7.20, 46547.46,
+    220.00, 6123.33, 22.00, 627.00, 14126.62
 ]
 
 # Soma alvo
-target = 96543.77
+target = 137391.15
+
+
  
-
-
 # Filtrar números: ignorar zero e números maiores que o target
 numeros_filtrados = [n for n in numeros if n > 0 and n <= target]
 
