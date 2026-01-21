@@ -575,7 +575,8 @@ for i, caso in enumerate(casos, start=1):
     print(f"\nCaso {i} | Target {target}")
 
     if resultado:
-    print("Combinação encontrada:")
-    print(", ".join(str(v) for v in resultado))
-else:
-    print("Nenhuma combinação encontrada.")
+        print("Combinação encontrada:")
+        print(", ".join(str(v) for v in resultado))
+    else:
+        print("Nenhuma combinação encontrada.")
+
