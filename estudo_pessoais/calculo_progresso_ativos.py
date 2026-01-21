@@ -617,6 +617,6 @@ for i, caso in enumerate(casos, start=1):
 
     if resultado:
         print("Combinação encontrada:")
-        print(resultado)
+        print(*resultado)
     else:
         print("Nenhuma combinação encontrada.")
