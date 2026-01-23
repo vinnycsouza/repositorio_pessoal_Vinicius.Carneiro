@@ -10,6 +10,12 @@ from io import BytesIO
 # FUNÇÃO DE EXTRAÇÃO
 # =========================
 def extrair_saldo_credito_original(pdf_path):
+    """
+    Extrai o Saldo do Crédito Original (PER/DCOMP - RFB)
+    Área: Pagamento Indevido ou a Maior
+    Crédito: eSOCIAL
+    Retorna float (padrão numérico)
+    """
     with pdfplumber.open(pdf_path) as pdf:
         for pagina in pdf.pages:
             texto = pagina.extract_text()
@@ -17,28 +23,34 @@ def extrair_saldo_credito_original(pdf_path):
             if not texto:
                 continue
 
-            # Normaliza completamente o texto
+            # Normaliza texto (remove quebras e espaços excessivos)
             texto_normalizado = " ".join(texto.replace("\n", " ").split())
 
-            # Garante que está no bloco correto
+            # Garante contexto correto
             if "Pagamento Indevido ou a Maior" not in texto_normalizado:
                 continue
-
             if "eSOCIAL" not in texto_normalizado:
                 continue
 
-            # Estratégia:
-            # procura "Saldo de Crédito" e captura o PRIMEIRO valor monetário depois
+            # Regex baseada no texto real do PDF:
+            # "Saldo do Crédito Original        49.785,03"
             match = re.search(
-                r"Saldo de Crédito.*?(R?\$?\s*[\d\.]+,\d{2})",
-                texto_normalizado
+                r"Saldo\s+do\s+Cr[eé]dito\s+Original\s+([\d\.]+,\d{2})",
+                texto_normalizado,
+                re.IGNORECASE
             )
 
             if match:
-                # Limpa o valor (remove R$ e espaços)
-                valor = match.group(1)
-                valor = valor.replace("R$", "").replace(" ", "").strip()
-                return valor
+                valor_str = match.group(1)
+
+                # Converte para float (padrão contábil)
+                valor_float = float(
+                    valor_str
+                    .replace(".", "")
+                    .replace(",", ".")
+                )
+
+                return valor_float
 
     return None
 
@@ -52,7 +64,7 @@ st.set_page_config(
 
 st.title("📄 Extrator PER/DCOMP – RFB")
 st.write(
-    "Extração do **Saldo de Crédito Original** "
+    "Extração do **Saldo do Crédito Original** "
     "para **eSOCIAL – Pagamento Indevido ou a Maior**"
 )
 
@@ -84,15 +96,14 @@ if arquivos_pdf:
                 "Arquivo PDF": arquivo.name,
                 "Tipo de Crédito": "eSOCIAL",
                 "Área do Crédito": "Pagamento Indevido ou a Maior",
-                "Saldo de Crédito Original": saldo
+                "Saldo do Crédito Original": saldo
             })
 
             os.remove(caminho_pdf)
 
-    # Cria DataFrame
+    # DataFrame final
     df = pd.DataFrame(dados)
 
-    # Exibe resultado
     st.success("Processamento concluído!")
     st.dataframe(df, use_container_width=True)
 
