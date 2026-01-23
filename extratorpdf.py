@@ -10,50 +10,20 @@ from io import BytesIO
 # FUNÇÃO DE EXTRAÇÃO
 # =========================
 def extrair_saldo_credito_original(pdf_path):
-    """
-    Extrai o Saldo do Crédito Original (PER/DCOMP - RFB)
-    Área: Pagamento Indevido ou a Maior
-    Crédito: eSOCIAL
-    Retorna float (padrão numérico)
-    """
     with pdfplumber.open(pdf_path) as pdf:
-        for pagina in pdf.pages:
+        for i, pagina in enumerate(pdf.pages, start=1):
             texto = pagina.extract_text()
 
             if not texto:
                 continue
 
-            # Normaliza texto (remove quebras e espaços excessivos)
             texto_normalizado = " ".join(texto.replace("\n", " ").split())
 
-            # Garante contexto correto
-            if "Pagamento Indevido ou a Maior" not in texto_normalizado:
-                continue
-            if "eSOCIAL" not in texto_normalizado:
-                continue
-
-            # Regex baseada no texto real do PDF:
-            # "Saldo do Crédito Original        49.785,03"
-            match = re.search(
-                r"Saldo\s+do\s+Cr[eé]dito\s+Original\s+([\d\.]+,\d{2})",
-                texto_normalizado,
-                re.IGNORECASE
-            )
-
-            if match:
-                valor_str = match.group(1)
-
-                # Converte para float (padrão contábil)
-                valor_float = float(
-                    valor_str
-                    .replace(".", "")
-                    .replace(",", ".")
-                )
-
-                return valor_float
+            # DEBUG: imprime o texto no Streamlit
+            st.write(f"📄 Página {i}")
+            st.text(texto_normalizado)
 
     return None
-
 # =========================
 # CONFIGURAÇÃO STREAMLIT
 # =========================
