@@ -26,41 +26,53 @@ def extrair_valor(pdf_path):
 
             if match:
                 return float(
-                    match.group(1)
-                    .replace(".", "")
-                    .replace(",", ".")
+                    match.group(1).replace(".", "").replace(",", ".")
                 )
     return None
 
-# inicializa estado
+
+# ===== estado =====
+if "arquivos" not in st.session_state:
+    st.session_state.arquivos = []
+
 if "df" not in st.session_state:
     st.session_state.df = None
 
-arquivos = st.file_uploader(
+
+# ===== uploader =====
+uploads = st.file_uploader(
     "Envie os PDFs PER/DCOMP",
     type="pdf",
     accept_multiple_files=True
 )
 
-if arquivos:
+# congela os uploads
+if uploads:
+    st.session_state.arquivos = uploads
+
+
+# ===== processamento =====
+if st.session_state.arquivos and st.button("🚀 Processar PDFs"):
     resultados = []
 
-    for arquivo in arquivos:
+    for arquivo in st.session_state.arquivos:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(arquivo.getbuffer())
-            caminho_pdf = tmp.name
+            caminho = tmp.name
 
-        valor = extrair_valor(caminho_pdf)
+        valor = extrair_valor(caminho)
 
         resultados.append({
             "Arquivo": arquivo.name,
             "Saldo do Crédito Original": valor
         })
 
-        os.remove(caminho_pdf)
+        os.remove(caminho)
 
     st.session_state.df = pd.DataFrame(resultados)
 
+
+# ===== saída =====
 if st.session_state.df is not None:
     st.success("Processamento concluído ✅")
     st.dataframe(st.session_state.df, use_container_width=True)
