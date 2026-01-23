@@ -32,15 +32,17 @@ def extrair_valor(pdf_path):
                 )
     return None
 
-# uploader MULTIPLO
+# inicializa estado
+if "df" not in st.session_state:
+    st.session_state.df = None
+
 arquivos = st.file_uploader(
     "Envie os PDFs PER/DCOMP",
     type="pdf",
     accept_multiple_files=True
 )
 
-# botão de execução
-if arquivos and st.button("🚀 Processar PDFs"):
+if arquivos:
     resultados = []
 
     for arquivo in arquivos:
@@ -57,13 +59,14 @@ if arquivos and st.button("🚀 Processar PDFs"):
 
         os.remove(caminho_pdf)
 
-    df = pd.DataFrame(resultados)
+    st.session_state.df = pd.DataFrame(resultados)
 
+if st.session_state.df is not None:
     st.success("Processamento concluído ✅")
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(st.session_state.df, use_container_width=True)
 
     buffer = BytesIO()
-    df.to_excel(buffer, index=False, engine="openpyxl")
+    st.session_state.df.to_excel(buffer, index=False, engine="openpyxl")
     buffer.seek(0)
 
     st.download_button(
