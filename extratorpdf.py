@@ -10,11 +10,6 @@ from io import BytesIO
 # FUNÇÃO DE EXTRAÇÃO
 # =========================
 def extrair_saldo_credito_original(pdf_path):
-    """
-    Extrai o Saldo de Crédito Original da área:
-    Crédito - Pagamento Indevido ou a Maior
-    referente ao eSOCIAL (PER/DCOMP - RFB)
-    """
     with pdfplumber.open(pdf_path) as pdf:
         for pagina in pdf.pages:
             texto = pagina.extract_text()
@@ -22,21 +17,28 @@ def extrair_saldo_credito_original(pdf_path):
             if not texto:
                 continue
 
-            # Normaliza texto (remove quebras de linha excessivas)
-            texto_normalizado = " ".join(texto.split())
+            # Normaliza completamente o texto
+            texto_normalizado = " ".join(texto.replace("\n", " ").split())
 
-            if (
-                "Pagamento Indevido ou a Maior" in texto_normalizado
-                and "eSOCIAL" in texto_normalizado
-                and "Saldo de Crédito Original" in texto_normalizado
-            ):
-                match = re.search(
-                    r"Saldo de Crédito Original\s*[:\-]?\s*R?\$?\s*([\d\.]+,\d{2})",
-                    texto_normalizado
-                )
+            # Garante que está no bloco correto
+            if "Pagamento Indevido ou a Maior" not in texto_normalizado:
+                continue
 
-                if match:
-                    return match.group(1)
+            if "eSOCIAL" not in texto_normalizado:
+                continue
+
+            # Estratégia:
+            # procura "Saldo de Crédito" e captura o PRIMEIRO valor monetário depois
+            match = re.search(
+                r"Saldo de Crédito.*?(R?\$?\s*[\d\.]+,\d{2})",
+                texto_normalizado
+            )
+
+            if match:
+                # Limpa o valor (remove R$ e espaços)
+                valor = match.group(1)
+                valor = valor.replace("R$", "").replace(" ", "").strip()
+                return valor
 
     return None
 
