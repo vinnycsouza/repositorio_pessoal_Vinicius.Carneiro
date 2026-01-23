@@ -6,22 +6,21 @@ import tempfile
 import os
 from io import BytesIO
 
-# =========================
-# FUNÇÃO DE EXTRAÇÃO
-# =========================
-def extrair_saldo_credito_original(pdf_path):
+st.set_page_config(page_title="Extrator PDF", layout="centered")
+st.title("📄 Extrator – PER/DCOMP eSOCIAL")
+
+def extrair_valor(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
         for pagina in pdf.pages:
             texto = pagina.extract_text()
             if not texto:
                 continue
 
-            texto_normalizado = " ".join(texto.split())
+            texto = " ".join(texto.split())
 
-            # Regex CONFIRMADA pelo debug real
             match = re.search(
                 r"Saldo\s+do\s+Cr[eé]dito\s+Original\s+([\d\.]+,\d{2})",
-                texto_normalizado,
+                texto,
                 re.IGNORECASE
             )
 
@@ -31,76 +30,45 @@ def extrair_saldo_credito_original(pdf_path):
                     .replace(".", "")
                     .replace(",", ".")
                 )
-
     return None
 
-# =========================
-# CONFIG STREAMLIT
-# =========================
-st.set_page_config(page_title="Extrator PER/DCOMP", layout="centered")
-st.title("📄 Extrator PER/DCOMP – RFB")
-
-st.write(
-    "Extração do **Saldo do Crédito Original** "
-    "(eSOCIAL – Pagamento Indevido ou a Maior)"
-)
-
-# =========================
-# SESSION STATE
-# =========================
-if "arquivos" not in st.session_state:
-    st.session_state.arquivos = []
-
-# =========================
-# UPLOAD
-# =========================
-uploads = st.file_uploader(
+# uploader MULTIPLO
+arquivos = st.file_uploader(
     "Envie os PDFs PER/DCOMP",
     type="pdf",
-    accept_multiple_files=True,
-    key="uploader"
+    accept_multiple_files=True
 )
 
-if uploads:
-    st.session_state.arquivos = uploads
+# botão de execução
+if arquivos and st.button("🚀 Processar PDFs"):
+    resultados = []
 
-# =========================
-# BOTÃO PROCESSAR
-# =========================
-if st.session_state.arquivos:
-    if st.button("🚀 Processar PDFs"):
-        dados = []
+    for arquivo in arquivos:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(arquivo.getbuffer())
+            caminho_pdf = tmp.name
 
-        with st.spinner("Processando arquivos..."):
-            for arquivo in st.session_state.arquivos:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(arquivo.read())
-                    caminho_pdf = tmp.name
+        valor = extrair_valor(caminho_pdf)
 
-                saldo = extrair_saldo_credito_original(caminho_pdf)
+        resultados.append({
+            "Arquivo": arquivo.name,
+            "Saldo do Crédito Original": valor
+        })
 
-                dados.append({
-                    "Arquivo PDF": arquivo.name,
-                    "Saldo do Crédito Original": saldo
-                })
+        os.remove(caminho_pdf)
 
-                os.remove(caminho_pdf)
+    df = pd.DataFrame(resultados)
 
-        df = pd.DataFrame(dados)
+    st.success("Processamento concluído ✅")
+    st.dataframe(df, use_container_width=True)
 
-        st.success("Processamento concluído!")
-        st.dataframe(df, use_container_width=True)
+    buffer = BytesIO()
+    df.to_excel(buffer, index=False, engine="openpyxl")
+    buffer.seek(0)
 
-        # =========================
-        # EXCEL
-        # =========================
-        buffer = BytesIO()
-        df.to_excel(buffer, index=False, engine="openpyxl")
-        buffer.seek(0)
-
-        st.download_button(
-            label="📥 Baixar Excel",
-            data=buffer,
-            file_name="resultado_perdcomp.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    st.download_button(
+        "📥 Baixar Excel",
+        buffer,
+        "resultado_creditos.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
