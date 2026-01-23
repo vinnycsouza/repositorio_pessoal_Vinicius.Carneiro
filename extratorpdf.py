@@ -11,7 +11,7 @@ from io import BytesIO
 # =========================
 def extrair_saldo_credito_original(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
-        for i, pagina in enumerate(pdf.pages, start=1):
+        for pagina in pdf.pages:
             texto = pagina.extract_text()
 
             if not texto:
@@ -19,11 +19,30 @@ def extrair_saldo_credito_original(pdf_path):
 
             texto_normalizado = " ".join(texto.replace("\n", " ").split())
 
-            # DEBUG: imprime o texto no Streamlit
-            st.write(f"📄 Página {i}")
-            st.text(texto_normalizado)
+            # Contexto correto
+            if "Pagamento Indevido ou a Maior" not in texto_normalizado:
+                continue
+            if "eSOCIAL" not in texto_normalizado:
+                continue
+
+            # Padrão REAL confirmado no PDF
+            match = re.search(
+                r"Saldo\s+do\s+Cr[eé]dito\s+Original\s+([\d\.]+,\d{2})",
+                texto_normalizado,
+                re.IGNORECASE
+            )
+
+            if match:
+                valor_str = match.group(1)
+
+                return float(
+                    valor_str
+                    .replace(".", "")
+                    .replace(",", ".")
+                )
 
     return None
+
 # =========================
 # CONFIGURAÇÃO STREAMLIT
 # =========================
