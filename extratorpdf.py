@@ -17,15 +17,14 @@ def extrair_saldo_credito_original(pdf_path):
             if not texto:
                 continue
 
-            texto_normalizado = " ".join(texto.replace("\n", " ").split())
+            # Normalização simples (a mesma que funcionou no debug)
+            texto_normalizado = " ".join(texto.split())
 
-            # Contexto correto
             if "Pagamento Indevido ou a Maior" not in texto_normalizado:
                 continue
             if "eSOCIAL" not in texto_normalizado:
                 continue
 
-            # Padrão REAL confirmado no PDF
             match = re.search(
                 r"Saldo\s+do\s+Cr[eé]dito\s+Original\s+([\d\.]+,\d{2})",
                 texto_normalizado,
@@ -34,11 +33,8 @@ def extrair_saldo_credito_original(pdf_path):
 
             if match:
                 valor_str = match.group(1)
-
                 return float(
-                    valor_str
-                    .replace(".", "")
-                    .replace(",", ".")
+                    valor_str.replace(".", "").replace(",", ".")
                 )
 
     return None
