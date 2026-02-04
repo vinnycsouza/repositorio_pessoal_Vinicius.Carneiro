@@ -67,14 +67,15 @@ if uploaded_file:
     eventos = separar_por_evento(linhas)
     st.write(f"Eventos encontrados: {list(eventos.keys())}")
 
-       # =========================
+    # =========================
     # Geração do Excel
     # =========================
     if st.button("Gerar arquivo Excel por evento"):
         output = io.BytesIO()
         escreveu_aba = False
 
-        MAX_ROWS = 1_048_576
+        MAX_ROWS_EXCEL = 1_048_576
+        MAX_DADOS_POR_ABA = MAX_ROWS_EXCEL - 1  # reserva 1 linha pro cabeçalho
 
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             for codigo, registros in eventos.items():
@@ -95,11 +96,14 @@ if uploaded_file:
                     continue
 
                 total_linhas = len(df_evento)
-                total_abas = (total_linhas // MAX_ROWS) + (1 if total_linhas % MAX_ROWS else 0)
+                total_abas = (
+                    total_linhas // MAX_DADOS_POR_ABA
+                    + (1 if total_linhas % MAX_DADOS_POR_ABA else 0)
+                )
 
                 for i in range(total_abas):
-                    inicio = i * MAX_ROWS
-                    fim = inicio + MAX_ROWS
+                    inicio = i * MAX_DADOS_POR_ABA
+                    fim = inicio + MAX_DADOS_POR_ABA
 
                     nome_aba = (
                         codigo
@@ -114,6 +118,18 @@ if uploaded_file:
                     )
 
                     escreveu_aba = True
+
+        # -------- Download seguro --------
+        if escreveu_aba:
+            output.seek(0)
+            st.download_button(
+                label="📥 Baixar Excel com todos os eventos",
+                data=output,
+                file_name="MANAD_Eventos.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.warning("Nenhum evento válido encontrado. O Excel não foi gerado.")
 
         # -------- Download seguro --------
         if escreveu_aba:
