@@ -132,26 +132,15 @@ if uploaded_file:
             st.warning("Nenhum evento válido encontrado. O Excel não foi gerado.")
 
         # -------- Download seguro --------
+                # -------- Download seguro --------
         if escreveu_aba:
             output.seek(0)
             st.download_button(
                 label="📥 Baixar Excel com todos os eventos",
                 data=output,
                 file_name="MANAD_Eventos.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.warning("Nenhum evento válido encontrado. O Excel não foi gerado.")
-
-
-        # -------- Download seguro --------
-        if escreveu_aba:
-            output.seek(0)
-            st.download_button(
-                label="📥 Baixar Excel com todos os eventos",
-                data=output,
-                file_name="MANAD_Eventos.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_excel_manad"
             )
         else:
             st.warning("Nenhum evento válido encontrado. O Excel não foi gerado.")
