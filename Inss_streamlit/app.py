@@ -1,87 +1,52 @@
 import streamlit as st
+import pdfplumber
 import pandas as pd
-import io
 
-from extrator_pdf import extrair_rubricas
+from competencia import extrair_competencia
+from extrator_pdf import extrair_rubricas_page, extrair_base_oficial_page
 from calculo_base import calcular_base
 
 st.set_page_config(layout="wide")
-st.title("📊 Analisador de Base INSS Patronal")
+st.title("📊 Analisador INSS Patronal por Competência")
 
-arquivos = st.file_uploader(
-    "Envie PDF(s) de folha de pagamento",
-    type="pdf",
-    accept_multiple_files=True
-)
+arquivo = st.file_uploader("Envie o PDF da folha", type="pdf")
 
-if arquivos:
-    for arquivo in arquivos:
+if arquivo:
+    dados = {}
+    competencia_atual = None
+
+    with pdfplumber.open(arquivo) as pdf:
+        for page in pdf.pages:
+            competencia_atual = extrair_competencia(page, competencia_atual)
+            if not competencia_atual:
+                continue
+
+            dados.setdefault(competencia_atual, {
+                "rubricas": [],
+                "base_empresa": None
+            })
+
+            rubricas = extrair_rubricas_page(page)
+            dados[competencia_atual]["rubricas"].extend(rubricas)
+
+            base = extrair_base_oficial_page(page)
+            if base and not dados[competencia_atual]["base_empresa"]:
+                dados[competencia_atual]["base_empresa"] = base
+
+    for comp, info in dados.items():
         st.divider()
-        st.subheader(f"📄 {arquivo.name}")
+        st.subheader(f"📅 Competência {comp}")
 
-        # --- extração ---
-        rubricas = extrair_rubricas(arquivo)
+        df = pd.DataFrame(info["rubricas"])
+        df = df.drop_duplicates(subset=["rubrica", "valor", "tipo"])
 
-        if rubricas.empty:
-            st.error("Nenhuma rubrica encontrada no PDF")
-            continue
+        base_calc, df = calcular_base(df)
 
-        # --- cálculo ---
-        base_calc, tabela = calcular_base(rubricas)
-
-        # --- métricas ---
         c1, c2 = st.columns(2)
-
-        c1.metric(
-            "Base calculada (rubricas ENTRA)",
-            f"R$ {base_calc:,.2f}"
-        )
-
+        c1.metric("Base calculada", f"R$ {base_calc:,.2f}")
         c2.metric(
-            "Total de rubricas identificadas",
-            f"{len(tabela)}"
+            "Base oficial (empresa)",
+            f"R$ {info['base_empresa']:,.2f}" if info["base_empresa"] else "Não encontrada"
         )
 
-        # --- tabela geral ---
-        st.subheader("Rubricas identificadas")
-        st.dataframe(
-            tabela.sort_values(["tipo", "classificacao"]),
-            use_container_width=True
-        )
-
-        # --- abas provento x desconto ---
-        tab1, tab2 = st.tabs(["🔵 Proventos", "🔴 Descontos"])
-
-        with tab1:
-            proventos = tabela[tabela["tipo"] == "PROVENTO"]
-            st.dataframe(proventos, use_container_width=True)
-            st.metric(
-                "Total Proventos",
-                f"R$ {proventos['valor'].sum():,.2f}"
-            )
-
-        with tab2:
-            descontos = tabela[tabela["tipo"] == "DESCONTO"]
-            st.dataframe(descontos, use_container_width=True)
-            st.metric(
-                "Total Descontos",
-                f"R$ {descontos['valor'].sum():,.2f}"
-            )
-
-        # --- exportar Excel ---
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-            tabela.to_excel(
-                writer,
-                index=False,
-                sheet_name="Rubricas"
-            )
-
-        buffer.seek(0)
-
-        st.download_button(
-            label="📥 Baixar Excel – Rubricas da Base INSS",
-            data=buffer,
-            file_name=f"rubricas_base_inss_{arquivo.name}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.dataframe(df, use_container_width=True)

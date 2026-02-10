@@ -6,7 +6,7 @@ def carregar_regras():
         return json.load(f)
 
 
-def calcular_base(rubricas):
+def calcular_base(df):
     regras = carregar_regras()
 
     def classificar(rubrica, tipo):
@@ -23,13 +23,10 @@ def calcular_base(rubricas):
 
         return "NEUTRA"
 
-    rubricas["classificacao"] = rubricas.apply(
+    df["classificacao"] = df.apply(
         lambda x: classificar(x["rubrica"], x["tipo"]),
         axis=1
     )
 
-    base_calc = rubricas.loc[
-        rubricas["classificacao"] == "ENTRA", "valor"
-    ].sum()
-
-    return base_calc, rubricas
+    base_calc = df.loc[df["classificacao"] == "ENTRA", "valor"].sum()
+    return base_calc, df
