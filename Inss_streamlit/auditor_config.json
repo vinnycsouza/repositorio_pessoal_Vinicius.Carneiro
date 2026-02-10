@@ -1,0 +1,27 @@
+{
+  "DESCONTOS_REDUZEM_BASE": [
+    "atraso",
+    "falt",
+    "suspens",
+    "desc adian",
+    "desconto-d",
+    "liq",
+    "dif pl",
+    "repos",
+    "ajuste"
+  ],
+
+  "DESCONTOS_FINANCEIROS": [
+    "inss",
+    "irrf",
+    "fgts",
+    "plano",
+    "pensao",
+    "emprest",
+    "mensal",
+    "seguro",
+    "sind",
+    "contrib",
+    "insuf"
+  ]
+}

@@ -1,7 +1,11 @@
+from __future__ import annotations
+
+import json
 import pandas as pd
-import re
 from itertools import combinations
 
+
+# ------------------ util ------------------
 
 def _to_cents(x: float) -> int:
     return int(round(float(x) * 100))
@@ -11,47 +15,86 @@ def _from_cents(c: int) -> float:
     return c / 100.0
 
 
+def _norm_txt(s: str) -> str:
+    s = (s or "").lower()
+    return (
+        s.replace("á", "a").replace("à", "a").replace("ã", "a").replace("â", "a")
+         .replace("é", "e").replace("ê", "e")
+         .replace("í", "i")
+         .replace("ó", "o").replace("ô", "o").replace("õ", "o")
+         .replace("ú", "u")
+         .replace("ç", "c")
+    )
+
+
+def carregar_config_auditor():
+    """
+    Lê auditor_config.json.
+    Se não existir, volta com listas vazias (não quebra o app).
+    """
+    try:
+        with open("auditor_config.json", "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+            cfg.setdefault("DESCONTOS_REDUZEM_BASE", [])
+            cfg.setdefault("DESCONTOS_FINANCEIROS", [])
+            return cfg
+    except Exception:
+        return {"DESCONTOS_REDUZEM_BASE": [], "DESCONTOS_FINANCEIROS": []}
+
+
+# ------------------ descontos: classificador ------------------
+
 def identificar_ajustes_negativos(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Heurística: dentro do bloco DESCONTO, tenta separar descontos financeiros (INSS/IRRF/etc.)
-    de eventos negativos de remuneração (faltas/atrasos/DSR descontado/ajustes).
-    Esses "ajustes negativos" podem reduzir a base (dependendo do ERP).
+    Retorna DataFrame de descontos com:
+      - eh_ajuste_negativo: True se deve reduzir base (conforme config)
+      - eh_financeiro: True se for desconto financeiro (conforme config)
+      - eh_neutro: True se não bateu em nenhum dos dois
     """
-    if df.empty:
-        return df.copy()
+    config = carregar_config_auditor()
+    termos_reduzem = [_norm_txt(t) for t in config["DESCONTOS_REDUZEM_BASE"]]
+    termos_financeiros = [_norm_txt(t) for t in config["DESCONTOS_FINANCEIROS"]]
 
     desc = df[df["tipo"] == "DESCONTO"].copy()
+
     if desc.empty:
         desc["eh_ajuste_negativo"] = False
+        desc["eh_financeiro"] = False
+        desc["eh_neutro"] = False
         return desc
 
-    padroes_ajuste = [
-        "falta", "faltas",
-        "atraso", "atrasos",
-        "dsr desc", "dsr descont",
-        "desc dsr",
-        "desconto de", "descontos",
-        "ajuste", "ajustes",
-        "adiant", "adiantamento",
-        "saldo", "compens",
-        "repos", "reposição", "reposicao",
-        "suspens", "suspensão", "suspensao",
-        "penalid", "multa",  # (multa pode ser ajuste ou financeiro; fica como candidato)
-    ]
+    def classificar(rubrica):
+        txt = _norm_txt(rubrica)
 
-    def eh_ajuste(r):
-        txt = (r or "").lower()
-        return any(p in txt for p in padroes_ajuste)
+        # prioridade: financeiro
+        if any(t in txt for t in termos_financeiros):
+            return False, True
 
-    desc["eh_ajuste_negativo"] = desc["rubrica"].apply(eh_ajuste)
+        # depois: reduz base
+        if any(t in txt for t in termos_reduzem):
+            return True, False
+
+        return False, False
+
+    res = desc["rubrica"].apply(classificar)
+    desc["eh_ajuste_negativo"] = res.apply(lambda x: x[0])
+    desc["eh_financeiro"] = res.apply(lambda x: x[1])
+    desc["eh_neutro"] = (~desc["eh_ajuste_negativo"]) & (~desc["eh_financeiro"])
+
     return desc
 
 
+# ------------------ reconstrução de base ------------------
+
 def reconstruir_base(df: pd.DataFrame, base_calc: dict) -> dict:
     """
-    Base reconstruída (hipótese):
-      base_reconstruida = proventos_ENTRA - ajustes_negativos
-    Onde ajustes_negativos são descontos que podem reduzir remuneração.
+    Reconstrói uma base mais próxima da lógica de alguns ERPs:
+
+      base_reconstruida = base_calc_ENTRA - descontos_reduzem_base
+
+    Onde:
+      - base_calc_ENTRA vem do calculo_base.py (somatório de proventos ENTRA)
+      - descontos_reduzem_base é uma soma de eventos negativos listados em auditor_config.json
     """
     desc = identificar_ajustes_negativos(df)
     aj = desc[desc["eh_ajuste_negativo"]].copy()
@@ -70,9 +113,12 @@ def reconstruir_base(df: pd.DataFrame, base_calc: dict) -> dict:
 
     return {
         "ajustes_negativos": ajustes,
-        "base_reconstruida": base_reconstruida
+        "base_reconstruida": base_reconstruida,
+        "descontos_classificados": desc
     }
 
+
+# ------------------ combinações por valor ------------------
 
 def _sugerir_combinacoes_por_valor(
     candidatos: pd.DataFrame,
@@ -82,8 +128,8 @@ def _sugerir_combinacoes_por_valor(
     max_k: int = 6,
 ):
     """
-    Busca combinações de valores que somem aproximadamente o alvo.
-    Usada para "explicar" o residual.
+    Busca combinações de valores (valor_alvo) que somem aproximadamente o alvo.
+    Use com cuidado: combinações explodem; por isso limitamos top_n e max_k.
     """
     if candidatos.empty:
         return []
@@ -92,8 +138,7 @@ def _sugerir_combinacoes_por_valor(
     tol_c = _to_cents(tol)
 
     cand = candidatos.sort_values("valor_alvo", ascending=False).head(top_n).reset_index(drop=True)
-    vals = cand["valor_alvo"].tolist()
-    vals_c = [_to_cents(v) for v in vals]
+    vals_c = [_to_cents(v) for v in cand["valor_alvo"].tolist()]
 
     melhores = []
     for k in range(1, max_k + 1):
@@ -116,14 +161,18 @@ def _sugerir_combinacoes_por_valor(
     return combos
 
 
+# ------------------ auditoria ------------------
+
 def auditoria_por_grupo(df: pd.DataFrame, base_calc: dict, base_oficial: dict | None):
     """
     Retorna:
-      - resumo (DataFrame): por grupo
-      - candidatos (dict): tabelas de candidatos por grupo
-      - combos (dict): combinações por grupo
+      - resumo (DataFrame)
+      - candidatos (dict): por grupo
+      - combos (dict): por grupo
+      - descontos_classificados (DataFrame): descontos com flags
     """
-    # total de proventos (bruto) só pra contexto
+
+    # totais brutos de proventos (contexto)
     prov = df[df["tipo"] == "PROVENTO"].copy()
     tot_prov = {
         "ativos": float(prov["ativos"].fillna(0).sum()),
@@ -134,6 +183,7 @@ def auditoria_por_grupo(df: pd.DataFrame, base_calc: dict, base_oficial: dict | 
     recon = reconstruir_base(df, base_calc)
     ajustes = recon["ajustes_negativos"]
     base_rec = recon["base_reconstruida"]
+    descontos_classificados = recon["descontos_classificados"]
 
     linhas = []
     for g in ["ativos", "desligados", "total"]:
@@ -143,20 +193,20 @@ def auditoria_por_grupo(df: pd.DataFrame, base_calc: dict, base_oficial: dict | 
         linhas.append({
             "grupo": g.upper(),
             "proventos_brutos": tot_prov[g],
-            "base_calc_ENTRA": base_calc[g],
-            "ajustes_negativos_identificados": ajustes[g],
+            "base_calc_ENTRA": float(base_calc.get(g, 0.0)),
+            "descontos_reduzem_base": ajustes[g],
             "base_reconstruida": base_rec[g],
             "base_oficial_pdf": of,
             "residual_nao_explicado": residual
         })
 
-    # afastados (não existe no quadro de eventos desse modelo)
+    # AFASTADOS: existe na base oficial, mas não no quadro de eventos desse modelo
     if base_oficial and "afastados" in base_oficial:
         linhas.append({
             "grupo": "AFASTADOS",
             "proventos_brutos": None,
             "base_calc_ENTRA": None,
-            "ajustes_negativos_identificados": None,
+            "descontos_reduzem_base": None,
             "base_reconstruida": None,
             "base_oficial_pdf": float(base_oficial["afastados"]),
             "residual_nao_explicado": float(base_oficial["afastados"]),
@@ -164,24 +214,17 @@ def auditoria_por_grupo(df: pd.DataFrame, base_calc: dict, base_oficial: dict | 
 
     resumo = pd.DataFrame(linhas)
 
-    # Candidatos para explicar residual:
-    # - Se residual > 0: base_oficial maior que reconstruída → pode ter proventos "fora/neutra" que estão compondo a base
-    # - Se residual < 0: reconstruída maior → pode haver ENTRA indevido OU ajustes negativos faltando
+    # candidatos para explicar residual positivo:
+    # proventos que estão FORA/NEUTRA podem estar sendo considerados pela folha como base
+    prov_fn = df[(df["tipo"] == "PROVENTO") & (df["classificacao"].isin(["FORA", "NEUTRA"]))].copy()
+
     candidatos = {}
     combos = {}
-
-    # candidatos baseados em PROVENTO fora/neutra (por grupo)
-    prov_fn = df[(df["tipo"] == "PROVENTO") & (df["classificacao"].isin(["FORA", "NEUTRA"]))].copy()
 
     for g in ["ativos", "desligados", "total"]:
         linha = resumo[resumo["grupo"] == g.upper()].iloc[0]
         residual = linha["residual_nao_explicado"]
-        if pd.isna(residual):
-            candidatos[g] = prov_fn.head(0)
-            combos[g] = []
-            continue
 
-        # tabela de candidatos com coluna valor_alvo do grupo
         cand = prov_fn.copy()
         cand["valor_alvo"] = cand[g].fillna(0.0).astype(float)
         cand = cand[cand["valor_alvo"] > 0].copy()
@@ -189,11 +232,9 @@ def auditoria_por_grupo(df: pd.DataFrame, base_calc: dict, base_oficial: dict | 
 
         candidatos[g] = cand[["rubrica", "tipo", "classificacao", "valor_alvo"]].copy()
 
-        # combinações só fazem sentido quando residual é positivo (queremos "explicar" o que está dentro da base)
-        # mas você pode olhar também quando negativo pra investigar ENTRA indevido (aí seria o inverso).
-        if residual > 0:
-            combos[g] = _sugerir_combinacoes_por_valor(candidatos[g], residual)
-        else:
+        if pd.isna(residual) or residual <= 0:
             combos[g] = []
+        else:
+            combos[g] = _sugerir_combinacoes_por_valor(candidatos[g], residual)
 
-    return resumo, candidatos, combos
+    return resumo, candidatos, combos, descontos_classificados
