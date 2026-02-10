@@ -19,7 +19,7 @@ if arquivos:
         st.divider()
         st.subheader(f"📄 {arquivo.name}")
 
-        # --- extrações ---
+        # --- extração ---
         base_oficial = extrair_base_oficial(arquivo)
         rubricas = extrair_rubricas(arquivo)
 
@@ -48,7 +48,7 @@ if arquivos:
             f"R$ {diff:,.2f}" if diff is not None else "-"
         )
 
-        # --- tabela na tela ---
+        # --- tabela ---
         st.subheader("Rubricas identificadas")
         st.dataframe(
             tabela.sort_values("classificacao"),
@@ -57,7 +57,6 @@ if arquivos:
 
         # --- exportar Excel ---
         buffer = io.BytesIO()
-
         with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
             tabela.to_excel(
                 writer,

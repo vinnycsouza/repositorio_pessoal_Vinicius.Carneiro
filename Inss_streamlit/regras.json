@@ -1,27 +1,17 @@
 {
-  "entra_base": [
-    "salari",
-    "hora",
+  "ENTRA_BASE": [
+    "salário",
+    "hora extra",
     "adicional",
-    "insalubr",
-    "periculos",
-    "gratific",
-    "dsr"
+    "comissão",
+    "gratificação"
   ],
-  "reduz_base": [
-    "falta",
-    "suspens",
-    "licenca",
-    "afast"
-  ],
-  "ignorar": [
-    "fgts",
-    "vale",
-    "refeicao",
-    "aliment",
-    "plano",
-    "pensao",
-    "emprest",
-    "multa"
+  "NAO_ENTRA_BASE": [
+    "vale transporte",
+    "vale alimentação",
+    "vale refeição",
+    "plano de saúde",
+    "auxílio",
+    "indenização"
   ]
 }

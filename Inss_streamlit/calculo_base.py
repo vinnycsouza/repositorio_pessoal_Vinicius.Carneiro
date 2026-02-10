@@ -1,43 +1,37 @@
 import json
 
-with open("regras.json", encoding="utf-8") as f:
-    REGRAS = json.load(f)
+
+def carregar_regras():
+    with open("regras.json", "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def classificar_rubrica(nome):
-    nome = nome.lower()
+def calcular_base(rubricas, base_oficial):
+    regras = carregar_regras()
 
-    if any(p in nome for p in REGRAS["ignorar"]):
-        return "IGNORAR"
+    def classificar(rubrica, tipo):
+        r = rubrica.lower()
 
-    if any(p in nome for p in REGRAS["reduz_base"]):
-        return "REDUZ"
+        if tipo == "DESCONTO":
+            return "FORA"
 
-    if any(p in nome for p in REGRAS["entra_base"]):
-        return "ENTRA"
+        if any(p in r for p in regras["NAO_ENTRA_BASE"]):
+            return "FORA"
 
-    return "FORA"
+        if any(p in r for p in regras["ENTRA_BASE"]):
+            return "ENTRA"
 
+        return "NEUTRA"
 
-def calcular_base(df, base_oficial):
-    base_calc = 0
-    classificacoes = []
+    rubricas["classificacao"] = rubricas.apply(
+        lambda x: classificar(x["rubrica"], x["tipo"]),
+        axis=1
+    )
 
-    for _, row in df.iterrows():
-        tipo = classificar_rubrica(row["rubrica"])
-        valor = row["valor"]
+    base_calc = rubricas.loc[
+        rubricas["classificacao"] == "ENTRA", "valor"
+    ].sum()
 
-        if tipo == "ENTRA":
-            base_calc += valor
-        elif tipo == "REDUZ":
-            base_calc -= valor
+    diff = base_calc - base_oficial if base_oficial else None
 
-        classificacoes.append(tipo)
-
-    df["classificacao"] = classificacoes
-
-    diferenca = None
-    if base_oficial is not None:
-        diferenca = base_calc - base_oficial
-
-    return base_calc, diferenca, df
+    return base_calc, diff, rubricas
