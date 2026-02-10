@@ -6,7 +6,7 @@ def carregar_regras():
         return json.load(f)
 
 
-def calcular_base(rubricas, base_oficial):
+def calcular_base(rubricas):
     regras = carregar_regras()
 
     def classificar(rubrica, tipo):
@@ -32,6 +32,4 @@ def calcular_base(rubricas, base_oficial):
         rubricas["classificacao"] == "ENTRA", "valor"
     ].sum()
 
-    diff = base_calc - base_oficial if base_oficial else None
-
-    return base_calc, diff, rubricas
+    return base_calc, rubricas

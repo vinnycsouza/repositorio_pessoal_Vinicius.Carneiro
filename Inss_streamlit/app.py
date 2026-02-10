@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 
-from extrator_pdf import extrair_base_oficial, extrair_rubricas
+from extrator_pdf import extrair_rubricas
 from calculo_base import calcular_base
 
 st.set_page_config(layout="wide")
@@ -20,7 +20,6 @@ if arquivos:
         st.subheader(f"📄 {arquivo.name}")
 
         # --- extração ---
-        base_oficial = extrair_base_oficial(arquivo)
         rubricas = extrair_rubricas(arquivo)
 
         if rubricas.empty:
@@ -28,24 +27,19 @@ if arquivos:
             continue
 
         # --- cálculo ---
-        base_calc, diff, tabela = calcular_base(rubricas, base_oficial)
+        base_calc, tabela = calcular_base(rubricas)
 
         # --- métricas ---
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
 
         c1.metric(
-            "Base Oficial (PDF)",
-            f"R$ {base_oficial:,.2f}" if base_oficial else "Não encontrada"
-        )
-
-        c2.metric(
-            "Soma das Rubricas Identificadas",
+            "Base calculada (rubricas ENTRA)",
             f"R$ {base_calc:,.2f}"
         )
 
-        c3.metric(
-            "Diferença p/ Base Oficial (indicativa)",
-            f"R$ {diff:,.2f}" if diff is not None else "-"
+        c2.metric(
+            "Total de rubricas identificadas",
+            f"{len(tabela)}"
         )
 
         # --- tabela geral ---
@@ -55,38 +49,24 @@ if arquivos:
             use_container_width=True
         )
 
-        # --- separação provento x desconto ---
-        st.subheader("Detalhamento por tipo")
-
+        # --- abas provento x desconto ---
         tab1, tab2 = st.tabs(["🔵 Proventos", "🔴 Descontos"])
 
         with tab1:
             proventos = tabela[tabela["tipo"] == "PROVENTO"]
-            if proventos.empty:
-                st.info("Nenhum provento identificado")
-            else:
-                st.dataframe(
-                    proventos.sort_values("valor", ascending=False),
-                    use_container_width=True
-                )
-                st.metric(
-                    "Total de Proventos",
-                    f"R$ {proventos['valor'].sum():,.2f}"
-                )
+            st.dataframe(proventos, use_container_width=True)
+            st.metric(
+                "Total Proventos",
+                f"R$ {proventos['valor'].sum():,.2f}"
+            )
 
         with tab2:
             descontos = tabela[tabela["tipo"] == "DESCONTO"]
-            if descontos.empty:
-                st.info("Nenhum desconto identificado")
-            else:
-                st.dataframe(
-                    descontos.sort_values("valor", ascending=False),
-                    use_container_width=True
-                )
-                st.metric(
-                    "Total de Descontos",
-                    f"R$ {descontos['valor'].sum():,.2f}"
-                )
+            st.dataframe(descontos, use_container_width=True)
+            st.metric(
+                "Total Descontos",
+                f"R$ {descontos['valor'].sum():,.2f}"
+            )
 
         # --- exportar Excel ---
         buffer = io.BytesIO()
