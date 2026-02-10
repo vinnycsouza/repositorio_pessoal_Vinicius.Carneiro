@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+import bisect
 import pandas as pd
-from itertools import combinations
 
 
 # ------------------ util ------------------
@@ -38,7 +38,7 @@ def carregar_config_auditor():
         return {"DESCONTOS_REDUZEM_BASE": [], "DESCONTOS_FINANCEIROS": []}
 
 
-# ------------------ descontos: classificador ------------------
+# ------------------ descontos: classificador (mantido) ------------------
 
 def identificar_ajustes_negativos(df: pd.DataFrame) -> pd.DataFrame:
     config = carregar_config_auditor()
@@ -55,13 +55,10 @@ def identificar_ajustes_negativos(df: pd.DataFrame) -> pd.DataFrame:
 
     def classificar(rubrica):
         txt = _norm_txt(rubrica)
-
         if any(t in txt for t in termos_financeiros):
             return False, True
-
         if any(t in txt for t in termos_reduzem):
             return True, False
-
         return False, False
 
     res = desc["rubrica"].apply(classificar)
@@ -71,180 +68,142 @@ def identificar_ajustes_negativos(df: pd.DataFrame) -> pd.DataFrame:
     return desc
 
 
-# ------------------ combinações por valor ------------------
+# ------------------ Aproximação do GAP "por baixo" ------------------
 
-def _sugerir_combinacoes_por_valor(
-    candidatos: pd.DataFrame,
-    alvo: float,
-    tol: float = 0.05,
-    top_n: int = 35,
-    max_k: int = 6,
-):
-    if candidatos.empty:
-        return []
-
-    alvo_c = _to_cents(abs(alvo))
-    tol_c = _to_cents(tol)
-
-    cand = candidatos.sort_values("valor_alvo", ascending=False).head(top_n).reset_index(drop=True)
-    vals_c = [_to_cents(v) for v in cand["valor_alvo"].tolist()]
-
-    melhores = []
-    for k in range(1, max_k + 1):
-        for idxs in combinations(range(len(vals_c)), k):
-            soma = sum(vals_c[i] for i in idxs)
-            diff = abs(soma - alvo_c)
-            if diff <= tol_c:
-                melhores.append((diff, soma, idxs))
-
-    melhores.sort(key=lambda x: x[0])
-
-    combos = []
-    for diff, soma, idxs in melhores[:20]:
-        itens = cand.loc[list(idxs), ["rubrica", "tipo", "classificacao", "valor_alvo"]].copy()
-        combos.append({"soma": _from_cents(soma), "erro": _from_cents(diff), "itens": itens})
-    return combos
+def _all_subset_sums(values_cents):
+    """
+    Retorna lista de (soma, mask) para metade de valores.
+    mask é bitmask relativo a essa metade.
+    """
+    sums = [(0, 0)]
+    for i, v in enumerate(values_cents):
+        cur = sums[:]  # snapshot
+        bit = 1 << i
+        for s, m in cur:
+            sums.append((s + v, m | bit))
+    return sums
 
 
-# ------------------ auditoria (agora com exclusão) ------------------
+def melhor_subset_por_baixo(valores: list[float], alvo: float, top_n: int = 44):
+    """
+    Encontra subconjunto cuja soma <= alvo e maximiza a soma (chega o mais perto por baixo).
+    Usa meet-in-the-middle com no máximo top_n itens (mais relevantes).
+    Retorna: (soma_escolhida, indices_escolhidos)
+    """
+    alvo_c = _to_cents(alvo)
+    if alvo_c <= 0 or not valores:
+        return 0.0, []
 
-def auditoria_por_grupo(
+    # pega os top_n maiores valores (melhora performance e qualidade)
+    idx_sorted = sorted(range(len(valores)), key=lambda i: valores[i], reverse=True)[:top_n]
+    vals = [valores[i] for i in idx_sorted]
+    vals_c = [_to_cents(v) for v in vals]
+
+    mid = len(vals_c) // 2
+    left = vals_c[:mid]
+    right = vals_c[mid:]
+
+    L = _all_subset_sums(left)
+    R = _all_subset_sums(right)
+
+    # ordenar R por soma para binary search
+    R.sort(key=lambda x: x[0])
+    R_sums = [x[0] for x in R]
+
+    best_sum = 0
+    best_mask_L = 0
+    best_mask_R = 0
+
+    for sL, mL in L:
+        if sL > alvo_c:
+            continue
+        rest = alvo_c - sL
+        pos = bisect.bisect_right(R_sums, rest) - 1
+        if pos >= 0:
+            sR, mR = R[pos]
+            total = sL + sR
+            if total > best_sum:
+                best_sum = total
+                best_mask_L = mL
+                best_mask_R = mR
+
+    # decodifica máscaras para índices originais
+    chosen_local = []
+    for i in range(mid):
+        if best_mask_L & (1 << i):
+            chosen_local.append(i)
+    for i in range(len(right)):
+        if best_mask_R & (1 << i):
+            chosen_local.append(mid + i)
+
+    chosen_original = [idx_sorted[i] for i in chosen_local]
+    return _from_cents(best_sum), chosen_original
+
+
+# ------------------ Auditoria por Exclusão + Qualidade ------------------
+
+def auditoria_por_exclusao_com_aproximacao(
     df: pd.DataFrame,
-    base_calc: dict,
     base_oficial: dict | None,
-    totais_proventos_pdf: dict | None = None,
+    totais_proventos: dict,
+    grupo: str = "ativos",
+    top_n_subset: int = 44,
 ):
     """
-    Retorna:
-      - resumo (DataFrame)
-      - candidatos (dict)
-      - combos (dict)
-      - descontos_classificados (DataFrame)
-      - blocos (dict) com somatórios de FORA/NEUTRA e base_por_exclusao
+    Para 1 grupo (ativos/desligados/total):
+      base_exclusao = total_proventos - fora - neutra
+      gap = base_oficial - base_exclusao
+      se gap>0: escolhe subconjunto de FORA/NEUTRA para "devolver" (entrar) por baixo
     """
-
-    # 1) Totais de proventos (se você não passar o total do PDF, usamos o extraído)
     prov = df[df["tipo"] == "PROVENTO"].copy()
-    tot_prov_extraido = {
-        "ativos": float(prov["ativos"].fillna(0).sum()),
-        "desligados": float(prov["desligados"].fillna(0).sum()),
-        "total": float(prov["total"].fillna(0).sum()),
-    }
-
-    tot_prov = totais_proventos_pdf or tot_prov_extraido
-
-    # 2) Soma de proventos FORA/NEUTRA (isso é o “o que não incide”, na prática)
     prov_fora = df[(df["tipo"] == "PROVENTO") & (df["classificacao"] == "FORA")].copy()
-    prov_neutra = df[(df["tipo"] == "PROVENTO") & (df["classificacao"] == "NEUTRA")].copy()
-
-    soma_fora = {
-        "ativos": float(prov_fora["ativos"].fillna(0).sum()),
-        "desligados": float(prov_fora["desligados"].fillna(0).sum()),
-        "total": float(prov_fora["total"].fillna(0).sum()),
-    }
-    soma_neutra = {
-        "ativos": float(prov_neutra["ativos"].fillna(0).sum()),
-        "desligados": float(prov_neutra["desligados"].fillna(0).sum()),
-        "total": float(prov_neutra["total"].fillna(0).sum()),
-    }
-
-    # 3) BASE POR EXCLUSÃO (a nova estrela)
-    base_exclusao = {
-        "ativos": float(tot_prov["ativos"] - soma_fora["ativos"] - soma_neutra["ativos"]),
-        "desligados": float(tot_prov["desligados"] - soma_fora["desligados"] - soma_neutra["desligados"]),
-        "total": float(tot_prov["total"] - soma_fora["total"] - soma_neutra["total"]),
-    }
-
-    # 4) Descontos classificados (mantemos pra auditoria)
-    descontos_classificados = identificar_ajustes_negativos(df)
-    aj = descontos_classificados[descontos_classificados["eh_ajuste_negativo"]].copy()
-
-    descontos_reduzem = {
-        "ativos": float(aj["ativos"].fillna(0).sum()) if not aj.empty else 0.0,
-        "desligados": float(aj["desligados"].fillna(0).sum()) if not aj.empty else 0.0,
-        "total": float(aj["total"].fillna(0).sum()) if not aj.empty else 0.0,
-    }
-
-    # 5) Monta resumo comparando 2 reconstruções:
-    #    - Base por Inclusão (ENTRA - descontos_reduzem)
-    #    - Base por Exclusão (TOTAL_PROV - FORA - NEUTRA)
-    base_inclusao = {
-        "ativos": float(base_calc.get("ativos", 0.0) - descontos_reduzem["ativos"]),
-        "desligados": float(base_calc.get("desligados", 0.0) - descontos_reduzem["desligados"]),
-        "total": float(base_calc.get("total", 0.0) - descontos_reduzem["total"]),
-    }
-
-    linhas = []
-    for g in ["ativos", "desligados", "total"]:
-        of = None if not base_oficial else float(base_oficial.get(g, 0.0))
-        linhas.append({
-            "grupo": g.upper(),
-            "tot_proventos_pdf_ou_extraido": float(tot_prov[g]),
-            "fora_proventos": soma_fora[g],
-            "neutra_proventos": soma_neutra[g],
-            "base_por_exclusao": base_exclusao[g],
-            "base_calc_ENTRA": float(base_calc.get(g, 0.0)),
-            "descontos_reduzem_base": descontos_reduzem[g],
-            "base_por_inclusao": base_inclusao[g],
-            "base_oficial_pdf": of,
-            "dif_exclusao_vs_oficial": None if of is None else float(base_exclusao[g] - of),
-            "dif_inclusao_vs_oficial": None if of is None else float(base_inclusao[g] - of),
-        })
-
-    if base_oficial and "afastados" in base_oficial:
-        linhas.append({
-            "grupo": "AFASTADOS",
-            "tot_proventos_pdf_ou_extraido": None,
-            "fora_proventos": None,
-            "neutra_proventos": None,
-            "base_por_exclusao": None,
-            "base_calc_ENTRA": None,
-            "descontos_reduzem_base": None,
-            "base_por_inclusao": None,
-            "base_oficial_pdf": float(base_oficial["afastados"]),
-            "dif_exclusao_vs_oficial": None,
-            "dif_inclusao_vs_oficial": None,
-        })
-
-    resumo = pd.DataFrame(linhas)
-
-    # 6) Candidatos e combos passam a mirar o "gap" da exclusão (quando a exclusão não bater)
-    candidatos = {}
-    combos = {}
-
-    # se base_exclusao estiver MENOR que oficial, é porque algo classificado como FORA/NEUTRA na verdade entra
-    # então candidatos = (FORA/NEUTRA) por valor
+    prov_neu = df[(df["tipo"] == "PROVENTO") & (df["classificacao"] == "NEUTRA")].copy()
     prov_fn = df[(df["tipo"] == "PROVENTO") & (df["classificacao"].isin(["FORA", "NEUTRA"]))].copy()
 
-    for g in ["ativos", "desligados", "total"]:
-        linha = resumo[resumo["grupo"] == g.upper()].iloc[0]
-        of = linha["base_oficial_pdf"]
-        if pd.isna(of):
-            candidatos[g] = prov_fn.head(0)
-            combos[g] = []
-            continue
+    total = float(totais_proventos.get(grupo, 0.0))
+    soma_fora = float(prov_fora[grupo].fillna(0).sum())
+    soma_neu = float(prov_neu[grupo].fillna(0).sum())
+    base_exclusao = float(total - soma_fora - soma_neu)
 
-        gap = float(of - base_exclusao[g])  # quanto falta pra exclusão bater
-        cand = prov_fn.copy()
-        cand["valor_alvo"] = cand[g].fillna(0.0).astype(float)
-        cand = cand[cand["valor_alvo"] > 0].copy()
-        cand = cand.sort_values("valor_alvo", ascending=False)
-        candidatos[g] = cand[["rubrica", "tipo", "classificacao", "valor_alvo"]].copy()
+    of = None if not base_oficial else float(base_oficial.get(grupo, 0.0))
+    if of is None:
+        return {
+            "base_exclusao": base_exclusao,
+            "gap": None,
+            "base_aprox_por_baixo": None,
+            "erro_por_baixo": None,
+            "rubricas_devolvidas": pd.DataFrame()
+        }
 
-        if gap > 0:
-            combos[g] = _sugerir_combinacoes_por_valor(candidatos[g], gap)
-        else:
-            combos[g] = []
+    gap = float(of - base_exclusao)
 
-    blocos = {
-        "tot_proventos_usado": tot_prov,
-        "tot_proventos_extraido": tot_prov_extraido,
-        "soma_fora": soma_fora,
-        "soma_neutra": soma_neutra,
-        "base_por_exclusao": base_exclusao,
-        "base_por_inclusao": base_inclusao,
-        "descontos_reduzem": descontos_reduzem,
+    if gap <= 0:
+        # já está igual/maior; por baixo é a própria base_exclusao (não precisa devolver nada)
+        return {
+            "base_exclusao": base_exclusao,
+            "gap": gap,
+            "base_aprox_por_baixo": base_exclusao,
+            "erro_por_baixo": float(of - base_exclusao),  # pode ser <=0
+            "rubricas_devolvidas": pd.DataFrame()
+        }
+
+    # candidatos: FORA/NEUTRA com valor positivo
+    cand = prov_fn.copy()
+    cand["valor_alvo"] = cand[grupo].fillna(0.0).astype(float)
+    cand = cand[cand["valor_alvo"] > 0].copy()
+    cand = cand.sort_values("valor_alvo", ascending=False).reset_index(drop=True)
+
+    valores = cand["valor_alvo"].tolist()
+    soma_escolhida, idxs = melhor_subset_por_baixo(valores, gap, top_n=top_n_subset)
+
+    devolvidas = cand.loc[idxs, ["rubrica", "classificacao", "valor_alvo"]].copy() if idxs else pd.DataFrame()
+    base_aprox = float(base_exclusao + soma_escolhida)
+    erro = float(of - base_aprox)  # >=0 por construção (por baixo)
+
+    return {
+        "base_exclusao": base_exclusao,
+        "gap": gap,
+        "base_aprox_por_baixo": base_aprox,
+        "erro_por_baixo": erro,
+        "rubricas_devolvidas": devolvidas.sort_values("valor_alvo", ascending=False) if not devolvidas.empty else devolvidas
     }
-
-    return resumo, candidatos, combos, descontos_classificados, blocos
-
