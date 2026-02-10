@@ -28,14 +28,10 @@ def calcular_base(rubricas, base_oficial):
         axis=1
     )
 
-    # 🔴 ATENÇÃO: base calculada vira apenas APOIO
     base_calc = rubricas.loc[
         rubricas["classificacao"] == "ENTRA", "valor"
     ].sum()
 
-    # diferença agora é apenas INDICATIVA
-    diff = None
-    if base_oficial:
-        diff = base_calc - base_oficial
+    diff = base_calc - base_oficial if base_oficial else None
 
     return base_calc, diff, rubricas

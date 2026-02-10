@@ -4,7 +4,8 @@
     "hora extra",
     "adicional",
     "comissão",
-    "gratificação"
+    "gratificação",
+    "abono"
   ],
   "NAO_ENTRA_BASE": [
     "vale transporte",
@@ -12,6 +13,7 @@
     "vale refeição",
     "plano de saúde",
     "auxílio",
-    "indenização"
+    "indenização",
+    "via"
   ]
 }

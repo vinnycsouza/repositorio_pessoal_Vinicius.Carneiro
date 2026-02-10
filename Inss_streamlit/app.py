@@ -48,12 +48,45 @@ if arquivos:
             f"R$ {diff:,.2f}" if diff is not None else "-"
         )
 
-        # --- tabela ---
+        # --- tabela geral ---
         st.subheader("Rubricas identificadas")
         st.dataframe(
-            tabela.sort_values("classificacao"),
+            tabela.sort_values(["tipo", "classificacao"]),
             use_container_width=True
         )
+
+        # --- separação provento x desconto ---
+        st.subheader("Detalhamento por tipo")
+
+        tab1, tab2 = st.tabs(["🔵 Proventos", "🔴 Descontos"])
+
+        with tab1:
+            proventos = tabela[tabela["tipo"] == "PROVENTO"]
+            if proventos.empty:
+                st.info("Nenhum provento identificado")
+            else:
+                st.dataframe(
+                    proventos.sort_values("valor", ascending=False),
+                    use_container_width=True
+                )
+                st.metric(
+                    "Total de Proventos",
+                    f"R$ {proventos['valor'].sum():,.2f}"
+                )
+
+        with tab2:
+            descontos = tabela[tabela["tipo"] == "DESCONTO"]
+            if descontos.empty:
+                st.info("Nenhum desconto identificado")
+            else:
+                st.dataframe(
+                    descontos.sort_values("valor", ascending=False),
+                    use_container_width=True
+                )
+                st.metric(
+                    "Total de Descontos",
+                    f"R$ {descontos['valor'].sum():,.2f}"
+                )
 
         # --- exportar Excel ---
         buffer = io.BytesIO()

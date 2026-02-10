@@ -47,6 +47,9 @@ def extrair_rubricas(pdf_file):
 
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
+            largura = page.width
+            eixo = largura / 2
+
             words = page.extract_words(use_text_flow=True)
 
             linhas = {}
@@ -55,47 +58,54 @@ def extrair_rubricas(pdf_file):
                 linhas.setdefault(y, []).append(w)
 
             for itens in linhas.values():
-                itens = sorted(itens, key=lambda x: x["x0"])
-                texto_linha = " ".join(i["text"] for i in itens)
+                texto = " ".join(i["text"] for i in itens)
 
-                valores = []
+                lixo = [
+                    "cod", "provento", "desconto", "refer",
+                    "ativos", "desligados", "total",
+                    "base", "inss", "fgts", "líquido", "liquido"
+                ]
+                if any(p in texto.lower() for p in lixo):
+                    continue
+
+                valores_provento = []
+                valores_desconto = []
+
                 for i in itens:
                     if re.match(r"\d+[\.,]\d{2}", i["text"]):
                         valor = normalizar_valor(i["text"])
-                        if valor and valor > 10:
-                            valores.append((i["x0"], valor))
+                        if not valor or valor == 0:
+                            continue
 
-                if not valores:
+                        if i["x0"] < eixo:
+                            valores_provento.append(valor)
+                        else:
+                            valores_desconto.append(valor)
+
+                if valores_provento:
+                    valor = max(valores_provento)
+                    tipo = "PROVENTO"
+                elif valores_desconto:
+                    valor = max(valores_desconto)
+                    tipo = "DESCONTO"
+                else:
                     continue
 
-                valor_final = sorted(valores, key=lambda x: x[0])[-1][1]
+                descricao = re.sub(r"^\d+\s*", "", texto)
 
-                lixo = [
-                    "total",
-                    "base",
-                    "inss",
-                    "fgts",
-                    "líquido",
-                    "liquido",
-                    "salário contribuição",
-                    "salario contribuicao"
-                ]
+                for v in valores_provento + valores_desconto:
+                    descricao = descricao.replace(
+                        f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+                        ""
+                    )
 
-                if any(p in texto_linha.lower() for p in lixo):
+                descricao = descricao.strip()
+                if len(descricao) < 3:
                     continue
-
-                descricao = texto_linha.strip()
-                if len(descricao) < 5:
-                    continue
-
-                tipo = "DESCONTO" if any(
-                    p in descricao.lower()
-                    for p in ["inss", "irrf", "vale", "plano", "adiantamento"]
-                ) else "PROVENTO"
 
                 registros.append({
                     "rubrica": descricao,
-                    "valor": valor_final,
+                    "valor": valor,
                     "tipo": tipo
                 })
 
