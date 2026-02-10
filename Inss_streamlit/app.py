@@ -89,17 +89,39 @@ if arquivo:
         with tab4:
             st.markdown("### 🔎 Reconstrução e rastreio do que compõe a base")
 
-            resumo, candidatos, combos = auditoria_por_grupo(df, base_calc, base_of)
+            # ✅ agora retorna 4 coisas
+            resumo, candidatos, combos, descontos_classificados = auditoria_por_grupo(df, base_calc, base_of)
             st.dataframe(resumo, use_container_width=True)
 
-            st.markdown("### 🧩 Ajustes negativos detectados (descontos que podem reduzir remuneração)")
-            desc_aj = identificar_ajustes_negativos(df)
-            aj = desc_aj[(desc_aj["tipo"] == "DESCONTO") & (desc_aj["eh_ajuste_negativo"])].copy()
-            if aj.empty:
-                st.info("Nenhum desconto foi identificado como ajuste negativo pela heurística atual.")
-            else:
+            st.markdown("### 🧩 Descontos classificados (via auditor_config.json)")
+
+            # você pode usar o retornado do auditor (mais completo)
+            if descontos_classificados is None or descontos_classificados.empty:
+                # fallback (não deveria acontecer)
+                descontos_classificados = identificar_ajustes_negativos(df)
+
+            aj = descontos_classificados[descontos_classificados.get("eh_ajuste_negativo", False)].copy()
+            fin = descontos_classificados[descontos_classificados.get("eh_financeiro", False)].copy()
+            neu = descontos_classificados[descontos_classificados.get("eh_neutro", False)].copy()
+
+            cc1, cc2, cc3 = st.columns(3)
+            cc1.metric("🔻 Reduzem base", f"{len(aj)}")
+            cc2.metric("💳 Financeiros", f"{len(fin)}")
+            cc3.metric("❔ Neutros", f"{len(neu)}")
+
+            if not aj.empty:
+                st.markdown("#### 🔻 Reduzem base (subtraídos da base reconstruída)")
                 st.dataframe(
                     aj.sort_values("total", ascending=False)[["rubrica", "ativos", "desligados", "total"]],
+                    use_container_width=True
+                )
+            else:
+                st.info("Nenhum desconto foi classificado como 'reduz base'. Ajuste o auditor_config.json se necessário.")
+
+            if not neu.empty:
+                st.markdown("#### ❔ Descontos neutros (não classificados)")
+                st.dataframe(
+                    neu.sort_values("total", ascending=False)[["rubrica", "ativos", "desligados", "total"]].head(30),
                     use_container_width=True
                 )
 
@@ -107,7 +129,7 @@ if arquivo:
             st.write(
                 "O **residual não explicado** é a parte da **base oficial** que não foi justificada por:\n"
                 "- proventos classificados como **ENTRA**, e\n"
-                "- ajustes negativos detectados (quando aplicável).\n\n"
+                "- descontos classificados como **reduzem base** (quando aplicável).\n\n"
                 "Esse residual é onde normalmente aparecem verbas que **podem estar compondo base indevidamente** "
                 "ou rubricas que hoje estão **NEUTRAS/FORA** mas entram na lógica do sistema."
             )
@@ -115,17 +137,18 @@ if arquivo:
             colA, colB = st.columns(2)
             with colA:
                 st.markdown("#### Candidatas por impacto (ATIVOS)")
-                cand_a = candidatos["ativos"]
+                cand_a = candidatos.get("ativos", pd.DataFrame())
                 st.dataframe(cand_a.head(30), use_container_width=True)
 
             with colB:
                 st.markdown("#### Combinações que podem explicar o residual (ATIVOS)")
                 linha_a = resumo[resumo["grupo"] == "ATIVOS"].iloc[0]
                 residual_a = linha_a["residual_nao_explicado"]
+
                 if pd.isna(residual_a) or residual_a <= 0:
                     st.info("Não há residual positivo em ATIVOS para 'explicar' (ou base oficial não encontrada).")
                 else:
-                    combs = combos["ativos"]
+                    combs = combos.get("ativos", [])
                     if not combs:
                         st.warning(
                             "Não encontrei combinação exata com as maiores rubricas FORA/NEUTRA. "
@@ -157,12 +180,13 @@ if arquivo:
             if base_of:
                 pd.DataFrame([base_of]).to_excel(writer, index=False, sheet_name="Base_Oficial")
 
-            # Auditoria
-            resumo, candidatos, combos = auditoria_por_grupo(df, base_calc, base_of)
+            # Auditoria (✅ agora com 4 retornos)
+            resumo, candidatos, combos, descontos_classificados = auditoria_por_grupo(df, base_calc, base_of)
+
             resumo.to_excel(writer, index=False, sheet_name="Auditoria_Resumo")
 
-            candidatos["ativos"].head(200).to_excel(writer, index=False, sheet_name="Candidatas_Ativos")
-            candidatos["desligados"].head(200).to_excel(writer, index=False, sheet_name="Candidatas_Desligados")
+            candidatos.get("ativos", pd.DataFrame()).head(200).to_excel(writer, index=False, sheet_name="Candidatas_Ativos")
+            candidatos.get("desligados", pd.DataFrame()).head(200).to_excel(writer, index=False, sheet_name="Candidatas_Desligados")
 
             # Combos achatados (Ativos)
             linhas_combo = []
@@ -179,9 +203,11 @@ if arquivo:
                     })
             pd.DataFrame(linhas_combo).to_excel(writer, index=False, sheet_name="Combos_Ativos")
 
-            # Ajustes negativos
-            desc_aj = identificar_ajustes_negativos(df)
-            desc_aj.to_excel(writer, index=False, sheet_name="Descontos_Ajustes")
+            # Descontos classificados (novo)
+            if descontos_classificados is None or descontos_classificados.empty:
+                descontos_classificados = identificar_ajustes_negativos(df)
+
+            descontos_classificados.to_excel(writer, index=False, sheet_name="Descontos_Classificados")
 
         buffer.seek(0)
 
