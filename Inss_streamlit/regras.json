@@ -1,19 +1,26 @@
 {
   "ENTRA_BASE": [
-    "salário",
+    "salario",
+    "venc",
+    "mensal",
+    "ferias",
+    "gozo",
+    "1/3",
     "hora extra",
     "adicional",
-    "comissão",
-    "gratificação",
-    "abono"
+    "comissao",
+    "grat"
   ],
   "NAO_ENTRA_BASE": [
-    "vale transporte",
-    "vale alimentação",
-    "vale refeição",
-    "plano de saúde",
-    "auxílio",
-    "indenização",
-    "via"
+    "vale",
+    "transporte",
+    "aliment",
+    "refei",
+    "plano",
+    "assist",
+    "inden",
+    "reemb",
+    "diar",
+    "multa"
   ]
 }
