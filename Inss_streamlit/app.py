@@ -4,10 +4,27 @@ import pdfplumber
 import pandas as pd
 import streamlit as st
 
-from competencia import extrair_competencia
 from extrator_pdf import extrair_eventos_page, extrair_base_empresa_page, pagina_eh_de_bases
-from calculo_base import calcular_base_por_grupo  # pode continuar existindo
+from calculo_base import calcular_base_por_grupo  # mantém sua classificação FORA/NEUTRA/ENTRA
 from auditor_base import auditoria_por_exclusao_com_aproximacao
+
+
+# ----------------- util -----------------
+
+MESES = {
+    "jan": "01", "janeiro": "01",
+    "fev": "02", "fevereiro": "02",
+    "mar": "03", "marco": "03", "março": "03",
+    "abr": "04", "abril": "04",
+    "mai": "05", "maio": "05",
+    "jun": "06", "junho": "06",
+    "jul": "07", "julho": "07",
+    "ago": "08", "agosto": "08",
+    "set": "09", "setembro": "09",
+    "out": "10", "outubro": "10",
+    "nov": "11", "novembro": "11",
+    "dez": "12", "dezembro": "12",
+}
 
 
 def normalizar_valor_br(txt: str):
@@ -17,11 +34,51 @@ def normalizar_valor_br(txt: str):
         return None
 
 
-def extrair_totais_proventos_pdf(pdf) -> dict | None:
+def extrair_competencia_robusta(page, competencia_atual=None):
     """
-    Busca em qualquer página a linha:
+    Extrai competência do texto da página.
+    Aceita:
+      - 01/2021, 1/2021
+      - jan/21, fev/21...
+      - janeiro 2021
+    Se não achar, retorna a última competência conhecida (competencia_atual).
+    """
+    txt = (page.extract_text() or "").lower()
+
+    # 1) numérico: 01/2021
+    m = re.search(r"\b(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b", txt)
+    if m:
+        mm = m.group(1).zfill(2)
+        aa = m.group(2)
+        return f"{mm}/{aa}"
+
+    # 2) curto: jan/21
+    m = re.search(r"\b([a-zç]{3,9})\s*/\s*(\d{2})\b", txt)
+    if m:
+        mes_txt = m.group(1).replace("ç", "c")
+        ano2 = m.group(2)
+        if mes_txt in MESES:
+            mm = MESES[mes_txt]
+            aa = f"20{ano2}"
+            return f"{mm}/{aa}"
+
+    # 3) extenso: janeiro 2021
+    m = re.search(r"\b([a-zç]{3,9})\s+(20\d{2})\b", txt)
+    if m:
+        mes_txt = m.group(1).replace("ç", "c")
+        aa = m.group(2)
+        if mes_txt in MESES:
+            mm = MESES[mes_txt]
+            return f"{mm}/{aa}"
+
+    return competencia_atual
+
+
+def extrair_totais_proventos_page(page) -> dict | None:
+    """
+    Extrai TOTAIS PROVENTOS da página (não do PDF inteiro).
+    Padrão típico:
       TOTAIS PROVENTOS 1.991.989,74 308.209,44 2.300.199,18
-    Retorna dict ou None.
     """
     padrao = re.compile(
         r"totais\s+proventos.*?(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
@@ -29,17 +86,22 @@ def extrair_totais_proventos_pdf(pdf) -> dict | None:
         r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
         re.IGNORECASE
     )
-    for page in pdf.pages:
-        txt = page.extract_text() or ""
-        m = padrao.search(txt)
-        if m:
-            a = normalizar_valor_br(m.group(1))
-            d = normalizar_valor_br(m.group(2))
-            t = normalizar_valor_br(m.group(3))
-            if a is not None and d is not None and t is not None:
-                return {"ativos": a, "desligados": d, "total": t}
-    return None
 
+    txt = page.extract_text() or ""
+    m = padrao.search(txt)
+    if not m:
+        return None
+
+    a = normalizar_valor_br(m.group(1))
+    d = normalizar_valor_br(m.group(2))
+    t = normalizar_valor_br(m.group(3))
+    if a is None or d is None or t is None:
+        return None
+
+    return {"ativos": a, "desligados": d, "total": t}
+
+
+# ----------------- UI -----------------
 
 st.set_page_config(layout="wide")
 st.title("🧾 Auditor INSS — Lote (60+ PDFs) | Qualidade + Aproximação por Baixo")
@@ -55,23 +117,28 @@ if arquivos:
 
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
-            totais_pdf_global = extrair_totais_proventos_pdf(pdf)
-
             dados = {}
             comp_atual = None
 
             for page in pdf.pages:
-                comp_atual = extrair_competencia(page, comp_atual)
+                comp_atual = extrair_competencia_robusta(page, comp_atual)
                 if not comp_atual:
                     continue
 
-                dados.setdefault(comp_atual, {"eventos": [], "base_empresa": None})
+                dados.setdefault(comp_atual, {"eventos": [], "base_empresa": None, "totais_proventos_pdf": None})
 
+                # captura totalizador por competência, se aparecer nessa página
+                tot = extrair_totais_proventos_page(page)
+                if tot and dados[comp_atual]["totais_proventos_pdf"] is None:
+                    dados[comp_atual]["totais_proventos_pdf"] = tot
+
+                # base oficial (páginas de bases)
                 if pagina_eh_de_bases(page):
                     base = extrair_base_empresa_page(page)
                     if base and dados[comp_atual]["base_empresa"] is None:
                         dados[comp_atual]["base_empresa"] = base
 
+                # eventos (páginas de eventos)
                 dados[comp_atual]["eventos"].extend(extrair_eventos_page(page))
 
         # processa por competência
@@ -81,38 +148,42 @@ if arquivos:
                 linhas_resumo.append({
                     "arquivo": arquivo.name,
                     "competencia": comp,
+                    "grupo": "",
                     "status": "SEM_EVENTOS",
                 })
                 continue
 
+            # evita duplicidade por PDF mesclado/continuação
             df = df.drop_duplicates(subset=["rubrica", "tipo", "ativos", "desligados", "total"]).reset_index(drop=True)
 
-            # mantém seu pipeline de classificação (ENTRA/FORA/NEUTRA) se calcular_base_por_grupo já faz isso
-            # (mesmo que a exclusão não use ENTRA diretamente, ela precisa de FORA/NEUTRA bem marcados)
+            # classifica rubricas (FORA/NEUTRA/ENTRA) no seu pipeline
             try:
                 _, df = calcular_base_por_grupo(df)
             except Exception:
-                # se falhar, pelo menos não quebra lote
+                # se der erro de regra, ainda dá pra rodar lote; mas a exclusão perde qualidade
                 pass
 
             base_of = info["base_empresa"]
 
-            # Totais proventos usados
+            # Totais de proventos: extraído do quadro (fallback)
             prov = df[df["tipo"] == "PROVENTO"].copy()
             tot_extraido = {
                 "ativos": float(prov["ativos"].fillna(0).sum()),
                 "desligados": float(prov["desligados"].fillna(0).sum()),
                 "total": float(prov["total"].fillna(0).sum()),
             }
-            totais_usados = totais_pdf_global if totais_pdf_global else tot_extraido
 
-            totalizador_encontrado = totais_pdf_global is not None
+            # Totais do PDF (por competência)
+            tot_pdf_comp = info.get("totais_proventos_pdf")
+            totais_usados = tot_pdf_comp if tot_pdf_comp else tot_extraido
+
+            totalizador_encontrado = tot_pdf_comp is not None
             bate_totalizador = None
             if totalizador_encontrado:
                 bate_totalizador = (
-                    abs(totais_usados["ativos"] - tot_extraido["ativos"]) <= tol_totalizador and
-                    abs(totais_usados["desligados"] - tot_extraido["desligados"]) <= tol_totalizador and
-                    abs(totais_usados["total"] - tot_extraido["total"]) <= tol_totalizador
+                    abs(tot_pdf_comp["ativos"] - tot_extraido["ativos"]) <= tol_totalizador and
+                    abs(tot_pdf_comp["desligados"] - tot_extraido["desligados"]) <= tol_totalizador and
+                    abs(tot_pdf_comp["total"] - tot_extraido["total"]) <= tol_totalizador
                 )
 
             # Auditoria por grupo + aproximação
@@ -130,11 +201,7 @@ if arquivos:
                 base_aprox = res["base_aprox_por_baixo"]
                 erro = res["erro_por_baixo"]
 
-                # status de qualidade:
-                # - se não tem base oficial: INCOMPLETO_BASE
-                # - se totalizador não bate: FALHA_EXTRACAO
-                # - se erro_aprox dentro da tol: OK_APROX
-                # - senão: ATENCAO
+                # status de qualidade
                 if not base_of:
                     status = "INCOMPLETO_BASE"
                 elif totalizador_encontrado and bate_totalizador is False:
