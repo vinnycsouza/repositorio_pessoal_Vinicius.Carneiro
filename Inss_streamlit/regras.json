@@ -1,0 +1,27 @@
+{
+  "entra_base": [
+    "salari",
+    "hora",
+    "adicional",
+    "insalubr",
+    "periculos",
+    "gratific",
+    "dsr"
+  ],
+  "reduz_base": [
+    "falta",
+    "suspens",
+    "licenca",
+    "afast"
+  ],
+  "ignorar": [
+    "fgts",
+    "vale",
+    "refeicao",
+    "aliment",
+    "plano",
+    "pensao",
+    "emprest",
+    "multa"
+  ]
+}
