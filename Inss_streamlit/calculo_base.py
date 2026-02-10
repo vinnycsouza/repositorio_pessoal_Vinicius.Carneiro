@@ -12,7 +12,7 @@ def calcular_base(rubricas, base_oficial):
     def classificar(rubrica, tipo):
         r = rubrica.lower()
 
-        if tipo == "DESCONTO":
+        if tipo != "PROVENTO":
             return "FORA"
 
         if any(p in r for p in regras["NAO_ENTRA_BASE"]):
@@ -28,10 +28,14 @@ def calcular_base(rubricas, base_oficial):
         axis=1
     )
 
+    # 🔴 ATENÇÃO: base calculada vira apenas APOIO
     base_calc = rubricas.loc[
         rubricas["classificacao"] == "ENTRA", "valor"
     ].sum()
 
-    diff = base_calc - base_oficial if base_oficial else None
+    # diferença agora é apenas INDICATIVA
+    diff = None
+    if base_oficial:
+        diff = base_calc - base_oficial
 
     return base_calc, diff, rubricas

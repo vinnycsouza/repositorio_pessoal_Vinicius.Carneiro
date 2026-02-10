@@ -39,34 +39,35 @@ if arquivos:
         )
 
         c2.metric(
-            "Base Calculada",
-            f"R$ {base_calc:,.2f}"
+    "Soma das Rubricas Identificadas",
+    f"R$ {base_calc:,.2f}"
         )
 
-        c3.metric(
-            "Diferença",
-            f"R$ {diff:,.2f}" if diff is not None else "-"
+c3.metric(
+    "Diferença p/ Base Oficial (indicativa)",
+    f"R$ {diff:,.2f}" if diff is not None else "-"
         )
 
         # --- tabela ---
-        st.subheader("Rubricas identificadas")
-        st.dataframe(
+st.subheader("Rubricas identificadas")
+      
+st.dataframe(
             tabela.sort_values("classificacao"),
             use_container_width=True
         )
 
         # --- exportar Excel ---
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+buffer = io.BytesIO()
+with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
             tabela.to_excel(
                 writer,
                 index=False,
                 sheet_name="Rubricas"
             )
 
-        buffer.seek(0)
+buffer.seek(0)
 
-        st.download_button(
+st.download_button(
             label="📥 Baixar Excel – Rubricas da Base INSS",
             data=buffer,
             file_name=f"rubricas_base_inss_{arquivo.name}.xlsx",
