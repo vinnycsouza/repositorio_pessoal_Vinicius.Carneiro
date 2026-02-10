@@ -2,14 +2,6 @@ import pdfplumber
 import re
 import pandas as pd
 
-PADROES_BASE = [
-    "salário contribuição empresa",
-    "salario contribuicao empresa",
-    "base inss empresa",
-    "contribuição empresa",
-    "contribuicao empresa"
-]
-
 
 def normalizar_valor(txt):
     try:
@@ -18,45 +10,51 @@ def normalizar_valor(txt):
         return None
 
 
-def extrair_base_oficial(pdf_file):
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            texto = page.extract_text() or ""
-            for linha in texto.split("\n"):
-                l = linha.lower()
-                if any(p in l for p in PADROES_BASE):
-                    valores = re.findall(r"\d+[\.,]\d{2}", linha)
-                    if valores:
-                        return normalizar_valor(valores[-1])
-    return None
-
-
 def extrair_rubricas(pdf_file):
     registros = []
 
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
-            tabelas = page.extract_tables()
-            for tabela in tabelas:
-                for linha in tabela:
-                    if not linha or len(linha) < 2:
-                        continue
+            texto = page.extract_text() or ""
+            linhas = texto.split("\n")
 
-                    texto_linha = " ".join(str(c) for c in linha if c)
-                    valores = re.findall(r"\d+[\.,]\d{2}", texto_linha)
+            for linha in linhas:
+                linha_limpa = linha.strip()
 
-                    if not valores:
-                        continue
+                # precisa ter número monetário
+                valores = re.findall(r"\d+[\.,]\d{2}", linha_limpa)
+                if not valores:
+                    continue
 
-                    valor = normalizar_valor(valores[-1])
-                    if valor is None:
-                        continue
+                valor = normalizar_valor(valores[-1])
+                if valor is None:
+                    continue
 
-                    descricao = linha[1] if len(linha) > 1 else texto_linha
+                # ignora totais e resumos
+                lixo = [
+                    "total",
+                    "base",
+                    "inss",
+                    "fgts",
+                    "líquido",
+                    "liquido",
+                    "salário contribuição",
+                    "salario contribuicao"
+                ]
 
-                    registros.append({
-                        "rubrica": str(descricao).strip(),
-                        "valor": valor
-                    })
+                if any(p in linha_limpa.lower() for p in lixo):
+                    continue
+
+                # remove o valor da linha para sobrar a descrição
+                descricao = linha_limpa.replace(valores[-1], "").strip()
+
+                # descrição muito curta não é rubrica
+                if len(descricao) < 5:
+                    continue
+
+                registros.append({
+                    "rubrica": descricao,
+                    "valor": valor
+                })
 
     return pd.DataFrame(registros)
