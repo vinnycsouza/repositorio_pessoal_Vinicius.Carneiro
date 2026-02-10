@@ -1,8 +1,9 @@
 import streamlit as st
+import pandas as pd
+import io
+
 from extrator_pdf import extrair_base_oficial, extrair_rubricas
 from calculo_base import calcular_base
-import pandas as pd
-
 
 st.set_page_config(layout="wide")
 st.title("📊 Analisador de Base INSS Patronal")
@@ -18,6 +19,7 @@ if arquivos:
         st.divider()
         st.subheader(f"📄 {arquivo.name}")
 
+        # --- extrações ---
         base_oficial = extrair_base_oficial(arquivo)
         rubricas = extrair_rubricas(arquivo)
 
@@ -25,8 +27,10 @@ if arquivos:
             st.error("Nenhuma rubrica encontrada no PDF")
             continue
 
+        # --- cálculo ---
         base_calc, diff, tabela = calcular_base(rubricas, base_oficial)
 
+        # --- métricas ---
         c1, c2, c3 = st.columns(3)
 
         c1.metric(
@@ -44,27 +48,28 @@ if arquivos:
             f"R$ {diff:,.2f}" if diff is not None else "-"
         )
 
+        # --- tabela na tela ---
+        st.subheader("Rubricas identificadas")
         st.dataframe(
             tabela.sort_values("classificacao"),
             use_container_width=True
         )
-import io
 
-# cria arquivo Excel em memória
-buffer = io.BytesIO()
+        # --- exportar Excel ---
+        buffer = io.BytesIO()
 
-with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-    tabela.to_excel(
-        writer,
-        index=False,
-        sheet_name="Rubricas"
-    )
+        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+            tabela.to_excel(
+                writer,
+                index=False,
+                sheet_name="Rubricas"
+            )
 
-buffer.seek(0)
+        buffer.seek(0)
 
-st.download_button(
-    label="📥 Baixar Excel – Rubricas da Base INSS",
-    data=buffer,
-    file_name=f"rubricas_base_inss_{arquivo.name}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+        st.download_button(
+            label="📥 Baixar Excel – Rubricas da Base INSS",
+            data=buffer,
+            file_name=f"rubricas_base_inss_{arquivo.name}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
