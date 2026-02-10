@@ -71,13 +71,9 @@ def identificar_ajustes_negativos(df: pd.DataFrame) -> pd.DataFrame:
 # ------------------ Aproximação do GAP "por baixo" ------------------
 
 def _all_subset_sums(values_cents):
-    """
-    Retorna lista de (soma, mask) para metade de valores.
-    mask é bitmask relativo a essa metade.
-    """
     sums = [(0, 0)]
     for i, v in enumerate(values_cents):
-        cur = sums[:]  # snapshot
+        cur = sums[:]
         bit = 1 << i
         for s, m in cur:
             sums.append((s + v, m | bit))
@@ -86,15 +82,13 @@ def _all_subset_sums(values_cents):
 
 def melhor_subset_por_baixo(valores: list[float], alvo: float, top_n: int = 44):
     """
-    Encontra subconjunto cuja soma <= alvo e maximiza a soma (chega o mais perto por baixo).
-    Usa meet-in-the-middle com no máximo top_n itens (mais relevantes).
-    Retorna: (soma_escolhida, indices_escolhidos)
+    Encontra subconjunto com soma <= alvo que maximiza a soma.
+    Retorna (soma_escolhida, indices_escolhidos).
     """
     alvo_c = _to_cents(alvo)
     if alvo_c <= 0 or not valores:
         return 0.0, []
 
-    # pega os top_n maiores valores (melhora performance e qualidade)
     idx_sorted = sorted(range(len(valores)), key=lambda i: valores[i], reverse=True)[:top_n]
     vals = [valores[i] for i in idx_sorted]
     vals_c = [_to_cents(v) for v in vals]
@@ -106,7 +100,6 @@ def melhor_subset_por_baixo(valores: list[float], alvo: float, top_n: int = 44):
     L = _all_subset_sums(left)
     R = _all_subset_sums(right)
 
-    # ordenar R por soma para binary search
     R.sort(key=lambda x: x[0])
     R_sums = [x[0] for x in R]
 
@@ -127,7 +120,6 @@ def melhor_subset_por_baixo(valores: list[float], alvo: float, top_n: int = 44):
                 best_mask_L = mL
                 best_mask_R = mR
 
-    # decodifica máscaras para índices originais
     chosen_local = []
     for i in range(mid):
         if best_mask_L & (1 << i):
@@ -140,7 +132,7 @@ def melhor_subset_por_baixo(valores: list[float], alvo: float, top_n: int = 44):
     return _from_cents(best_sum), chosen_original
 
 
-# ------------------ Auditoria por Exclusão + Qualidade ------------------
+# ------------------ Auditoria por Exclusão + Aproximação ------------------
 
 def auditoria_por_exclusao_com_aproximacao(
     df: pd.DataFrame,
@@ -149,13 +141,6 @@ def auditoria_por_exclusao_com_aproximacao(
     grupo: str = "ativos",
     top_n_subset: int = 44,
 ):
-    """
-    Para 1 grupo (ativos/desligados/total):
-      base_exclusao = total_proventos - fora - neutra
-      gap = base_oficial - base_exclusao
-      se gap>0: escolhe subconjunto de FORA/NEUTRA para "devolver" (entrar) por baixo
-    """
-    prov = df[df["tipo"] == "PROVENTO"].copy()
     prov_fora = df[(df["tipo"] == "PROVENTO") & (df["classificacao"] == "FORA")].copy()
     prov_neu = df[(df["tipo"] == "PROVENTO") & (df["classificacao"] == "NEUTRA")].copy()
     prov_fn = df[(df["tipo"] == "PROVENTO") & (df["classificacao"].isin(["FORA", "NEUTRA"]))].copy()
@@ -178,7 +163,6 @@ def auditoria_por_exclusao_com_aproximacao(
     gap = float(of - base_exclusao)
 
     if gap <= 0:
-        # já está igual/maior; por baixo é a própria base_exclusao (não precisa devolver nada)
         return {
             "base_exclusao": base_exclusao,
             "gap": gap,
@@ -187,7 +171,6 @@ def auditoria_por_exclusao_com_aproximacao(
             "rubricas_devolvidas": pd.DataFrame()
         }
 
-    # candidatos: FORA/NEUTRA com valor positivo
     cand = prov_fn.copy()
     cand["valor_alvo"] = cand[grupo].fillna(0.0).astype(float)
     cand = cand[cand["valor_alvo"] > 0].copy()
@@ -198,7 +181,7 @@ def auditoria_por_exclusao_com_aproximacao(
 
     devolvidas = cand.loc[idxs, ["rubrica", "classificacao", "valor_alvo"]].copy() if idxs else pd.DataFrame()
     base_aprox = float(base_exclusao + soma_escolhida)
-    erro = float(of - base_aprox)  # >=0 por construção (por baixo)
+    erro = float(of - base_aprox)  # >=0 por construção
 
     return {
         "base_exclusao": base_exclusao,
