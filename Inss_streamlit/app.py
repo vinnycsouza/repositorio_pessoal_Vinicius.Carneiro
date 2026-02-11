@@ -149,7 +149,7 @@ def _safe_classificacao(df: pd.DataFrame) -> pd.DataFrame:
 def _mode_or_none(series: pd.Series):
     if series is None or series.empty:
         return None
-    vc = series.value_counts()
+    vc = series.value_counts(dropna=True)
     return vc.index[0] if len(vc) else None
 
 
@@ -304,10 +304,10 @@ if arquivos:
                     top_n_subset=44
                 )
 
-                base_exclusao = res["base_exclusao"]
-                gap = res["gap"]
-                base_aprox = res["base_aprox_por_baixo"]
-                erro = res["erro_por_baixo"]
+                base_exclusao = res.get("base_exclusao")
+                gap = res.get("gap")
+                base_aprox = res.get("base_aprox_por_baixo")
+                erro = res.get("erro_por_baixo")
 
                 # ---- Índice de incidência estrutural ----
                 proventos_grupo = float(totais_usados.get(grupo, 0.0) or 0.0)
@@ -361,8 +361,8 @@ if arquivos:
                     "status": status
                 })
 
-                devolvidas = res["rubricas_devolvidas"]
-                if devolvidas is not None and not devolvidas.empty:
+                devolvidas = res.get("rubricas_devolvidas")
+                if devolvidas is not None and isinstance(devolvidas, pd.DataFrame) and not devolvidas.empty:
                     for _, r in devolvidas.iterrows():
                         linhas_devolvidas.append({
                             "arquivo": arquivo.name,
@@ -418,7 +418,6 @@ if arquivos:
     # ---------------- RADAR ESTRUTURAL AUTOMÁTICO ----------------
     df_radar = pd.DataFrame()
     if radar_on and (not df_devolvidas.empty or not df_mapa.empty) and not df_resumo.empty:
-        # Denominador: quantas competências por grupo (ATIVOS/DESLIGADOS) existem no lote
         base_periodos = df_resumo[df_resumo["grupo"].isin(["ATIVOS", "DESLIGADOS"])].copy()
         base_periodos["chave_periodo"] = base_periodos["arquivo"].astype(str) + " | " + base_periodos["competencia"].astype(str)
         tot_periodos = base_periodos.groupby("grupo")["chave_periodo"].nunique().to_dict()
@@ -439,7 +438,7 @@ if arquivos:
             )
             agg_dev["total_periodos_no_lote"] = agg_dev["grupo"].map(tot_periodos).fillna(0).astype(int)
             agg_dev["recorrencia_pct"] = agg_dev.apply(
-                lambda r: (r["meses_devolvida"] / r["total_periodos_no_lote"] * 100.0) if r["total_periodos_no_lote"] > 0 else None,
+                lambda r: (r["meses_devolvida"] / r["total_periodos_no_lote"] * 100.0) if r["total_periodos_no_lote"] > 0 else pd.NA,
                 axis=1
             )
         else:
@@ -467,24 +466,26 @@ if arquivos:
                 "valor_medio", "classificacao_mapa_mais_comum"
             ])
 
-        # Merge
         df_radar = pd.merge(agg_dev, agg_mapa, on=["grupo", "rubrica"], how="outer")
 
-        # Score de risco estrutural (heurística):
-        # recorrência (%) * impacto_médio(%) => quanto é recorrente e relevante
         def _score(row):
             rec = row.get("recorrencia_pct")
             imp = row.get("impacto_medio_pct")
             if pd.isna(rec) or pd.isna(imp):
-                return None
+                return pd.NA
             return float(rec) * float(imp)
 
         df_radar["score_risco"] = df_radar.apply(_score, axis=1)
 
-        # ordenação default
+        # ordenação default (com colunas garantidas)
+        for c in ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]:
+            if c not in df_radar.columns:
+                df_radar[c] = pd.NA
+
         df_radar = df_radar.sort_values(
             ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"],
-            ascending=[False, False, False, False]
+            ascending=[False, False, False, False],
+            na_position="last"
         ).reset_index(drop=True)
 
     # ---------------- Abas do app ----------------
@@ -494,15 +495,19 @@ if arquivos:
 
     with tab_resumo:
         st.subheader("Filtro de status")
-        status_opts = sorted(df_resumo["status"].dropna().unique().tolist())
+        status_opts = sorted(df_resumo["status"].dropna().unique().tolist()) if not df_resumo.empty else []
         status_sel = st.multiselect("Mostrar status:", options=status_opts, default=status_opts, key="status_filter")
 
-        df_view = df_resumo[df_resumo["status"].isin(status_sel)].copy()
+        df_view = df_resumo[df_resumo["status"].isin(status_sel)].copy() if not df_resumo.empty else df_resumo
+
         st.subheader("📌 Resumo consolidado (ATIVOS/DESLIGADOS auditáveis + TOTAL_REF)")
-        st.dataframe(
-            df_view.sort_values(["competencia", "arquivo", "grupo"], ascending=True),
-            use_container_width=True
-        )
+        if df_view.empty:
+            st.info("Sem dados no resumo (verifique se as competências foram identificadas).")
+        else:
+            st.dataframe(
+                df_view.sort_values(["competencia", "arquivo", "grupo"], ascending=True),
+                use_container_width=True
+            )
 
     with tab_devolvidas:
         st.subheader("🧩 Rubricas devolvidas (NEUTRA/FORA que o algoritmo usou para reduzir o GAP)")
@@ -520,6 +525,7 @@ if arquivos:
             "Mostra o **peso (%)** das rubricas nos proventos por competência e grupo (ATIVOS/DESLIGADOS), "
             "usando a classificação ENTRA/NEUTRA/FORA."
         )
+
         if df_mapa.empty:
             st.info("Mapa vazio (sem dados de proventos).")
         else:
@@ -579,9 +585,18 @@ if arquivos:
                 topn = st.number_input("Top N (Radar)", min_value=10, max_value=500, value=50, step=10, key="rad_topn")
 
             v = df_radar[df_radar["grupo"] == g_sel].copy()
+
+            # garante colunas antes de filtros/ordenação (evita KeyError)
+            colunas_criticas = [
+                "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido",
+                "score_risco", "classificacao_mais_comum", "classificacao_mapa_mais_comum"
+            ]
+            for c in colunas_criticas:
+                if c not in v.columns:
+                    v[c] = pd.NA
+
             v = v[v["recorrencia_pct"].fillna(0) >= float(min_rec)]
 
-            # foco em rubricas FORA/NEUTRA (onde costuma existir crédito)
             foco = st.multiselect(
                 "Foco por classificação (origem devolvida / mapa)",
                 options=["FORA", "NEUTRA", "ENTRA", "SEM_CLASSIFICACAO"],
@@ -596,34 +611,44 @@ if arquivos:
 
             v = v[v.apply(_match_foco, axis=1)].copy()
 
-            v = v.sort_values(
-                ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"],
-                ascending=[False, False, False, False]
-            ).head(int(topn))
+            if v.empty:
+                st.info("Nenhuma rubrica atende aos filtros atuais (recorrência/foco).")
+            else:
+                # ordenação robusta (colunas garantidas)
+                colunas_ordem = ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]
+                for c in colunas_ordem:
+                    if c not in v.columns:
+                        v[c] = pd.NA
 
-            st.dataframe(
-                v[[
-                    "rubrica",
-                    "classificacao_mais_comum",
-                    "classificacao_mapa_mais_comum",
-                    "meses_devolvida",
-                    "total_periodos_no_lote",
-                    "recorrencia_pct",
-                    "impacto_medio_pct",
-                    "impacto_max_pct",
-                    "valor_total_devolvido",
-                    "valor_medio_devolvido",
-                    "score_risco",
-                ]],
-                use_container_width=True
-            )
+                v = v.sort_values(
+                    colunas_ordem,
+                    ascending=[False, False, False, False],
+                    na_position="last"
+                ).head(int(topn))
 
-            st.markdown("#### Interpretação rápida")
-            st.write(
-                "- **Recorrência alta + Impacto alto** → melhor candidato para revisão (potencial crédito recorrente).\n"
-                "- **Recorrência alta + Impacto baixo** → pode ser ruído distribuído (muitas rubricas pequenas).\n"
-                "- **Impacto alto + Recorrência baixa** → evento pontual (rescisão, férias coletivas etc.)."
-            )
+                st.dataframe(
+                    v[[
+                        "rubrica",
+                        "classificacao_mais_comum",
+                        "classificacao_mapa_mais_comum",
+                        "meses_devolvida",
+                        "total_periodos_no_lote",
+                        "recorrencia_pct",
+                        "impacto_medio_pct",
+                        "impacto_max_pct",
+                        "valor_total_devolvido",
+                        "valor_medio_devolvido",
+                        "score_risco",
+                    ]],
+                    use_container_width=True
+                )
+
+                st.markdown("#### Interpretação rápida")
+                st.write(
+                    "- **Recorrência alta + Impacto alto** → melhor candidato para revisão (potencial crédito recorrente).\n"
+                    "- **Recorrência alta + Impacto baixo** → pode ser ruído distribuído (muitas rubricas pequenas).\n"
+                    "- **Impacto alto + Recorrência baixa** → evento pontual (rescisão, férias coletivas etc.)."
+                )
 
     with tab_diag:
         st.subheader("🕵️ Diagnóstico de Extração")
@@ -635,7 +660,7 @@ if arquivos:
             falhas = df_resumo[
                 (df_resumo["status"] == "FALHA_EXTRACAO_TOTALIZADOR") &
                 (df_resumo["grupo"].isin(["ATIVOS", "DESLIGADOS"]))
-            ].copy()
+            ].copy() if not df_resumo.empty else pd.DataFrame()
 
             if falhas.empty:
                 st.success("Nenhuma competência com FALHA_EXTRACAO_TOTALIZADOR (ATIVOS/DESLIGADOS).")
