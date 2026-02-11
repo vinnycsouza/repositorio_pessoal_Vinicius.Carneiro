@@ -139,6 +139,13 @@ def diagnostico_extracao_proventos(df_eventos: pd.DataFrame, tol_inconsistencia:
     return df[cols_out].sort_values(["score_suspeita", "delta_total_vs_partes", "total"], ascending=[False, False, False])
 
 
+def _safe_classificacao(df: pd.DataFrame) -> pd.DataFrame:
+    if "classificacao" not in df.columns:
+        df["classificacao"] = "SEM_CLASSIFICACAO"
+    df["classificacao"] = df["classificacao"].fillna("SEM_CLASSIFICACAO").astype(str)
+    return df
+
+
 # ---------------- UI ----------------
 
 st.set_page_config(layout="wide")
@@ -158,16 +165,18 @@ with col_cfg4:
     modo_auditor_prof = st.checkbox("🕵️ Auditor Profissional", value=True)
 
 indice_incidencia_on = st.checkbox("📈 Índice de Incidência Estrutural", value=True)
+mapa_incidencia_on = st.checkbox("🧭 Mapa de Incidência (impacto %)", value=True)
 
 st.info(
-    "🧠 **Auditor Estrutural:** a auditoria é feita **somente por ATIVOS e DESLIGADOS** (Salário Contribuição Empresa). "
-    "O **TOTAL** é exibido apenas como referência e pode incluir AFASTADOS/ajustes internos."
+    "🧠 **Auditor Estrutural:** auditoria por **ATIVOS** e **DESLIGADOS** (Salário Contribuição Empresa). "
+    "O **TOTAL** é só referência (pode incluir AFASTADOS/ajustes internos)."
 )
 
 if arquivos:
     linhas_resumo = []
     linhas_devolvidas = []
     linhas_diagnostico = []
+    linhas_mapa = []  # <<<<<< mapa de incidência consolidado
 
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
@@ -190,13 +199,16 @@ if arquivos:
                         if dados[comp_na_pagina]["totais_proventos_pdf"] is None:
                             dados[comp_na_pagina]["totais_proventos_pdf"] = tot
 
+                # base oficial
                 if pagina_eh_de_bases(page):
                     base = extrair_base_empresa_page(page)
                     if base and dados[comp_atual]["base_empresa"] is None:
                         dados[comp_atual]["base_empresa"] = base
 
+                # eventos
                 dados[comp_atual]["eventos"].extend(extrair_eventos_page(page))
 
+        # por competência
         for comp, info in dados.items():
             df = pd.DataFrame(info["eventos"])
             if df.empty:
@@ -210,18 +222,22 @@ if arquivos:
 
             df = df.drop_duplicates(subset=["rubrica", "tipo", "ativos", "desligados", "total"]).reset_index(drop=True)
 
+            # classifica rubricas (ENTRA/NEUTRA/FORA) — se disponível
             try:
                 _, df = calcular_base_por_grupo(df)
             except Exception:
                 pass
 
+            df = _safe_classificacao(df)
+
+            # numéricos
+            for col in ["ativos", "desligados", "total"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
             base_of = info["base_empresa"]
 
             prov = df[df["tipo"] == "PROVENTO"].copy()
-            for col in ["ativos", "desligados", "total"]:
-                if col in prov.columns:
-                    prov[col] = pd.to_numeric(prov[col], errors="coerce").fillna(0.0)
-
             tot_extraido = {
                 "ativos": float(prov["ativos"].sum()),
                 "desligados": float(prov["desligados"].sum()),
@@ -236,17 +252,44 @@ if arquivos:
             dif_totalizador_ativos = None
             dif_totalizador_desligados = None
 
-            # Auditor Estrutural: valida totalizador somente por ATIVOS/DESLIGADOS
+            # Auditor Estrutural: valida totalizador só por ATIVOS/DESLIGADOS
             if totalizador_encontrado:
                 dif_totalizador_ativos = float(tot_pdf_comp["ativos"] - tot_extraido["ativos"])
                 dif_totalizador_desligados = float(tot_pdf_comp["desligados"] - tot_extraido["desligados"])
-
                 bate_totalizador = (
                     abs(dif_totalizador_ativos) <= tol_totalizador and
                     abs(dif_totalizador_desligados) <= tol_totalizador
                 )
 
-            # Auditoria SOMENTE ATIVOS/DESLIGADOS
+            # ---------------- Mapa de Incidência (por competência) ----------------
+            if mapa_incidencia_on:
+                # impacto % sempre relativo aos proventos usados (por grupo)
+                for grupo in ["ativos", "desligados"]:
+                    prov_total_grupo = float(totais_usados.get(grupo, 0.0) or 0.0)
+                    if prov_total_grupo <= 0:
+                        continue
+
+                    tmp = df[df["tipo"] == "PROVENTO"].copy()
+                    # agrega por rubrica+classificacao (pra não duplicar)
+                    agg = (
+                        tmp.groupby(["rubrica", "classificacao"], as_index=False)[grupo]
+                        .sum()
+                        .rename(columns={grupo: "valor"})
+                    )
+                    agg = agg[agg["valor"] != 0].copy()
+                    if agg.empty:
+                        continue
+
+                    agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_grupo) * 100.0
+                    agg.insert(0, "arquivo", arquivo.name)
+                    agg.insert(1, "competencia", comp)
+                    agg.insert(2, "grupo", grupo.upper())
+                    agg.insert(3, "proventos_grupo", prov_total_grupo)
+
+                    # salva consolidado
+                    linhas_mapa.extend(agg.to_dict(orient="records"))
+
+            # ---------------- Auditoria SOMENTE ATIVOS/DESLIGADOS ----------------
             for grupo in ["ativos", "desligados"]:
                 res = auditoria_por_exclusao_com_aproximacao(
                     df=df,
@@ -361,48 +404,108 @@ if arquivos:
                     diag_top.insert(3, "dif_totalizador_desligados", dif_totalizador_desligados)
                     linhas_diagnostico.extend(diag_top.to_dict(orient="records"))
 
+    # ---------------- saída consolidada ----------------
     df_resumo = pd.DataFrame(linhas_resumo)
     df_devolvidas = pd.DataFrame(linhas_devolvidas)
     df_diag = pd.DataFrame(linhas_diagnostico)
+    df_mapa = pd.DataFrame(linhas_mapa)
 
-    st.subheader("Filtro de status")
-    status_opts = sorted(df_resumo["status"].dropna().unique().tolist())
-    status_sel = st.multiselect("Mostrar status:", options=status_opts, default=status_opts)
-
-    df_view = df_resumo[df_resumo["status"].isin(status_sel)].copy()
-
-    st.subheader("📌 Resumo consolidado (ATIVOS/DESLIGADOS auditáveis + TOTAL_REF)")
-    st.dataframe(
-        df_view.sort_values(["competencia", "arquivo", "grupo"], ascending=True),
-        use_container_width=True
+    # ---------------- Abas do app ----------------
+    tab_resumo, tab_devolvidas, tab_mapa, tab_diag = st.tabs(
+        ["📌 Resumo", "🧩 Devolvidas", "🧭 Mapa de Incidência", "🕵️ Diagnóstico"]
     )
 
-    st.subheader("🧩 Rubricas devolvidas (para fechar a base por baixo)")
-    if df_devolvidas.empty:
-        st.info("Nenhuma rubrica foi 'devolvida' (ou não havia base oficial/GAP positivo).")
-    else:
+    with tab_resumo:
+        st.subheader("Filtro de status")
+        status_opts = sorted(df_resumo["status"].dropna().unique().tolist())
+        status_sel = st.multiselect("Mostrar status:", options=status_opts, default=status_opts, key="status_filter")
+
+        df_view = df_resumo[df_resumo["status"].isin(status_sel)].copy()
+
+        st.subheader("📌 Resumo consolidado (ATIVOS/DESLIGADOS auditáveis + TOTAL_REF)")
         st.dataframe(
-            df_devolvidas.sort_values(["competencia", "arquivo", "grupo", "valor"], ascending=[True, True, True, False]),
+            df_view.sort_values(["competencia", "arquivo", "grupo"], ascending=True),
             use_container_width=True
         )
 
-    if modo_auditor_prof:
-        st.subheader("🕵️ Auditor Profissional — Diagnóstico de Extração")
-        falhas = df_resumo[
-            (df_resumo["status"] == "FALHA_EXTRACAO_TOTALIZADOR") &
-            (df_resumo["grupo"].isin(["ATIVOS", "DESLIGADOS"]))
-        ].copy()
-
-        if falhas.empty:
-            st.success("Nenhuma competência com FALHA_EXTRACAO_TOTALIZADOR (ATIVOS/DESLIGADOS).")
+    with tab_devolvidas:
+        st.subheader("🧩 Rubricas devolvidas (para fechar a base por baixo)")
+        if df_devolvidas.empty:
+            st.info("Nenhuma rubrica foi 'devolvida' (ou não havia base oficial/GAP positivo).")
         else:
             st.dataframe(
-                falhas.sort_values(["competencia", "arquivo", "grupo"], ascending=True)[
-                    ["arquivo", "competencia", "grupo", "dif_totalizador_ativos", "dif_totalizador_desligados",
-                     "proventos_grupo", "base_oficial"]
-                ],
+                df_devolvidas.sort_values(["competencia", "arquivo", "grupo", "valor"], ascending=[True, True, True, False]),
                 use_container_width=True
             )
+
+    with tab_mapa:
+        st.subheader("🧭 Mapa de Incidência — impacto das rubricas nos Proventos")
+        st.caption(
+            "Este mapa NÃO é diagnóstico de extração. Ele mostra **peso (%)** das rubricas nos proventos "
+            "por competência e grupo (ATIVOS/DESLIGADOS), usando a classificação ENTRA/NEUTRA/FORA."
+        )
+
+        if df_mapa.empty:
+            st.info("Mapa vazio (sem dados de proventos para montar o impacto).")
+        else:
+            comps = sorted(df_mapa["competencia"].unique().tolist())
+            grupos = ["ATIVOS", "DESLIGADOS"]
+
+            colA, colB, colC = st.columns(3)
+            with colA:
+                comp_sel = st.selectbox("Competência", comps, index=len(comps) - 1)
+            with colB:
+                grupo_sel = st.selectbox("Grupo", grupos, index=0)
+            with colC:
+                topn = st.number_input("Top N rubricas", min_value=10, max_value=500, value=50, step=10)
+
+            class_opts = sorted(df_mapa["classificacao"].unique().tolist())
+            class_sel = st.multiselect("Classificação", class_opts, default=class_opts)
+
+            view = df_mapa[
+                (df_mapa["competencia"] == comp_sel) &
+                (df_mapa["grupo"] == grupo_sel) &
+                (df_mapa["classificacao"].isin(class_sel))
+            ].copy()
+
+            view = view.sort_values(["impacto_pct_proventos", "valor"], ascending=[False, False]).head(int(topn))
+
+            st.dataframe(
+                view[["rubrica", "classificacao", "valor", "impacto_pct_proventos", "proventos_grupo", "arquivo"]],
+                use_container_width=True
+            )
+
+            st.markdown("#### Totais por classificação (para ver 'inclinação do triângulo')")
+            resumo_cls = (
+                df_mapa[(df_mapa["competencia"] == comp_sel) & (df_mapa["grupo"] == grupo_sel)]
+                .groupby("classificacao", as_index=False)[["valor", "impacto_pct_proventos"]]
+                .sum()
+                .sort_values("impacto_pct_proventos", ascending=False)
+            )
+            st.dataframe(resumo_cls, use_container_width=True)
+
+    with tab_diag:
+        st.subheader("🕵️ Auditor Profissional — Diagnóstico de Extração")
+        st.caption("Aqui aparecem **linhas suspeitas de extração** (coluna quebrada/total inconsistente). Não é base.")
+
+        if not modo_auditor_prof:
+            st.info("Ative o 'Auditor Profissional' nas configurações para ver esta aba.")
+        else:
+            falhas = df_resumo[
+                (df_resumo["status"] == "FALHA_EXTRACAO_TOTALIZADOR") &
+                (df_resumo["grupo"].isin(["ATIVOS", "DESLIGADOS"]))
+            ].copy()
+
+            if falhas.empty:
+                st.success("Nenhuma competência com FALHA_EXTRACAO_TOTALIZADOR (ATIVOS/DESLIGADOS).")
+            else:
+                st.dataframe(
+                    falhas.sort_values(["competencia", "arquivo", "grupo"], ascending=True)[
+                        ["arquivo", "competencia", "grupo", "dif_totalizador_ativos", "dif_totalizador_desligados",
+                         "proventos_grupo", "base_oficial"]
+                    ],
+                    use_container_width=True
+                )
 
             if df_diag.empty:
                 st.info("Sem linhas suspeitas internas (pode ser rubrica faltando que não foi extraída).")
@@ -410,18 +513,20 @@ if arquivos:
                 st.markdown("#### Linhas suspeitas (Top 50 por competência)")
                 st.dataframe(df_diag, use_container_width=True)
 
-    # Excel consolidado
+    # ---------------- Excel consolidado ----------------
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         df_resumo.to_excel(writer, index=False, sheet_name="Resumo_Qualidade")
         df_devolvidas.to_excel(writer, index=False, sheet_name="Rubricas_Devolvidas")
+        if mapa_incidencia_on:
+            df_mapa.to_excel(writer, index=False, sheet_name="Mapa_Incidencia")
         if modo_auditor_prof:
             df_diag.to_excel(writer, index=False, sheet_name="Diagnostico_Extracao")
 
     buffer.seek(0)
     st.download_button(
-        "📥 Baixar Excel consolidado (Auditor Estrutural)",
+        "📥 Baixar Excel consolidado (Auditor Estrutural + Mapa)",
         data=buffer,
-        file_name="AUDITOR_INSS_ESTRUTURAL.xlsx",
+        file_name="AUDITOR_INSS_ESTRUTURAL_MAPA.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
