@@ -146,6 +146,13 @@ def _safe_classificacao(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _mode_or_none(series: pd.Series):
+    if series is None or series.empty:
+        return None
+    vc = series.value_counts()
+    return vc.index[0] if len(vc) else None
+
+
 # ---------------- UI ----------------
 
 st.set_page_config(layout="wide")
@@ -166,6 +173,7 @@ with col_cfg4:
 
 indice_incidencia_on = st.checkbox("📈 Índice de Incidência Estrutural", value=True)
 mapa_incidencia_on = st.checkbox("🧭 Mapa de Incidência (impacto %)", value=True)
+radar_on = st.checkbox("📡 Radar Estrutural Automático (recorrência + impacto)", value=True)
 
 st.info(
     "🧠 **Auditor Estrutural:** auditoria por **ATIVOS** e **DESLIGADOS** (Salário Contribuição Empresa). "
@@ -176,7 +184,7 @@ if arquivos:
     linhas_resumo = []
     linhas_devolvidas = []
     linhas_diagnostico = []
-    linhas_mapa = []  # <<<<<< mapa de incidência consolidado
+    linhas_mapa = []
 
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
@@ -261,16 +269,14 @@ if arquivos:
                     abs(dif_totalizador_desligados) <= tol_totalizador
                 )
 
-            # ---------------- Mapa de Incidência (por competência) ----------------
+            # ---------------- Mapa de Incidência ----------------
             if mapa_incidencia_on:
-                # impacto % sempre relativo aos proventos usados (por grupo)
                 for grupo in ["ativos", "desligados"]:
                     prov_total_grupo = float(totais_usados.get(grupo, 0.0) or 0.0)
                     if prov_total_grupo <= 0:
                         continue
 
                     tmp = df[df["tipo"] == "PROVENTO"].copy()
-                    # agrega por rubrica+classificacao (pra não duplicar)
                     agg = (
                         tmp.groupby(["rubrica", "classificacao"], as_index=False)[grupo]
                         .sum()
@@ -286,7 +292,6 @@ if arquivos:
                     agg.insert(2, "grupo", grupo.upper())
                     agg.insert(3, "proventos_grupo", prov_total_grupo)
 
-                    # salva consolidado
                     linhas_mapa.extend(agg.to_dict(orient="records"))
 
             # ---------------- Auditoria SOMENTE ATIVOS/DESLIGADOS ----------------
@@ -363,9 +368,9 @@ if arquivos:
                             "arquivo": arquivo.name,
                             "competencia": comp,
                             "grupo": grupo.upper(),
-                            "rubrica": r["rubrica"],
-                            "classificacao_origem": r["classificacao"],
-                            "valor": float(r["valor_alvo"])
+                            "rubrica": r.get("rubrica"),
+                            "classificacao_origem": r.get("classificacao"),
+                            "valor": float(r.get("valor_alvo", 0.0) or 0.0)
                         })
 
             # TOTAL apenas referência (não audita)
@@ -410,9 +415,81 @@ if arquivos:
     df_diag = pd.DataFrame(linhas_diagnostico)
     df_mapa = pd.DataFrame(linhas_mapa)
 
+    # ---------------- RADAR ESTRUTURAL AUTOMÁTICO ----------------
+    df_radar = pd.DataFrame()
+    if radar_on and (not df_devolvidas.empty or not df_mapa.empty) and not df_resumo.empty:
+        # Denominador: quantas competências por grupo (ATIVOS/DESLIGADOS) existem no lote
+        base_periodos = df_resumo[df_resumo["grupo"].isin(["ATIVOS", "DESLIGADOS"])].copy()
+        base_periodos["chave_periodo"] = base_periodos["arquivo"].astype(str) + " | " + base_periodos["competencia"].astype(str)
+        tot_periodos = base_periodos.groupby("grupo")["chave_periodo"].nunique().to_dict()
+
+        # Devolvidas: recorrência por rubrica
+        if not df_devolvidas.empty:
+            d = df_devolvidas.copy()
+            d["chave_periodo"] = d["arquivo"].astype(str) + " | " + d["competencia"].astype(str)
+
+            agg_dev = (
+                d.groupby(["grupo", "rubrica"], as_index=False)
+                .agg(
+                    meses_devolvida=("chave_periodo", "nunique"),
+                    valor_total_devolvido=("valor", "sum"),
+                    valor_medio_devolvido=("valor", "mean"),
+                    classificacao_mais_comum=("classificacao_origem", _mode_or_none),
+                )
+            )
+            agg_dev["total_periodos_no_lote"] = agg_dev["grupo"].map(tot_periodos).fillna(0).astype(int)
+            agg_dev["recorrencia_pct"] = agg_dev.apply(
+                lambda r: (r["meses_devolvida"] / r["total_periodos_no_lote"] * 100.0) if r["total_periodos_no_lote"] > 0 else None,
+                axis=1
+            )
+        else:
+            agg_dev = pd.DataFrame(columns=[
+                "grupo", "rubrica", "meses_devolvida", "valor_total_devolvido",
+                "valor_medio_devolvido", "classificacao_mais_comum",
+                "total_periodos_no_lote", "recorrencia_pct"
+            ])
+
+        # Mapa: impacto médio e classificação mais comum (ENTRA/NEUTRA/FORA)
+        if not df_mapa.empty:
+            m = df_mapa.copy()
+            agg_mapa = (
+                m.groupby(["grupo", "rubrica"], as_index=False)
+                .agg(
+                    impacto_medio_pct=("impacto_pct_proventos", "mean"),
+                    impacto_max_pct=("impacto_pct_proventos", "max"),
+                    valor_medio=("valor", "mean"),
+                    classificacao_mapa_mais_comum=("classificacao", _mode_or_none),
+                )
+            )
+        else:
+            agg_mapa = pd.DataFrame(columns=[
+                "grupo", "rubrica", "impacto_medio_pct", "impacto_max_pct",
+                "valor_medio", "classificacao_mapa_mais_comum"
+            ])
+
+        # Merge
+        df_radar = pd.merge(agg_dev, agg_mapa, on=["grupo", "rubrica"], how="outer")
+
+        # Score de risco estrutural (heurística):
+        # recorrência (%) * impacto_médio(%) => quanto é recorrente e relevante
+        def _score(row):
+            rec = row.get("recorrencia_pct")
+            imp = row.get("impacto_medio_pct")
+            if pd.isna(rec) or pd.isna(imp):
+                return None
+            return float(rec) * float(imp)
+
+        df_radar["score_risco"] = df_radar.apply(_score, axis=1)
+
+        # ordenação default
+        df_radar = df_radar.sort_values(
+            ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"],
+            ascending=[False, False, False, False]
+        ).reset_index(drop=True)
+
     # ---------------- Abas do app ----------------
-    tab_resumo, tab_devolvidas, tab_mapa, tab_diag = st.tabs(
-        ["📌 Resumo", "🧩 Devolvidas", "🧭 Mapa de Incidência", "🕵️ Diagnóstico"]
+    tab_resumo, tab_devolvidas, tab_mapa, tab_radar, tab_diag = st.tabs(
+        ["📌 Resumo", "🧩 Devolvidas", "🧭 Mapa", "📡 Radar", "🕵️ Diagnóstico"]
     )
 
     with tab_resumo:
@@ -421,7 +498,6 @@ if arquivos:
         status_sel = st.multiselect("Mostrar status:", options=status_opts, default=status_opts, key="status_filter")
 
         df_view = df_resumo[df_resumo["status"].isin(status_sel)].copy()
-
         st.subheader("📌 Resumo consolidado (ATIVOS/DESLIGADOS auditáveis + TOTAL_REF)")
         st.dataframe(
             df_view.sort_values(["competencia", "arquivo", "grupo"], ascending=True),
@@ -429,9 +505,9 @@ if arquivos:
         )
 
     with tab_devolvidas:
-        st.subheader("🧩 Rubricas devolvidas (para fechar a base por baixo)")
+        st.subheader("🧩 Rubricas devolvidas (NEUTRA/FORA que o algoritmo usou para reduzir o GAP)")
         if df_devolvidas.empty:
-            st.info("Nenhuma rubrica foi 'devolvida' (ou não havia base oficial/GAP positivo).")
+            st.info("Nenhuma rubrica foi devolvida (ou não havia base oficial/GAP positivo).")
         else:
             st.dataframe(
                 df_devolvidas.sort_values(["competencia", "arquivo", "grupo", "valor"], ascending=[True, True, True, False]),
@@ -441,26 +517,25 @@ if arquivos:
     with tab_mapa:
         st.subheader("🧭 Mapa de Incidência — impacto das rubricas nos Proventos")
         st.caption(
-            "Este mapa NÃO é diagnóstico de extração. Ele mostra **peso (%)** das rubricas nos proventos "
-            "por competência e grupo (ATIVOS/DESLIGADOS), usando a classificação ENTRA/NEUTRA/FORA."
+            "Mostra o **peso (%)** das rubricas nos proventos por competência e grupo (ATIVOS/DESLIGADOS), "
+            "usando a classificação ENTRA/NEUTRA/FORA."
         )
-
         if df_mapa.empty:
-            st.info("Mapa vazio (sem dados de proventos para montar o impacto).")
+            st.info("Mapa vazio (sem dados de proventos).")
         else:
             comps = sorted(df_mapa["competencia"].unique().tolist())
             grupos = ["ATIVOS", "DESLIGADOS"]
 
             colA, colB, colC = st.columns(3)
             with colA:
-                comp_sel = st.selectbox("Competência", comps, index=len(comps) - 1)
+                comp_sel = st.selectbox("Competência", comps, index=len(comps) - 1, key="map_comp")
             with colB:
-                grupo_sel = st.selectbox("Grupo", grupos, index=0)
+                grupo_sel = st.selectbox("Grupo", grupos, index=0, key="map_grupo")
             with colC:
-                topn = st.number_input("Top N rubricas", min_value=10, max_value=500, value=50, step=10)
+                topn = st.number_input("Top N rubricas", min_value=10, max_value=500, value=50, step=10, key="map_topn")
 
             class_opts = sorted(df_mapa["classificacao"].unique().tolist())
-            class_sel = st.multiselect("Classificação", class_opts, default=class_opts)
+            class_sel = st.multiselect("Classificação", class_opts, default=class_opts, key="map_class")
 
             view = df_mapa[
                 (df_mapa["competencia"] == comp_sel) &
@@ -475,7 +550,7 @@ if arquivos:
                 use_container_width=True
             )
 
-            st.markdown("#### Totais por classificação (para ver 'inclinação do triângulo')")
+            st.markdown("#### Totais por classificação")
             resumo_cls = (
                 df_mapa[(df_mapa["competencia"] == comp_sel) & (df_mapa["grupo"] == grupo_sel)]
                 .groupby("classificacao", as_index=False)[["valor", "impacto_pct_proventos"]]
@@ -484,12 +559,78 @@ if arquivos:
             )
             st.dataframe(resumo_cls, use_container_width=True)
 
+    with tab_radar:
+        st.subheader("📡 Radar Estrutural Automático")
+        st.caption(
+            "O Radar cruza **recorrência das devolvidas** (quantos meses a rubrica aparece como 'necessária' para fechar base) "
+            "com **impacto (%)** do Mapa. Isso NÃO prova erro: ele prioriza onde investigar primeiro."
+        )
+
+        if df_radar.empty:
+            st.info("Radar vazio (precisa de devolvidas e/ou mapa).")
+        else:
+            grupos = ["ATIVOS", "DESLIGADOS"]
+            colA, colB, colC = st.columns(3)
+            with colA:
+                g_sel = st.selectbox("Grupo", grupos, index=0, key="rad_grupo")
+            with colB:
+                min_rec = st.slider("Recorrência mínima (%)", min_value=0, max_value=100, value=30, step=5, key="rad_minrec")
+            with colC:
+                topn = st.number_input("Top N (Radar)", min_value=10, max_value=500, value=50, step=10, key="rad_topn")
+
+            v = df_radar[df_radar["grupo"] == g_sel].copy()
+            v = v[v["recorrencia_pct"].fillna(0) >= float(min_rec)]
+
+            # foco em rubricas FORA/NEUTRA (onde costuma existir crédito)
+            foco = st.multiselect(
+                "Foco por classificação (origem devolvida / mapa)",
+                options=["FORA", "NEUTRA", "ENTRA", "SEM_CLASSIFICACAO"],
+                default=["FORA", "NEUTRA"],
+                key="rad_foco"
+            )
+
+            def _match_foco(row):
+                a = str(row.get("classificacao_mais_comum") or "")
+                b = str(row.get("classificacao_mapa_mais_comum") or "")
+                return (a in foco) or (b in foco)
+
+            v = v[v.apply(_match_foco, axis=1)].copy()
+
+            v = v.sort_values(
+                ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"],
+                ascending=[False, False, False, False]
+            ).head(int(topn))
+
+            st.dataframe(
+                v[[
+                    "rubrica",
+                    "classificacao_mais_comum",
+                    "classificacao_mapa_mais_comum",
+                    "meses_devolvida",
+                    "total_periodos_no_lote",
+                    "recorrencia_pct",
+                    "impacto_medio_pct",
+                    "impacto_max_pct",
+                    "valor_total_devolvido",
+                    "valor_medio_devolvido",
+                    "score_risco",
+                ]],
+                use_container_width=True
+            )
+
+            st.markdown("#### Interpretação rápida")
+            st.write(
+                "- **Recorrência alta + Impacto alto** → melhor candidato para revisão (potencial crédito recorrente).\n"
+                "- **Recorrência alta + Impacto baixo** → pode ser ruído distribuído (muitas rubricas pequenas).\n"
+                "- **Impacto alto + Recorrência baixa** → evento pontual (rescisão, férias coletivas etc.)."
+            )
+
     with tab_diag:
-        st.subheader("🕵️ Auditor Profissional — Diagnóstico de Extração")
+        st.subheader("🕵️ Diagnóstico de Extração")
         st.caption("Aqui aparecem **linhas suspeitas de extração** (coluna quebrada/total inconsistente). Não é base.")
 
         if not modo_auditor_prof:
-            st.info("Ative o 'Auditor Profissional' nas configurações para ver esta aba.")
+            st.info("Ative 'Auditor Profissional' nas configurações.")
         else:
             falhas = df_resumo[
                 (df_resumo["status"] == "FALHA_EXTRACAO_TOTALIZADOR") &
@@ -508,7 +649,7 @@ if arquivos:
                 )
 
             if df_diag.empty:
-                st.info("Sem linhas suspeitas internas (pode ser rubrica faltando que não foi extraída).")
+                st.info("Sem linhas suspeitas internas (pode ser rubrica faltando não extraída).")
             else:
                 st.markdown("#### Linhas suspeitas (Top 50 por competência)")
                 st.dataframe(df_diag, use_container_width=True)
@@ -520,13 +661,15 @@ if arquivos:
         df_devolvidas.to_excel(writer, index=False, sheet_name="Rubricas_Devolvidas")
         if mapa_incidencia_on:
             df_mapa.to_excel(writer, index=False, sheet_name="Mapa_Incidencia")
+        if radar_on:
+            df_radar.to_excel(writer, index=False, sheet_name="Radar_Estrutural")
         if modo_auditor_prof:
             df_diag.to_excel(writer, index=False, sheet_name="Diagnostico_Extracao")
 
     buffer.seek(0)
     st.download_button(
-        "📥 Baixar Excel consolidado (Auditor Estrutural + Mapa)",
+        "📥 Baixar Excel consolidado (Auditor + Mapa + Radar)",
         data=buffer,
-        file_name="AUDITOR_INSS_ESTRUTURAL_MAPA.xlsx",
+        file_name="AUDITOR_INSS_ESTRUTURAL_RADAR.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
