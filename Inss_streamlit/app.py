@@ -777,31 +777,41 @@ if arquivos:
                     "sistema_provavel": assin["sistema_provavel"]
                 })
 
-            # Mapa
+           # Mapa
             if mapa_incidencia_on:
-                grupos = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
-                for g in grupos:
-                    prov_total_g = float(totais_usados.get(g, 0.0) or 0.0)
-                    if prov_total_g <= 0:
-                        continue
-                    tmp = df[df["tipo"] == "PROVENTO"].copy()
-                    agg = (
-                        tmp.groupby(["rubrica", "classificacao"], as_index=False)[g]
-                        .sum()
-                        .rename(columns={g: "valor"})
-                    )
-                    agg = agg[agg["valor"] != 0].copy()
-                    if agg.empty:
-                        continue
-                    agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_g) * 100.0
-                    agg.insert(0, "arquivo", arquivo.name)
-                    agg.insert(1, "competencia", comp)
-                    agg.insert(2, "grupo", ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL"))
-                    agg.insert(3, "proventos_grupo", prov_total_g)
-                    agg["layout"] = layout
-                    agg["familia_layout"] = assin["familia_layout"]
-                    agg["sistema_provavel"] = assin["sistema_provavel"]
-                    linhas_mapa.extend(agg.to_dict(orient="records"))
+              grupos = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
+
+            for g in grupos:
+                prov_total_g = float(totais_usados.get(g, 0.0) or 0.0)
+                if prov_total_g <= 0:
+                    continue
+
+                tmp = df[df["tipo"] == "PROVENTO"].copy()
+
+        # garante que a coluna do grupo existe (proteção extra)
+                if g not in tmp.columns:
+                   continue
+
+                agg = (
+                    tmp.groupby(["rubrica", "classificacao"], as_index=False)[g]
+                   .sum()
+                   .rename(columns={g: "valor"})
+                )
+
+                agg = agg[agg["valor"] != 0].copy()
+                if agg.empty:
+                    continue
+
+                agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_g) * 100.0
+                agg.insert(0, "arquivo", arquivo.name)
+                agg.insert(1, "competencia", comp)
+                agg.insert(2, "grupo", ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL"))
+                agg.insert(3, "proventos_grupo", prov_total_g)
+                agg["layout"] = layout
+                agg["familia_layout"] = assin["familia_layout"]
+                agg["sistema_provavel"] = assin["sistema_provavel"]
+
+                linhas_mapa.extend(agg.to_dict(orient="records"))
 
             # Auditoria
             grupos_auditar = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
