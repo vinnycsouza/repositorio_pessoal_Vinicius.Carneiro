@@ -11,6 +11,111 @@ from auditor_base import auditoria_por_exclusao_com_aproximacao
 
 
 # ---------------------------
+# Config (SÓ UMA VEZ)
+# ---------------------------
+st.set_page_config(layout="wide")
+st.title("🧾 Auditor INSS — Híbrido + Assinatura Estrutural (com filtros)")
+
+
+# ---------------------------
+# Semáforo de Base (NOVO)
+# ---------------------------
+
+def _zona_ord(z: str) -> int:
+    # Para ordenar: 🔴 (mais crítico) primeiro, depois 🟡, depois 🟢
+    if not z:
+        return 99
+    if z.startswith("🔴"):
+        return 0
+    if z.startswith("🟡"):
+        return 1
+    if z.startswith("🟢"):
+        return 2
+    return 99
+
+
+def aplicar_semaforo_base(df: pd.DataFrame, modo: str = "MAPA") -> pd.DataFrame:
+    """
+    Cria coluna:
+      - zona_base: 🔴 / 🟡 / 🟢
+      - zona_ord: inteiro para ordenação
+    """
+    out = df.copy()
+
+    if "classificacao" not in out.columns:
+        out["classificacao"] = "SEM_CLASSIFICACAO"
+    out["classificacao"] = out["classificacao"].fillna("SEM_CLASSIFICACAO").astype(str)
+
+    modo = (modo or "MAPA").upper()
+
+    if modo == "MAPA":
+        if "impacto_pct_proventos" not in out.columns:
+            out["impacto_pct_proventos"] = 0.0
+
+        def _zona(row):
+            cls = str(row.get("classificacao") or "SEM_CLASSIFICACAO").upper()
+            impacto = float(row.get("impacto_pct_proventos") or 0.0)
+
+            # Regras práticas e estáveis:
+            # - FORA com pouco impacto -> 🔴
+            # - ENTRA com impacto relevante -> 🟢
+            # - NEUTRA ou alto impacto -> 🟡
+            if cls == "FORA" and impacto < 2.0:
+                return "🔴 FORA"
+            if cls == "ENTRA" and impacto >= 2.0:
+                return "🟢 INCIDE"
+            if cls in ("NEUTRA", "SEM_CLASSIFICACAO") and impacto >= 1.0:
+                return "🟡 ZONA_CINZA"
+            if impacto >= 3.0:
+                return "🟡 ZONA_CINZA"
+            return "🟢 INCIDE"
+
+        out["zona_base"] = out.apply(_zona, axis=1)
+        out["zona_ord"] = out["zona_base"].apply(_zona_ord)
+        return out
+
+    # RADAR
+    # Radar usa recorrência/impacto/score e também se é "devolvida"
+    for c in ["recorrencia_pct", "impacto_medio_pct", "score_risco", "meses_devolvida", "valor_total_devolvido"]:
+        if c not in out.columns:
+            out[c] = pd.NA
+
+    # devolvida = apareceu em devolvidas alguma vez
+    out["devolvida"] = out["meses_devolvida"].fillna(0).astype(float) > 0
+
+    def _zona_radar(row):
+        cls_a = str(row.get("classificacao_mais_comum") or "").upper()
+        cls_b = str(row.get("classificacao_mapa_mais_comum") or "").upper()
+        rec = row.get("recorrencia_pct")
+        imp = row.get("impacto_medio_pct")
+        score = row.get("score_risco")
+
+        rec = 0.0 if pd.isna(rec) else float(rec)
+        imp = 0.0 if pd.isna(imp) else float(imp)
+        score = (rec * imp) if pd.isna(score) else float(score)
+
+        devolvida = bool(row.get("devolvida", False))
+
+        # 🔴: tendência FORA e recorrente (e sem devolução forte)
+        if ("FORA" in (cls_a, cls_b)) and rec >= 50 and imp < 2 and not devolvida:
+            return "🔴 FORA"
+
+        # 🟢: ENTRA/baixo risco
+        if ("ENTRA" in (cls_a, cls_b)) and rec < 30 and imp >= 1.5 and not devolvida:
+            return "🟢 INCIDE"
+
+        # 🟡: qualquer coisa com sinal de risco/instabilidade
+        if devolvida or rec >= 30 or imp >= 3 or score >= 60:
+            return "🟡 ZONA_CINZA"
+
+        return "🟢 INCIDE"
+
+    out["zona_base"] = out.apply(_zona_radar, axis=1)
+    out["zona_ord"] = out["zona_base"].apply(_zona_ord)
+    return out
+
+
+# ---------------------------
 # Utilidades gerais
 # ---------------------------
 
@@ -291,9 +396,9 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
         return x
 
     def add_event(tipo: str, cod: str, desc: str, valor: float):
-        rubrica = f"{cod} {desc}".strip()
+        rubricas = f"{cod} {desc}".strip()
         eventos.append({
-            "rubrica": rubrica,
+            "rubrica": rubricas,
             "tipo": tipo,
             "ativos": float(valor),
             "desligados": 0.0,
@@ -429,9 +534,6 @@ def diagnostico_extracao_proventos(df_eventos: pd.DataFrame, tol_inconsistencia:
 # ---------------------------
 # UI
 # ---------------------------
-
-st.set_page_config(layout="wide")
-st.title("🧾 Auditor INSS — Híbrido + Assinatura Estrutural (com filtros)")
 
 arquivos = st.file_uploader("Envie 1 ou mais PDFs", type="pdf", accept_multiple_files=True)
 
@@ -605,6 +707,10 @@ if arquivos:
                     if agg.empty:
                         continue
                     agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_g) * 100.0
+
+                    # (PONTO 2) semáforo no Mapa
+                    agg = aplicar_semaforo_base(agg, modo="MAPA")
+
                     agg.insert(0, "arquivo", arquivo.name)
                     agg.insert(1, "competencia", comp)
                     agg.insert(2, "grupo", ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL"))
@@ -844,13 +950,17 @@ if arquivos:
 
         df_radar["score_risco"] = df_radar.apply(_score, axis=1)
 
-        for c in ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]:
+        # (PONTO 3) aplica semáforo no Radar
+        df_radar = aplicar_semaforo_base(df_radar, modo="RADAR")
+
+        # (PONTO 3/4) blindagem + ordenação com zona_base
+        for c in ["zona_ord", "score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]:
             if c not in df_radar.columns:
                 df_radar[c] = pd.NA
 
         df_radar = df_radar.sort_values(
-            ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"],
-            ascending=[False, False, False, False],
+            ["zona_ord", "score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"],
+            ascending=[True, False, False, False, False],
             na_position="last"
         ).reset_index(drop=True)
 
@@ -908,9 +1018,16 @@ if arquivos:
                 (df_mapa_f["classificacao"].isin(class_sel))
             ].copy()
 
-            view = view.sort_values(["impacto_pct_proventos", "valor"], ascending=[False, False]).head(int(topn))
+            # (PONTO 4) ordenação com semáforo visível
+            # garante colunas
+            for c in ["zona_ord", "impacto_pct_proventos", "valor"]:
+                if c not in view.columns:
+                    view[c] = pd.NA
+
+            view = view.sort_values(["zona_ord", "impacto_pct_proventos", "valor"], ascending=[True, False, False]).head(int(topn))
+
             st.dataframe(
-                view[["rubrica", "classificacao", "valor", "impacto_pct_proventos", "proventos_grupo", "arquivo", "layout"]],
+                view[["zona_base", "rubrica", "classificacao", "valor", "impacto_pct_proventos", "proventos_grupo", "arquivo", "layout"]],
                 use_container_width=True
             )
 
@@ -931,7 +1048,7 @@ if arquivos:
             v = df_radar[df_radar["grupo"] == g_sel].copy()
 
             # garante colunas antes de filtro/ordem
-            for c in ["recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido", "score_risco",
+            for c in ["zona_ord", "zona_base", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido", "score_risco",
                       "classificacao_mais_comum", "classificacao_mapa_mais_comum"]:
                 if c not in v.columns:
                     v[c] = pd.NA
@@ -955,19 +1072,21 @@ if arquivos:
             if v.empty:
                 st.info("Nenhuma rubrica atende aos filtros do Radar.")
             else:
-                colunas_ordem = ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]
+                # ordena por semáforo primeiro, depois risco
+                colunas_ordem = ["zona_ord", "score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]
                 for c in colunas_ordem:
                     if c not in v.columns:
                         v[c] = pd.NA
 
                 v = v.sort_values(
                     colunas_ordem,
-                    ascending=[False, False, False, False],
+                    ascending=[True, False, False, False, False],
                     na_position="last"
                 ).head(int(topn))
 
                 st.dataframe(
                     v[[
+                        "zona_base",
                         "rubrica",
                         "classificacao_mais_comum",
                         "classificacao_mapa_mais_comum",
@@ -992,7 +1111,9 @@ if arquivos:
 
     # ---------------- Excel consolidado (já filtrado) ----------------
     buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+
+    # Troca para openpyxl (evita ModuleNotFoundError xlsxwriter)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df_resumo_f.to_excel(writer, index=False, sheet_name="Resumo_Filtrado")
         df_eventos_f.to_excel(writer, index=False, sheet_name="Eventos_Filtrados")
         (df_devolvidas_f if df_devolvidas_f is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Devolvidas_Filtradas")
@@ -1007,3 +1128,5 @@ if arquivos:
         file_name="AUDITOR_INSS_HIBRIDO_FILTRADO.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+else:
+    st.info("Envie um ou mais PDFs para iniciar.")
