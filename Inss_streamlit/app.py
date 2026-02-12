@@ -527,12 +527,24 @@ st.info(
     "✅ Filtros permitem analisar lotes misturados com mais controle."
 )
 
+linhas_resumo = []
+linhas_devolvidas = []
+linhas_diagnostico = []
+linhas_mapa = []
+eventos_dump = []
+
 if arquivos:
-    linhas_resumo = []
-    linhas_devolvidas = []
-    linhas_diagnostico = []
-    linhas_mapa = []
-    eventos_dump = []
+
+    df_resumo = pd.DataFrame(linhas_resumo)
+    df_devolvidas = pd.DataFrame(linhas_devolvidas)
+    df_diag = pd.DataFrame(linhas_diagnostico)
+    df_mapa = pd.DataFrame(linhas_mapa)
+    df_eventos = pd.concat(eventos_dump, ignore_index=True) if eventos_dump else pd.DataFrame()
+
+    # ... tabs / filtros / excel / download_button ...
+
+else:
+    st.info("Envie um ou mais PDFs para iniciar.")
 
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
@@ -660,9 +672,10 @@ if arquivos:
             eventos_dump.append(df_dump)
 
            # Mapa
-if mapa_incidencia_on:
-    layout_atual = locals().get("layout", "GLOBAL")
-    grupos = ["ativos", "desligados"] if layout_atual == "ANALITICO" else ["total"]
+    if mapa_incidencia_on:
+    
+     layout_atual = locals().get("layout", "GLOBAL")
+     grupos = ["ativos", "desligados"] if layout_atual == "ANALITICO" else ["total"]
 
     for g in grupos:
         totais_local = locals().get("totais_usados", {})
