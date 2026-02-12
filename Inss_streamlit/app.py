@@ -274,17 +274,23 @@ def pagina_alvo_situacao_geral_2018(page) -> bool:
 
 def extrair_base_inss_global_texto(texto: str) -> float | None:
     """
-    Encontra base INSS 'empresa' em PDFs de resumo.
-    Heurística: maior candidato.
+    Encontra base INSS 'empresa' em PDFs de resumo (2012/2018).
+    Aceita: Base INSS (Empresa), Base INSS Empresa, Base INSS - Empresa etc.
+    Heurística: retorna o MAIOR candidato encontrado no texto.
     """
     if not texto:
         return None
 
-    txt = texto.replace("\n", " ")
+    txt = " ".join((texto or "").split())  # normaliza espaços/quebras
+
+    VAL_RE = r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})"
+
     padroes = [
-        r"\bbase\s+inss\s*\(?.{0,15}empresa.{0,15}\)?\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
-        r"\bbase\s+inss\s+empresa\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
-        r"\bbase\s+inss\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
+        rf"\bbase\s+inss\s*\(\s*empresa\s*\)\s*[:\-]?\s*{VAL_RE}",
+        rf"\bbase\s+inss\s*\(\s*.*?empresa.*?\)\s*[:\-]?\s*{VAL_RE}",
+        rf"\bbase\s+inss\s+empresa\s*[:\-]?\s*{VAL_RE}",
+        rf"\bbase\s+inss\s*[-–]\s*empresa\s*[:\-]?\s*{VAL_RE}",
+        rf"\bbase\s+inss\s*[:\-]?\s*{VAL_RE}",
     ]
 
     candidatos = []
@@ -292,12 +298,12 @@ def extrair_base_inss_global_texto(texto: str) -> float | None:
         for m in re.finditer(p, txt, flags=re.IGNORECASE):
             v = normalizar_valor_br(m.group(1))
             if v is not None:
-                candidatos.append(v)
+                candidatos.append(float(v))
 
     if not candidatos:
         return None
 
-    return float(max(candidatos))
+    return max(candidatos)
 
 
 def extrair_quadros_2018(texto: str) -> dict:
@@ -364,6 +370,13 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
         if len(nums) < 2:
             return None
         return normalizar_valor_br(nums[-2])
+    
+    def antepenultimo_numero_br(s: str):
+        nums = numeros_br(s)
+        if len(nums) < 3:
+            return None
+        return normalizar_valor_br(nums[-3])
+
 
     def primeiro_codigo(s: str):
         m = re.search(COD_RE, s)
@@ -384,16 +397,18 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
         x = re.sub(r"\s{2,}", " ", x)
         return x
 
-    def add_event(tipo: str, cod: str, desc: str, valor: float, referencia: float | None):
-        rubrica = f"{cod} {desc}".strip()
-        eventos.append({
-            "rubrica": rubrica,
-            "tipo": tipo,
-            "referencia": float(referencia) if referencia is not None else None,
-            "ativos": float(valor),
-            "desligados": 0.0,
-            "total": float(valor),
-        })
+    def add_event(tipo: str, cod: str, desc: str, valor: float, referencia: float | None, quantidade: float | None):
+       rubrica = f"{cod} {desc}".strip()
+       eventos.append({
+          "rubrica": rubrica,
+          "tipo": tipo,
+          "quantidade": float(quantidade) if quantidade is not None else None,
+          "referencia": float(referencia) if referencia is not None else None,
+          "ativos": float(valor),
+          "desligados": 0.0,
+          "total": float(valor),
+    })
+
 
     def linha_deve_ignorar(lnlow: str) -> bool:
         # Evita totalizadores/cabeçalhos e blocos de base entrarem como "eventos"
@@ -433,16 +448,22 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
                 cod_esq = primeiro_codigo(esq)
                 val_esq = ultimo_numero_br(esq)
                 ref_esq = penultimo_numero_br(esq)
+                q_esq = antepenultimo_numero_br(esq)
+                quant_esq = q_esq if (q_esq is not None and q_esq <= 10000) else None
+
                 if cod_esq and val_esq is not None:
-                    desc_esq = limpar_desc(cod_esq, esq)
-                    add_event("PROVENTO", cod_esq, desc_esq, val_esq, ref_esq)
+                   desc_esq = limpar_desc(cod_esq, esq)
+                   add_event("PROVENTO", cod_esq, desc_esq, val_esq, ref_esq, quant_esq)
+  
 
                 cod_dir = primeiro_codigo(dir)
                 val_dir = ultimo_numero_br(dir)
                 ref_dir = penultimo_numero_br(dir)
                 if cod_dir and val_dir is not None:
                     desc_dir = limpar_desc(cod_dir, dir)
-                    add_event("DESCONTO", cod_dir, desc_dir, val_dir, ref_dir)
+                    q_dir = antepenultimo_numero_br(dir)
+                    quant_dir = q_dir if (q_dir is not None and q_dir <= 10000) else None
+                    add_event("DESCONTO", cod_dir, desc_dir, val_dir, ref_dir, quant_dir)
                 continue
             elif len(blocos) == 1:
                 ln = blocos[0]
@@ -462,14 +483,19 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
 
             v1 = ultimo_numero_br(chunk1)
             r1 = penultimo_numero_br(chunk1)
+            q1 = antepenultimo_numero_br(chunk1)
+            quant1 = q1 if (q1 is not None and q1 <= 10000) else None
 
             v2 = ultimo_numero_br(chunk2)
             r2 = penultimo_numero_br(chunk2)
+            q2 = antepenultimo_numero_br(chunk1)
+            quant2 = q2 if (q2 is not None and q1 <= 10000) else None
+
 
             if v1 is not None:
-                add_event("PROVENTO", cod1, limpar_desc(cod1, chunk1), v1, r1)
+               add_event("PROVENTO", cod1, limpar_desc(cod1, chunk1), v1, r1, quant1)
             if v2 is not None:
-                add_event("DESCONTO", cod2, limpar_desc(cod2, chunk2), v2, r2)
+               add_event("DESCONTO", cod2, limpar_desc(cod2, chunk2), v2, r2, quant2)
             continue
 
         # Linha simples (1 rubrica)
@@ -485,11 +511,16 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
             continue
         ref = penultimo_numero_br(resto)
 
+        q = antepenultimo_numero_br(resto)
+        quant = q if (q is not None and q <= 10000) else None
+
         desc = limpar_desc(cod, f"{cod} {resto}")
         tipo = secao if secao in ("PROVENTO", "DESCONTO") else "PROVENTO"
-        add_event(tipo, cod, desc, val, ref)
 
-    return eventos
+
+        add_event(tipo, cod, desc, val, ref, quant)     
+
+        return eventos
 
 
 def diagnostico_extracao_proventos(df_eventos: pd.DataFrame, tol_inconsistencia: float = 1.00) -> pd.DataFrame:
@@ -670,7 +701,7 @@ if arquivos:
                 continue
 
             # garante colunas
-            for c in ["rubrica", "tipo", "referencia", "ativos", "desligados", "total"]:
+            for c in ["rubrica", "tipo", "quantidade", "referencia", "ativos", "desligados", "total"]:
                 if c not in df.columns:
                     df[c] = 0.0 if c in ("ativos", "desligados", "total") else None
 
@@ -681,9 +712,10 @@ if arquivos:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
             # referencia opcional
-            if "referencia" in df.columns:
-                df["referencia"] = pd.to_numeric(df["referencia"], errors="coerce")
+            if "quantidade" in df.columns:
+                df["quantidade"] = pd.to_numeric(df["quantidade"], errors="coerce")
 
+        
             # remove duplicados
             df = df.drop_duplicates(subset=["rubrica", "tipo", "ativos", "desligados", "total"]).reset_index(drop=True)
 
