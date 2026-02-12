@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from collections import defaultdict
 from openpyxl import Workbook
-from openpyxl.writer.excel import save_virtual_workbook
+
 
 
 # =========================
@@ -238,10 +238,13 @@ if st.button("⚙️ Gerar arquivo Excel por evento", key="gerar_excel"):
     progresso2.empty()
     status2.success("✅ Excel gerado com sucesso!")
 
-    st.session_state.excel_bytes = save_virtual_workbook(wb)
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    st.session_state.excel_bytes = output.getvalue()
     st.session_state.estatisticas = estatisticas
-
-
+    
     # =========================
     # Download
     # =========================
