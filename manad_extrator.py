@@ -164,81 +164,83 @@ if uploaded_file:
     # =========================================
     # 2) Gerar Excel (streaming) mantendo formato
     # =========================================
-    if st.button("⚙️ Gerar arquivo Excel por evento", key="gerar_excel"):
-        MAX_ROWS_EXCEL = 1_048_576
-        MAX_DADOS_POR_ABA = MAX_ROWS_EXCEL - 1
+    from openpyxl import Workbook
+from openpyxl.writer.excel import save_virtual_workbook
 
-        progresso2 = st.progress(0.0)
-        status2 = st.empty()
+# ...
 
-        eventos = st.session_state.eventos_encontrados
-        total_eventos = len(eventos) or 1
-        estatisticas = {}
+if st.button("⚙️ Gerar arquivo Excel por evento", key="gerar_excel"):
+    MAX_ROWS_EXCEL = 1_048_576
+    MAX_DADOS_POR_ABA = MAX_ROWS_EXCEL - 1
 
-        wb = Workbook(write_only=True)
+    progresso2 = st.progress(0.0)
+    status2 = st.empty()
 
-        for idx_evento, codigo in enumerate(eventos, start=1):
-            progresso2.progress(idx_evento / total_eventos)
-            status2.text(f"Gerando Excel: evento {codigo} ({idx_evento}/{total_eventos})")
+    eventos = st.session_state.eventos_encontrados
+    total_eventos = len(eventos) or 1
+    estatisticas = {}
 
-            cabecalho = cabecalho_evento(codigo)
-            if not cabecalho:
-                continue
+    wb = Workbook(write_only=True)
 
-            path_evento = arquivos_evento.get(codigo)
-            if not path_evento or not path_evento.exists():
-                continue
+    for idx_evento, codigo in enumerate(eventos, start=1):
+        progresso2.progress(idx_evento / total_eventos)
+        status2.text(f"Gerando Excel: evento {codigo} ({idx_evento}/{total_eventos})")
 
-            total_linhas = contagem_linhas.get(codigo, 0)
-            if total_linhas <= 0:
-                continue
+        cabecalho = cabecalho_evento(codigo)
+        if not cabecalho:
+            continue
 
-            total_abas = (
-                total_linhas // MAX_DADOS_POR_ABA
-                + (1 if total_linhas % MAX_DADOS_POR_ABA else 0)
-            )
+        path_evento = arquivos_evento.get(codigo)
+        if not path_evento or not path_evento.exists():
+            continue
 
-            estatisticas[codigo] = {
-                "Total de linhas": int(total_linhas),
-                "Total de abas": int(total_abas),
-            }
+        total_linhas = contagem_linhas.get(codigo, 0)
+        if total_linhas <= 0:
+            continue
 
-            # Abas sequenciais com limite do Excel
-            linha_atual = 0
-            aba_idx = 1
-            ws = None
+        total_abas = (total_linhas // MAX_DADOS_POR_ABA) + (1 if total_linhas % MAX_DADOS_POR_ABA else 0)
 
-            def nova_aba():
-                nonlocal ws, aba_idx
-                nome_aba = codigo if total_abas == 1 else f"{codigo}_{aba_idx}"
-                ws = wb.create_sheet(title=nome_aba[:31])
-                ws.append(cabecalho)
-                aba_idx += 1
+        estatisticas[codigo] = {
+            "Total de linhas": int(total_linhas),
+            "Total de abas": int(total_abas),
+        }
 
-            nova_aba()
+        # índices e controle de aba
+        aba_idx = 1
+        linhas_na_aba = 0
 
-            with path_evento.open("r", encoding="utf-8", errors="ignore") as f:
-                for linha in f:
-                    linha = linha.rstrip("\n")
-                    partes = linha.split("|")
-                    # corta / completa para bater com cabeçalho
-                    partes = partes[:len(cabecalho)]
-                    if len(partes) < len(cabecalho):
-                        partes += [""] * (len(cabecalho) - len(partes))
+        # cria primeira aba
+        nome_aba = codigo if total_abas == 1 else f"{codigo}_{aba_idx}"
+        ws = wb.create_sheet(title=nome_aba[:31])
+        ws.append(cabecalho)
+        aba_idx += 1
 
-                    ws.append(partes)
-                    linha_atual += 1
+        with path_evento.open("r", encoding="utf-8", errors="ignore") as f:
+            for linha in f:
+                linha = linha.rstrip("\n")
+                partes = linha.split("|")
 
-                    # Ao atingir limite, cria próxima aba
-                    if linha_atual % MAX_DADOS_POR_ABA == 0 and linha_atual < total_linhas:
-                        nova_aba()
+                partes = partes[:len(cabecalho)]
+                if len(partes) < len(cabecalho):
+                    partes += [""] * (len(cabecalho) - len(partes))
 
-        progresso2.empty()
-        status2.success("✅ Excel gerado com sucesso!")
+                ws.append(partes)
+                linhas_na_aba += 1
 
-        excel_bytes = save_virtual_workbook(wb)  # bytes (estável no Cloud)
-        st.session_state.excel_bytes = excel_bytes
-        st.session_state.estatisticas = estatisticas
+                # bateu o limite da aba: cria a próxima (se ainda tiver mais dados)
+                if linhas_na_aba >= MAX_DADOS_POR_ABA and aba_idx <= total_abas:
+                    linhas_na_aba = 0
+                    nome_aba = codigo if total_abas == 1 else f"{codigo}_{aba_idx}"
+                    ws = wb.create_sheet(title=nome_aba[:31])
+                    ws.append(cabecalho)
+                    aba_idx += 1
+
+    progresso2.empty()
+    status2.success("✅ Excel gerado com sucesso!")
+
+    st.session_state.excel_bytes = save_virtual_workbook(wb)
+    st.session_state.estatisticas = estatisticas
+
 
     # =========================
     # Download
