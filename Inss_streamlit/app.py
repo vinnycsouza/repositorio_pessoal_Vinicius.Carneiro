@@ -1,1111 +1,885 @@
 import io
 import re
+import math
+import unicodedata
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 import pdfplumber
 import pandas as pd
 import streamlit as st
 
-# Seus módulos (usados principalmente no layout analítico)
-from extrator_pdf import extrair_eventos_page, extrair_base_empresa_page, pagina_eh_de_bases
-from calculo_base import calcular_base_por_grupo
-from auditor_base import auditoria_por_exclusao_com_aproximacao
+
+# =========================
+# Config Streamlit
+# =========================
+st.set_page_config(layout="wide")
+st.title("🧾 Auditor Estrutural – Base INSS Patronal (Híbrido + Semáforo)")
 
 
-# ---------------------------
-# Utilidades gerais
-# ---------------------------
+# =========================
+# Utilidades
+# =========================
+def _norm_txt(s: str) -> str:
+    s = s or ""
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
-MESES = {
-    "jan": "01", "janeiro": "01",
-    "fev": "02", "fevereiro": "02",
-    "mar": "03", "marco": "03", "março": "03",
-    "abr": "04", "abril": "04",
-    "mai": "05", "maio": "05",
-    "jun": "06", "junho": "06",
-    "jul": "07", "julho": "07",
-    "ago": "08", "agosto": "08",
-    "set": "09", "setembro": "09",
-    "out": "10", "outubro": "10",
-    "nov": "11", "novembro": "11",
-    "dez": "12", "dezembro": "12",
-}
 
-def normalizar_valor_br(txt: str):
-    if txt is None:
+def _to_float_br(v: str) -> Optional[float]:
+    """
+    Converte número BR:
+      "1.234.567,89" -> 1234567.89
+      "0,00" -> 0.0
+    """
+    if v is None:
         return None
+    s = str(v).strip()
+    s = s.replace("R$", "").strip()
+    # mantém apenas dígitos, ponto, vírgula e sinal
+    s = re.sub(r"[^\d\-,.]", "", s)
+    if not s:
+        return None
+
+    # Heurística BR: último separador decimal costuma ser vírgula
+    # Remove pontos de milhar e troca vírgula por ponto
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
     try:
-        s = str(txt).strip()
-        s = s.replace("R$", "").replace(" ", "")
-        return float(s.replace(".", "").replace(",", "."))
+        return float(s)
     except Exception:
         return None
 
 
-def extrair_competencia_sem_fallback(page):
-    txt = (page.extract_text() or "").lower()
-
-    # 1) 01/2021
-    m = re.search(r"\b(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b", txt)
-    if m:
-        mm = m.group(1).zfill(2)
-        aa = m.group(2)
-        return f"{mm}/{aa}"
-
-    # 2) 01.2012 ou 01-2012
-    m = re.search(r"\b(0?[1-9]|1[0-2])\s*[.\-]\s*(20\d{2})\b", txt)
-    if m:
-        mm = m.group(1).zfill(2)
-        aa = m.group(2)
-        return f"{mm}/{aa}"
-
-    # 3) jan/21
-    m = re.search(r"\b([a-zç]{3,9})\s*/\s*(\d{2})\b", txt)
-    if m:
-        mes_txt = m.group(1).replace("ç", "c")
-        ano2 = m.group(2)
-        if mes_txt in MESES:
-            return f"{MESES[mes_txt]}/20{ano2}"
-
-    # 4) janeiro 2021
-    m = re.search(r"\b([a-zç]{3,9})\s+(20\d{2})\b", txt)
-    if m:
-        mes_txt = m.group(1).replace("ç", "c")
-        aa = m.group(2)
-        if mes_txt in MESES:
-            return f"{MESES[mes_txt]}/{aa}"
-
-    return None
+def _money(v: Optional[float]) -> str:
+    if v is None or (isinstance(v, float) and (math.isnan(v))):
+        return "-"
+    return f"R$ {v:,.2f}"
 
 
-def extrair_competencia_robusta(page, competencia_atual=None):
-    comp = extrair_competencia_sem_fallback(page)
-    return comp if comp else competencia_atual
+def _safe_div(a: float, b: float) -> float:
+    if b == 0:
+        return 0.0
+    return a / b
 
 
-def extrair_totais_proventos_page(page) -> dict | None:
-    """
-    Extrai TOTAIS PROVENTOS ativos desligados total (layout analítico).
-    """
-    padrao = re.compile(
-        r"totais\s+proventos.*?(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
-        r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
-        r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
-        re.IGNORECASE
-    )
-    txt = page.extract_text() or ""
-    m = padrao.search(txt)
-    if not m:
+def _round2(v: Optional[float]) -> Optional[float]:
+    if v is None:
         return None
-
-    a = normalizar_valor_br(m.group(1))
-    d = normalizar_valor_br(m.group(2))
-    t = normalizar_valor_br(m.group(3))
-    if a is None or d is None or t is None:
-        return None
-
-    return {"ativos": a, "desligados": d, "total": t}
+    return float(round(v, 2))
 
 
-def _safe_classificacao(df: pd.DataFrame) -> pd.DataFrame:
-    if "classificacao" not in df.columns:
-        df["classificacao"] = "SEM_CLASSIFICACAO"
-    df["classificacao"] = df["classificacao"].fillna("SEM_CLASSIFICACAO").astype(str)
-    return df
+def _approx_equal(a: float, b: float, tol_abs: float) -> bool:
+    return abs(a - b) <= tol_abs
 
 
-def _mode_or_none(series: pd.Series):
-    if series is None or series.empty:
-        return None
-    vc = series.value_counts(dropna=True)
-    return vc.index[0] if len(vc) else None
-
-def aplicar_semaforo_base(df: pd.DataFrame, modo: str = "RADAR") -> pd.DataFrame:
+# =========================
+# Classificação e Semáforo
+# =========================
+def classificar_rubrica_basico(nome: str) -> str:
     """
-    Define zona_base usando evidências estruturais.
-    modo:
-      - "RADAR": usa impacto_medio_pct + recorrencia_pct + meses_devolvida
-      - "MAPA":  usa impacto_pct_proventos + classificacao
+    Classificação inicial (heurística).
+    Você pode refinar depois com um regras.json se quiser.
+    """
+    n = _norm_txt(nome)
+
+    # Ex.: salário família / educação -> tipicamente FORA
+    fora_keys = [
+        "salario familia", "salario-familia", "sal fam",
+        "salario educacao", "salario-educacao", "sal educ",
+        "indenizacao", "ressarc", "ajuda de custo", "auxilio creche",
+        "diaria", "vale transporte", "vale alimentacao", "vale refeicao",
+        "plano de saude", "assistencia medica", "assistencia odont",
+    ]
+    entra_keys = [
+        "salario", "salario normal", "vencimento", "pro labore",
+        "hora extra", "adicional", "periculos", "insalubr",
+        "comissao", "gratificacao", "premio", "bonus", "dsr",
+        "ferias", "1/3", "terco ferias",
+    ]
+
+    if any(k in n for k in fora_keys):
+        return "FORA"
+    if any(k in n for k in entra_keys):
+        return "ENTRA"
+    return "NEUTRA"
+
+
+def aplicar_semaforo_base(df: pd.DataFrame, modo: str = "MAPA") -> pd.DataFrame:
+    """
+    Define zona_base:
+      🟢 INCIDE       = tendência de incidência clara
+      🟡 ZONA_CINZA   = oscilação / impacto relevante / devolvida
+      🔴 FORA         = tendência de não incidência clara
     """
     out = df.copy()
 
-    # garante colunas esperadas (evita KeyError)
     if "classificacao" not in out.columns:
         out["classificacao"] = "SEM_CLASSIFICACAO"
 
-    if modo.upper() == "RADAR":
-        for c in ["impacto_medio_pct", "recorrencia_pct", "meses_devolvida", "valor_total_devolvido", "score_risco"]:
-            if c not in out.columns:
-                out[c] = pd.NA
-
-        # “devolvida” = apareceu devolvida em pelo menos 1 período
-        # (meses_devolvida vem do merge do radar; se não vier, fica 0)
-        out["devolvida"] = out["meses_devolvida"].fillna(0).astype(float) > 0
+    if modo.upper() == "MAPA":
+        if "impacto_pct_proventos" not in out.columns:
+            out["impacto_pct_proventos"] = 0.0
 
         def _cls(row):
-            cls = str(row.get("classificacao_mais_comum") or row.get("classificacao") or "")
-            cls2 = str(row.get("classificacao_mapa_mais_comum") or "")
-            impacto = float(row.get("impacto_medio_pct") or 0)
-            rec = float(row.get("recorrencia_pct") or 0)
-            score = row.get("score_risco")
-            score = float(score) if score is not None and not pd.isna(score) else (rec * impacto)
-            devolvida = bool(row.get("devolvida", False))
-
-            # 🔴 FORA: tende a ficar fora e sem “oscilação”
-            if ("FORA" in (cls, cls2)) and (rec >= 50) and (impacto < 2) and (not devolvida):
-                return "🔴 FORA"
-
-            # 🟢 INCIDE: ENTRA/estável e sem sinal estrutural de oscilação
-            if ("ENTRA" in (cls, cls2)) and (rec < 30) and (impacto >= 2) and (not devolvida):
-                return "🟢 INCIDE"
-
-            # 🟡 ZONA CINZA: onde mora o crédito (oscilação/recorrência/impacto/devolvida)
-            if devolvida or rec >= 30 or impacto >= 3 or score >= 60:
-                return "🟡 ZONA_CINZA"
-
-            return "🟢 INCIDE"
-
-        out["zona_base"] = out.apply(_cls, axis=1)
-
-    else:  # MODO MAPA
-        for c in ["impacto_pct_proventos", "valor"]:
-            if c not in out.columns:
-                out[c] = 0.0
-
-        def _cls_map(row):
-            cls = str(row.get("classificacao") or "")
-            impacto = float(row.get("impacto_pct_proventos") or 0)
+            cls = str(row.get("classificacao") or "SEM_CLASSIFICACAO")
+            impacto = float(row.get("impacto_pct_proventos") or 0.0)
 
             if cls == "FORA" and impacto < 2:
                 return "🔴 FORA"
             if cls == "ENTRA" and impacto >= 3:
                 return "🟢 INCIDE"
-            # neutra/sem_classificação com impacto relevante = zona cinza
             if cls in ("NEUTRA", "SEM_CLASSIFICACAO") and impacto >= 1:
                 return "🟡 ZONA_CINZA"
-            # qualquer coisa com impacto grande merece amarelo
             if impacto >= 3:
                 return "🟡 ZONA_CINZA"
             return "🟢 INCIDE"
 
-        out["zona_base"] = out.apply(_cls_map, axis=1)
+        out["zona_base"] = out.apply(_cls, axis=1)
+        return out
 
+    # RADAR
+    for c in ["impacto_medio_pct", "recorrencia_pct", "meses_devolvida", "valor_total_devolvido", "score_risco"]:
+        if c not in out.columns:
+            out[c] = pd.NA
+
+    out["devolvida"] = out["meses_devolvida"].fillna(0).astype(float) > 0
+
+    def _cls_radar(row):
+        cls = str(row.get("classificacao_mais_comum") or row.get("classificacao") or "SEM_CLASSIFICACAO")
+        cls_mapa = str(row.get("classificacao_mapa_mais_comum") or "")
+        impacto = float(row.get("impacto_medio_pct") or 0.0)
+        rec = float(row.get("recorrencia_pct") or 0.0)
+        score = row.get("score_risco")
+        score = float(score) if score is not None and not pd.isna(score) else (rec * impacto)
+        devolvida = bool(row.get("devolvida", False))
+
+        # 🔴 fora estável (fora + pouco impacto + sem devolução)
+        if ("FORA" in (cls, cls_mapa)) and (rec >= 50) and (impacto < 2) and (not devolvida):
+            return "🔴 FORA"
+
+        # 🟢 incide estável
+        if ("ENTRA" in (cls, cls_mapa)) and (impacto >= 2) and (rec < 30) and (not devolvida):
+            return "🟢 INCIDE"
+
+        # 🟡 zona cinza
+        if devolvida or rec >= 30 or impacto >= 3 or score >= 60:
+            return "🟡 ZONA_CINZA"
+
+        return "🟢 INCIDE"
+
+    out["zona_base"] = out.apply(_cls_radar, axis=1)
     return out
 
-# ---------------------------
-# Detector híbrido de layout
-# ---------------------------
 
-def detectar_layout_pdf(pages_text: list[str]) -> str:
-    """
-    Retorna: 'ANALITICO' | 'RESUMO'
-    (Resumo cobre: "Resumo Geral", "Resumo da Folha", layouts sem ATIVOS/DESLIGADOS monetário)
-    """
-    joined = "\n".join([t for t in pages_text if t]).lower()
-
-    # Evidência forte de analítico:
-    if ("cod provento" in joined and "cod desconto" in joined and "ativos" in joined and "desligados" in joined):
-        return "ANALITICO"
-    if ("ativos" in joined and "desligados" in joined and "totais proventos" in joined):
-        return "ANALITICO"
-
-    # Evidência de resumo:
-    if "resumo da folha" in joined:
-        return "RESUMO"
-    if "resumo geral" in joined:
-        return "RESUMO"
-    if ("vencimentos" in joined and "descontos" in joined and "base inss" in joined):
-        return "RESUMO"
-    if ("evento" in joined and "descr" in joined and "qtd" in joined and "valor" in joined):
-        return "RESUMO"
-
-    return "RESUMO"
+# =========================
+# Assinatura estrutural / Layout
+# =========================
+@dataclass
+class Assinatura:
+    familia_layout: str
+    sistema_provavel: str
 
 
-# ---------------------------
-# Reconhecimento de sistema por assinatura estrutural
-# ---------------------------
+def reconhecer_assinatura(texto: str) -> Tuple[str, Assinatura]:
+    t = _norm_txt(texto)
 
-def _score_any(text: str, patterns: list[str]) -> int:
-    return sum(1 for p in patterns if p in text)
-
-def reconhecer_sistema_por_assinatura(pages_text: list[str]) -> dict:
-    """
-    Retorna:
-    - familia_layout: 'ANALITICO_ESPELHADO' | 'RESUMO_EVENTO_QTD' | 'RESUMO_VENC_DESC_BASE' | 'DESCONHECIDO'
-    - sistema_provavel: string amigável (palpite por família)
-    - confianca: 0-100
-    - evidencias: lista curta
-    - scores: debug
-    """
-    joined = "\n".join([t for t in pages_text if t]).lower()
-    evid = []
-
-    s_analitico = _score_any(joined, [
-        "cod provento", "cod desconto", "ativos", "desligados", "totais proventos"
-    ])
-    s_evento_qtd = _score_any(joined, [
-        "evento", "descr", "qtd", "refer", "valor"
-    ])
-    s_venc_desc = _score_any(joined, [
-        "vencimentos", "descontos", "base inss", "base inss empresa"
-    ])
-
-    scores = {
-        "ANALITICO_ESPELHADO": s_analitico,
-        "RESUMO_EVENTO_QTD": s_evento_qtd,
-        "RESUMO_VENC_DESC_BASE": s_venc_desc,
-    }
-    familia = max(scores, key=scores.get)
-    top = scores[familia]
-    if top == 0:
-        familia = "DESCONHECIDO"
-
-    # evidências
-    if "cod provento" in joined: evid.append("COD PROVENTO")
-    if "cod desconto" in joined: evid.append("COD DESCONTO")
-    if "ativos" in joined: evid.append("ATIVOS")
-    if "desligados" in joined: evid.append("DESLIGADOS")
-    if "totais proventos" in joined: evid.append("TOTAIS PROVENTOS")
-    if "resumo da folha" in joined: evid.append("RESUMO DA FOLHA")
-    if "resumo geral" in joined: evid.append("RESUMO GERAL")
-    if "vencimentos" in joined: evid.append("VENCIMENTOS")
-    if "descontos" in joined: evid.append("DESCONTOS")
-    if "base inss empresa" in joined or "base inss (empresa)" in joined: evid.append("BASE INSS EMPRESA")
-    if "evento" in joined and "qtd" in joined: evid.append("EVENTO/QTD")
-
-    if familia == "ANALITICO_ESPELHADO":
-        sistema = "Domínio/Questor/Mastermaq (família analítica espelhada)"
-        confianca = min(95, 60 + top * 10)
-    elif familia == "RESUMO_EVENTO_QTD":
-        sistema = "Senior/Alterdata/TOTVS (família resumo por evento)"
-        confianca = min(90, 55 + top * 10)
-    elif familia == "RESUMO_VENC_DESC_BASE":
-        sistema = "TOTVS (Protheus/RM)/Senior (família vencimentos/descontos/base)"
-        confianca = min(90, 55 + top * 10)
-    else:
-        sistema = "Não identificado"
-        confianca = 10
-
-    return {
-        "familia_layout": familia,
-        "sistema_provavel": sistema,
-        "confianca": int(confianca),
-        "evidencias": evid[:10],
-        "scores": scores,
-    }
-
-
-# ---------------------------
-# Extratores para layout RESUMO (GLOBAL)
-# ---------------------------
-
-def extrair_base_inss_global_texto(texto: str) -> float | None:
-    """
-    Encontra a melhor base INSS 'empresa' em PDFs de resumo.
-    Heurística: maior candidato.
-    """
-    if not texto:
-        return None
-
-    txt = texto.replace("\n", " ")
-    padroes = [
-        r"\bbase\s+inss\s*\(?.{0,15}empresa.{0,15}\)?\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
-        r"\bbase\s+inss\s+empresa\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
-        r"\bbase\s+inss\s*[:\-]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
+    # Indicadores de analítico “espelhado” (provento | desconto na mesma linha)
+    analitico_keys = [
+        "cod provento", "cod desconto", "proventos", "descontos",
+        "ativos", "desligados", "total"
+    ]
+    # Indicadores de resumo
+    resumo_keys = [
+        "resumo da folha", "totais", "totalizadores",
+        "salario contribuicao", "salario contribuicao empresa", "terceiros", "fap"
     ]
 
-    candidatos = []
-    for p in padroes:
-        for m in re.finditer(p, txt, flags=re.IGNORECASE):
-            v = normalizar_valor_br(m.group(1))
-            if v is not None:
-                candidatos.append(v)
+    is_analitico = sum(k in t for k in analitico_keys) >= 3
+    is_resumo = sum(k in t for k in resumo_keys) >= 2
 
-    if not candidatos:
+    if is_analitico and not is_resumo:
+        # família e “sistema provável” (heurístico)
+        fam = "ANALITICO_ESPELHADO"
+        sist = "DOMINIO/QUESTOR (provável)"
+        return "ANALITICO", Assinatura(fam, sist)
+
+    if is_resumo and not is_analitico:
+        fam = "RESUMO_BASES"
+        sist = "SENIOR/TOTVS (provável)"
+        return "RESUMO", Assinatura(fam, sist)
+
+    # híbrido / indefinido
+    fam = "HIBRIDO/INDEFINIDO"
+    sist = "NÃO IDENTIFICADO (híbrido)"
+    # fallback: se tem cod provento e cod desconto, assume analítico
+    if "cod provento" in t and "cod desconto" in t:
+        return "ANALITICO", Assinatura("ANALITICO_ESPELHADO", sist)
+    return "RESUMO", Assinatura(fam, sist)
+
+
+# =========================
+# Competência
+# =========================
+def extrair_competencia(texto: str, fallback: Optional[str]) -> Optional[str]:
+    """
+    Extrai competência do texto da página (ex.: 01/2012).
+    """
+    t = texto or ""
+    # Padrões comuns
+    m = re.search(r"\b(0[1-9]|1[0-2])\s*/\s*(20\d{2}|19\d{2})\b", t)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+
+    # Alguns modelos usam "Competência: 01.2012"
+    m2 = re.search(r"compet[êe]ncia[:\s]*\b(0[1-9]|1[0-2])[./-](20\d{2}|19\d{2})\b", t, re.IGNORECASE)
+    if m2:
+        return f"{m2.group(1)}/{m2.group(2)}"
+
+    return fallback
+
+
+# =========================
+# Extração de BASE INSS EMPRESA
+# =========================
+def extrair_base_inss_empresa(texto: str) -> Optional[Dict[str, float]]:
+    """
+    Tenta achar "Salário Contribuição Empresa" por grupo (ativos/desligados/total).
+    Em muitos PDFs isso aparece como um bloco de bases.
+    Retorna dict com chaves: ativos/desligados/total quando achar.
+    """
+    t = texto or ""
+    tn = _norm_txt(t)
+
+    # busca linha que contenha "salario contribuicao empresa"
+    # e tenta capturar 3 valores (ativos/desligados/total) ou 1 valor (total)
+    if "salario contribuicao empresa" not in tn:
         return None
 
-    return float(max(candidatos))
+    # tenta capturar "xxx  yyy  zzz" na mesma linha (BR)
+    # Ex.: "Salario Contribuicao Empresa 1.854.598,59 56.746,96 1.911.345,55"
+    # ou "Salario Contribuicao Empresa 1.911.345,55"
+    # pega trecho de 0-120 chars após a chave
+    idx = tn.find("salario contribuicao empresa")
+    snippet = t[idx: idx + 200] if idx >= 0 else t
+
+    nums = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})", snippet)
+    vals = [_to_float_br(n) for n in nums if _to_float_br(n) is not None]
+    vals = [v for v in vals if v is not None]
+
+    if not vals:
+        return None
+
+    if len(vals) >= 3:
+        return {"ativos": float(vals[0]), "desligados": float(vals[1]), "total": float(vals[2])}
+    # fallback total
+    return {"total": float(vals[0])}
 
 
-def extrair_eventos_resumo_page(page) -> list[dict]:
+# =========================
+# Extração de Eventos (rubricas)
+# =========================
+def _parse_linha_analitica(linha: str) -> List[Dict]:
     """
-    Extrai eventos em RESUMO (GLOBAL) respeitando 2 colunas:
-    - 2012: linhas com '|' separando PROVENTOS (esq) e DESCONTOS (dir)
-    - 2018: 2 rubricas na mesma linha (sem '|')
-    Saída:
-      ativos = valor, desligados = 0, total = valor
+    Analítico espelhado:
+      [COD PROVENTO] [DESC PROVENTO] [REFER?] [ATIVOS] [DESLIGADOS] [TOTAL] [COD DESC] [DESC DESC] [REFER?] [ATIVOS] [DESLIGADOS] [TOTAL]
+
+    Como os PDFs variam, a gente faz uma heurística:
+      - Procura 6 números BR (ativos/desligados/total) para provento e 3 para desconto
+      - Divide no meio se achar 6 números no total (3+3)
     """
-    txt = page.extract_text() or ""
-    if not txt.strip():
-        return []
+    out = []
+    s = re.sub(r"\s+", " ", (linha or "")).strip()
+    if not s:
+        return out
 
-    linhas = [ln.rstrip() for ln in txt.splitlines() if ln.strip()]
-    eventos = []
+    # Captura números BR na linha (valores)
+    nums = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})", s)
+    vals = [_to_float_br(n) for n in nums]
+    vals = [v for v in vals if v is not None]
 
-    secao = None  # PROVENTO / DESCONTO
+    # Precisamos de pelo menos 3 valores para considerar evento (ativos/desligados/total)
+    # Se tiver 6, pode ser provento+desconto na mesma linha
+    if len(vals) < 3:
+        return out
 
-    def ultimo_numero_br(s: str):
-        nums = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})", s)
-        if not nums:
-            return None
-        return normalizar_valor_br(nums[-1])
+    # Identifica um "código" no começo
+    m_cod = re.match(r"^\s*(\d{3,5})\s+(.*)$", s)
+    cod = m_cod.group(1) if m_cod else ""
+    resto = m_cod.group(2) if m_cod else s
 
-    def primeiro_codigo(s: str):
-        m = re.search(r"\b(\d{3,6})\b", s)
-        return m.group(1) if m else None
+    # Tenta separar descrição removendo os números do final
+    # Vamos cortar a string na posição do primeiro número encontrado
+    m_first_num = re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})", resto)
+    desc = resto[: m_first_num.start()].strip() if m_first_num else resto.strip()
 
-    def limpar_desc(cod: str, chunk: str):
-        x = re.sub(r"^\s*" + re.escape(cod) + r"\s+", "", chunk).strip()
-        nums = re.findall(r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})", x)
-        if nums:
-            x = re.sub(re.escape(nums[-1]) + r"\s*$", "", x).strip()
-        x = re.sub(r"\s{2,}", " ", x)
-        return x
+    # Se tiver 6+ valores, assume 3 provento + 3 desconto (pegando os 6 últimos)
+    if len(vals) >= 6:
+        last6 = vals[-6:]
+        prov = last6[:3]
+        descv = last6[3:]
 
-    def add_event(tipo: str, cod: str, desc: str, valor: float):
-        rubrica = f"{cod} {desc}".strip()
-        eventos.append({
-            "rubrica": rubrica,
-            "tipo": tipo,
-            "ativos": float(valor),
-            "desligados": 0.0,
-            "total": float(valor),
+        out.append({
+            "rubrica": f"{cod} {desc}".strip(),
+            "tipo": "PROVENTO",
+            "ativos": float(prov[0]),
+            "desligados": float(prov[1]),
+            "total": float(prov[2]),
         })
+        # para desconto, o texto geralmente tem outra descrição, mas no resumo espelhado
+        # muitas vezes ela vem depois — aqui fica como "DESCONTO (mesma linha)".
+        out.append({
+            "rubrica": f"{cod} {desc} (DESCONTO?)".strip(),
+            "tipo": "DESCONTO",
+            "ativos": float(descv[0]),
+            "desligados": float(descv[1]),
+            "total": float(descv[2]),
+        })
+        return out
 
-    for ln in linhas:
-        l = ln.lower()
+    # Caso tenha só 3 valores: assume é uma linha de um dos quadros (provento OU desconto)
+    v3 = vals[-3:]
+    out.append({
+        "rubrica": f"{cod} {desc}".strip(),
+        "tipo": "PROVENTO",  # por default; depois tentamos reclassificar
+        "ativos": float(v3[0]),
+        "desligados": float(v3[1]),
+        "total": float(v3[2]),
+    })
+    return out
 
-        if "vencimentos" in l or "proventos" in l:
-            secao = "PROVENTO"
+
+def _parse_linhas_resumo(texto: str) -> List[Dict]:
+    """
+    Resumo geralmente vem em blocos menos estruturados.
+    Aqui tentamos capturar linhas com rubrica + valor (total).
+    """
+    out = []
+    lines = (texto or "").splitlines()
+    for ln in lines:
+        s = re.sub(r"\s+", " ", ln).strip()
+        if not s:
             continue
-        if "descontos" in l:
-            secao = "DESCONTO"
+        # ignora cabeçalhos comuns
+        tn = _norm_txt(s)
+        if any(k in tn for k in ["resumo", "total", "totais", "base", "salario contribuicao", "terceiros", "fap"]):
             continue
 
-        if "base inss" in l:
+        # rubrica + 1 valor BR
+        m = re.search(r"^(.*?)(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s*$", s)
+        if not m:
             continue
-        if "resumo" in l and "folha" in l:
-            continue
-        if "total geral" in l:
-            continue
-        if "evento" in l and "descricao" in l and "valor" in l:
+        nome = m.group(1).strip(" -:")
+        val = _to_float_br(m.group(2))
+        if val is None or val == 0:
             continue
 
-        # Modelo com colunas separadas por '|'
-        if "|" in ln:
-            partes = [p.strip() for p in ln.split("|")]
-            blocos = [p for p in partes if p and re.search(r"\b\d{3,6}\b", p)]
-            if len(blocos) >= 2:
-                esq, dir = blocos[0], blocos[1]
+        out.append({
+            "rubrica": nome,
+            "tipo": "PROVENTO",   # em resumo, muitas vezes não dá para separar; tratamos como provento
+            "ativos": 0.0,
+            "desligados": 0.0,
+            "total": float(val),
+        })
+    return out
 
-                cod_esq = primeiro_codigo(esq)
-                val_esq = ultimo_numero_br(esq)
-                if cod_esq and val_esq is not None:
-                    desc_esq = limpar_desc(cod_esq, esq)
-                    add_event("PROVENTO", cod_esq, desc_esq, val_esq)
 
-                cod_dir = primeiro_codigo(dir)
-                val_dir = ultimo_numero_br(dir)
-                if cod_dir and val_dir is not None:
-                    desc_dir = limpar_desc(cod_dir, dir)
-                    add_event("DESCONTO", cod_dir, desc_dir, val_dir)
+def extrair_eventos_de_pagina(texto: str, layout: str) -> List[Dict]:
+    if layout == "ANALITICO":
+        eventos = []
+        for ln in (texto or "").splitlines():
+            # Heurística: linha com valores BR e algum “código”
+            if not re.search(r"\d{1,3}(?:\.\d{3})*,\d{2}", ln):
                 continue
-            elif len(blocos) == 1:
-                ln = blocos[0]
-
-        # Modelo “grudado”: 2 códigos na mesma linha
-        cod_pos = []
-        for m in re.finditer(r"\b(\d{3,6})\b", ln):
-            cod = m.group(1)
-            after = ln[m.end():m.end()+2]
-            if after.strip() == "":
+            if not re.search(r"^\s*\d{3,5}\s+", ln):
                 continue
-            cod_pos.append((cod, m.start()))
-        cod_pos = sorted(cod_pos, key=lambda x: x[1])
+            eventos.extend(_parse_linha_analitica(ln))
+        return eventos
 
-        if len(cod_pos) >= 2:
-            (cod1, p1), (cod2, p2) = cod_pos[0], cod_pos[1]
-            chunk1 = ln[p1:p2].strip()
-            chunk2 = ln[p2:].strip()
+    # RESUMO
+    return _parse_linhas_resumo(texto)
 
-            v1 = ultimo_numero_br(chunk1)
-            v2 = ultimo_numero_br(chunk2)
 
-            if v1 is not None:
-                add_event("PROVENTO", cod1, limpar_desc(cod1, chunk1), v1)
-            if v2 is not None:
-                add_event("DESCONTO", cod2, limpar_desc(cod2, chunk2), v2)
+def ajustar_tipo_por_heuristica(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Em analítico, parte das linhas pode vir como PROVENTO por default.
+    Tentamos identificar DESCONTO por palavras-chave.
+    """
+    out = df.copy()
+    if out.empty:
+        return out
+
+    def _tipo(row):
+        nome = _norm_txt(str(row.get("rubrica", "")))
+        if any(k in nome for k in ["inss", "irrf", "falt", "emprest", "plano", "mensal", "pensao", "sind", "liquido", "desconto"]):
+            return "DESCONTO"
+        return row.get("tipo", "PROVENTO")
+
+    out["tipo"] = out.apply(_tipo, axis=1)
+    return out
+
+
+# =========================
+# Reconstrução por exclusão (DEVOLVIDAS)
+# =========================
+def reconstruir_por_exclusao(
+    df_eventos: pd.DataFrame,
+    base_of: Optional[Dict[str, float]],
+    grupo: str,
+    tol_abs: float,
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """
+    Estratégia:
+      - Começa com proventos do grupo (ativos/desligados/total)
+      - Define GAP = proventos - base_of[grupo]
+      - Seleciona candidatas (classificacao FORA/NEUTRA e/ou descontos negativos suspeitos)
+      - "Devolve" rubricas tentando somar próximo ao GAP
+    Retorna:
+      - devolvidas (df)
+      - resumo com gap e info
+    """
+    if df_eventos.empty or base_of is None:
+        return pd.DataFrame(), {"gap": 0.0, "proventos": float(df_eventos.get(grupo, pd.Series([0])).sum())}
+
+    base_g = base_of.get(grupo)
+    if base_g is None:
+        return pd.DataFrame(), {"gap": 0.0, "proventos": float(df_eventos.get(grupo, pd.Series([0])).sum())}
+
+    # proventos do grupo
+    prov = df_eventos[df_eventos["tipo"] == "PROVENTO"].copy()
+    proventos_g = float(prov[grupo].sum())
+
+    gap = proventos_g - float(base_g)
+
+    # Candidatas = rubricas PROVENTO com classificacao != ENTRA
+    cand = prov.copy()
+    cand["classificacao"] = cand["rubrica"].apply(classificar_rubrica_basico)
+    cand = cand[cand["classificacao"] != "ENTRA"].copy()
+
+    if cand.empty:
+        return pd.DataFrame(), {"gap": gap, "proventos": proventos_g}
+
+    # Ordena por valor desc
+    cand["valor"] = cand[grupo].astype(float)
+    cand = cand[cand["valor"] != 0].copy()
+    cand = cand.sort_values("valor", ascending=False)
+
+    # Se gap <= 0, não faz sentido “tirar”
+    if gap <= 0:
+        return pd.DataFrame(), {"gap": gap, "proventos": proventos_g}
+
+    # Heurística gulosa + refinamento local (bom para PDF resumido)
+    chosen = []
+    soma = 0.0
+
+    for _, r in cand.iterrows():
+        v = float(r["valor"])
+        if v <= 0:
             continue
+        if soma + v <= gap + tol_abs:
+            chosen.append(r)
+            soma += v
+        if _approx_equal(soma, gap, tol_abs):
+            break
 
-        # Linha simples (1 rubrica)
-        m_cod = re.match(r"^\s*(\d{3,6})\s+(.+)$", ln)
-        if not m_cod:
-            continue
+    devolvidas = pd.DataFrame(chosen) if chosen else pd.DataFrame(columns=list(cand.columns))
+    if not devolvidas.empty:
+        devolvidas = devolvidas[["rubrica", "classificacao", grupo, "total"]].copy()
+        devolvidas = devolvidas.rename(columns={grupo: "valor_devolvido"})
+        devolvidas["grupo"] = grupo.upper()
 
-        cod = m_cod.group(1)
-        resto = m_cod.group(2)
-        val = ultimo_numero_br(resto)
-        if val is None:
-            continue
-
-        desc = limpar_desc(cod, f"{cod} {resto}")
-        tipo = secao if secao in ("PROVENTO", "DESCONTO") else "PROVENTO"
-        add_event(tipo, cod, desc, val)
-
-    return eventos
+    return devolvidas, {"gap": gap, "proventos": proventos_g, "soma_devolvida": soma, "base_oficial": float(base_g)}
 
 
-def diagnostico_extracao_proventos(df_eventos: pd.DataFrame, tol_inconsistencia: float = 1.00) -> pd.DataFrame:
-    df = df_eventos.copy()
-    if df.empty:
-        return df
+# =========================
+# UI – Inputs
+# =========================
+colA, colB, colC, colD = st.columns(4)
 
-    for col in ["ativos", "desligados", "total"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+with colA:
+    tol_min = st.number_input("Tolerância mínima (R$)", value=10.0, step=10.0)
+with colB:
+    tol_max = st.number_input("Tolerância máxima (R$)", value=10000.0, step=100.0)
+with colC:
+    mapa_incidencia_on = st.toggle("Ativar Mapa de Incidência", value=True)
+with colD:
+    radar_on = st.toggle("Ativar Radar Estrutural", value=True)
 
-    df = df[df["tipo"] == "PROVENTO"].copy()
-    if df.empty:
-        return df
+st.caption("📌 Dica: Se o PDF for resumido, aumente a tolerância máxima. Se for analítico e bem extraído, reduza.")
 
-    df["soma_partes"] = df["ativos"] + df["desligados"]
-    df["delta_total_vs_partes"] = (df["total"] - df["soma_partes"]).abs()
-
-    df["flag_inconsistencia_total"] = df["delta_total_vs_partes"] > tol_inconsistencia
-    df["flag_total_sem_partes"] = (df["total"] > 0) & (df["ativos"] == 0) & (df["desligados"] == 0)
-    df["flag_partes_sem_total"] = ((df["ativos"] > 0) | (df["desligados"] > 0)) & (df["total"] == 0)
-
-    rub = df["rubrica"].fillna("").astype(str)
-    df["flag_rubrica_curta"] = rub.str.len() <= 6
-    df["flag_rubrica_somente_num"] = rub.str.match(r"^\s*\d+\s*$")
-
-    df["score_suspeita"] = (
-        df["flag_inconsistencia_total"].astype(int) * 3 +
-        df["flag_total_sem_partes"].astype(int) * 2 +
-        df["flag_partes_sem_total"].astype(int) * 2 +
-        df["flag_rubrica_curta"].astype(int) * 1 +
-        df["flag_rubrica_somente_num"].astype(int) * 1
-    )
-
-    cols_out = [
-        "rubrica", "ativos", "desligados", "total",
-        "soma_partes", "delta_total_vs_partes",
-        "flag_inconsistencia_total", "flag_total_sem_partes", "flag_partes_sem_total",
-        "flag_rubrica_curta", "flag_rubrica_somente_num",
-        "score_suspeita"
-    ]
-    cols_out = [c for c in cols_out if c in df.columns]
-    return df[cols_out].sort_values(["score_suspeita", "delta_total_vs_partes", "total"], ascending=[False, False, False])
-
-
-# ---------------------------
-# UI
-# ---------------------------
-
-st.set_page_config(layout="wide")
-st.title("🧾 Auditor INSS — Híbrido + Assinatura Estrutural (com filtros)")
-
-arquivos = st.file_uploader("Envie 1 ou mais PDFs", type="pdf", accept_multiple_files=True)
-
-st.markdown("### Configurações")
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    tol_totalizador = st.number_input("Tolerância totalizador (R$)", min_value=0.0, value=1.00, step=0.50)
-with c2:
-    banda_ok = st.number_input("Banda OK (|erro| ≤)", min_value=0.0, value=10.0, step=1.0)
-with c3:
-    banda_aceitavel = st.number_input("Banda ACEITÁVEL (|erro| ≤)", min_value=0.0, value=10000.0, step=100.0)
-with c4:
-    modo_auditor_prof = st.checkbox("🕵️ Auditor Profissional", value=True)
-
-indice_incidencia_on = st.checkbox("📈 Índice de Incidência", value=True)
-mapa_incidencia_on = st.checkbox("🧭 Mapa de Incidência (impacto %)", value=True)
-radar_on = st.checkbox("📡 Radar Estrutural Automático", value=True)
-
-st.info(
-    "✅ Detector Híbrido decide entre **ANALÍTICO** (ATIVOS/DESLIGADOS) e **RESUMO** (GLOBAL).\n"
-    "✅ Assinatura estrutural sugere a **família** e um **sistema provável** (heurística).\n"
-    "✅ Filtros permitem analisar lotes misturados com mais controle."
+arquivos = st.file_uploader(
+    "Envie PDF(s) de folha de pagamento",
+    type="pdf",
+    accept_multiple_files=True
 )
 
+# =========================
+# Acumuladores (sempre definidos)
+# =========================
 linhas_resumo = []
 linhas_devolvidas = []
 linhas_diagnostico = []
 linhas_mapa = []
 eventos_dump = []
 
+
+# =========================
+# Execução principal
+# =========================
 if arquivos:
-
-    df_resumo = pd.DataFrame(linhas_resumo)
-    df_devolvidas = pd.DataFrame(linhas_devolvidas)
-    df_diag = pd.DataFrame(linhas_diagnostico)
-    df_mapa = pd.DataFrame(linhas_mapa)
-    df_eventos = pd.concat(eventos_dump, ignore_index=True) if eventos_dump else pd.DataFrame()
-
-    # ... tabs / filtros / excel / download_button ...
-
-else:
-    st.info("Envie um ou mais PDFs para iniciar.")
+    # limpa para evitar acumulo em rerun
+    linhas_resumo.clear()
+    linhas_devolvidas.clear()
+    linhas_diagnostico.clear()
+    linhas_mapa.clear()
+    eventos_dump.clear()
 
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
-            texts = [(p.extract_text() or "") for p in pdf.pages[:2]]
-            layout = detectar_layout_pdf(texts)
-            assin = reconhecer_sistema_por_assinatura(texts)
-
-            dados = {}
             comp_atual = None
+            base_oficial_por_comp: Dict[str, Dict[str, float]] = {}
+            eventos_por_comp: Dict[str, List[Dict]] = {}
+            layout_por_comp: Dict[str, str] = {}
+            assin_por_comp: Dict[str, Assinatura] = {}
 
             for page in pdf.pages:
-                comp_atual = extrair_competencia_robusta(page, comp_atual)
+                texto = page.extract_text() or ""
+                comp_atual = extrair_competencia(texto, comp_atual)
                 if not comp_atual:
-                    comp_atual = "SEM_COMP"
+                    # sem competência, ignora (ou poderia agrupar em "SEM_COMP")
+                    continue
 
-                dados.setdefault(comp_atual, {"eventos": [], "base_empresa": None, "totais_proventos_pdf": None})
+                layout, assin = reconhecer_assinatura(texto)
+                layout_por_comp[comp_atual] = layout
+                assin_por_comp[comp_atual] = assin
 
-                # Base oficial
-                if layout == "ANALITICO":
-                    if pagina_eh_de_bases(page):
-                        base = extrair_base_empresa_page(page)
-                        if base and dados[comp_atual]["base_empresa"] is None:
-                            dados[comp_atual]["base_empresa"] = base
-                else:
-                    if dados[comp_atual]["base_empresa"] is None:
-                        base = None
-                        try:
-                            base = extrair_base_empresa_page(page)
-                        except Exception:
-                            base = None
+                # base inss empresa
+                b = extrair_base_inss_empresa(texto)
+                if b:
+                    # guarda a primeira ocorrência por comp
+                    base_oficial_por_comp.setdefault(comp_atual, b)
 
-                        if base:
-                            dados[comp_atual]["base_empresa"] = base
-                        else:
-                            b = extrair_base_inss_global_texto(page.extract_text() or "")
-                            if b is not None:
-                                dados[comp_atual]["base_empresa"] = {"total": float(b)}
+                # eventos
+                evs = extrair_eventos_de_pagina(texto, layout)
+                if evs:
+                    eventos_por_comp.setdefault(comp_atual, [])
+                    eventos_por_comp[comp_atual].extend(evs)
 
-                # Totalizador (apenas analítico)
-                if layout == "ANALITICO":
-                    tot = extrair_totais_proventos_page(page)
-                    if tot and dados[comp_atual]["totais_proventos_pdf"] is None:
-                        dados[comp_atual]["totais_proventos_pdf"] = tot
+            # =========================
+            # Processa cada competência encontrada neste PDF
+            # =========================
+            for comp, evs in eventos_por_comp.items():
+                layout = layout_por_comp.get(comp, "RESUMO")
+                assin = assin_por_comp.get(comp, Assinatura("HIBRIDO/INDEFINIDO", "NÃO IDENTIFICADO"))
 
-                # Eventos
-                if layout == "ANALITICO":
-                    try:
-                        dados[comp_atual]["eventos"].extend(extrair_eventos_page(page))
-                    except Exception:
-                        dados[comp_atual]["eventos"].extend(extrair_eventos_resumo_page(page))
-                else:
-                    dados[comp_atual]["eventos"].extend(extrair_eventos_resumo_page(page))
+                df = pd.DataFrame(evs)
+                if df.empty:
+                    continue
 
-        # Por competência
-        for comp, info in dados.items():
-            df = pd.DataFrame(info["eventos"])
-            if df.empty:
-                linhas_resumo.append({
+                # Normaliza colunas
+                for c in ["ativos", "desligados", "total"]:
+                    if c not in df.columns:
+                        df[c] = 0.0
+                    df[c] = df[c].fillna(0).astype(float)
+
+                # Ajusta tipo por heurística e classifica rubrica
+                df = ajustar_tipo_por_heuristica(df)
+                df["classificacao"] = df["rubrica"].apply(classificar_rubrica_basico)
+
+                # remove duplicados “idênticos”
+                df = df.drop_duplicates(subset=["rubrica", "tipo", "ativos", "desligados", "total"]).reset_index(drop=True)
+
+                # Totais de proventos por grupo
+                prov = df[df["tipo"] == "PROVENTO"].copy()
+                totais_usados = {
+                    "ativos": float(prov["ativos"].sum()),
+                    "desligados": float(prov["desligados"].sum()),
+                    "total": float(prov["total"].sum()),
+                }
+
+                base_of = base_oficial_por_comp.get(comp)
+
+                # =========================
+                # Resumo
+                # =========================
+                linha_res = {
                     "arquivo": arquivo.name,
                     "competencia": comp,
                     "layout": layout,
-                    "grupo": "",
-                    "status": "SEM_EVENTOS",
-                    "familia_layout": assin["familia_layout"],
-                    "sistema_provavel": assin["sistema_provavel"],
-                    "confianca_assinatura": assin["confianca"],
-                    "evidencias_assinatura": ", ".join(assin["evidencias"]),
-                })
-                continue
-
-            for c in ["rubrica", "tipo", "ativos", "desligados", "total"]:
-                if c not in df.columns:
-                    df[c] = 0.0 if c in ("ativos", "desligados", "total") else ""
-
-            df["rubrica"] = df["rubrica"].astype(str)
-            df["tipo"] = df["tipo"].astype(str)
-
-            for col in ["ativos", "desligados", "total"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-
-            df = df.drop_duplicates(subset=["rubrica", "tipo", "ativos", "desligados", "total"]).reset_index(drop=True)
-
-            try:
-                _, df = calcular_base_por_grupo(df)
-            except Exception:
-                pass
-            df = _safe_classificacao(df)
-
-            base_of = info["base_empresa"]
-
-            prov = df[df["tipo"] == "PROVENTO"].copy()
-            tot_extraido = {
-                "ativos": float(prov["ativos"].sum()),
-                "desligados": float(prov["desligados"].sum()),
-                "total": float(prov["total"].sum()),
-            }
-
-            if layout != "ANALITICO":
-                totais_usados = {"total": float(prov["total"].sum())}
-            else:
-                tot_pdf = info.get("totais_proventos_pdf")
-                totais_usados = tot_pdf if tot_pdf else tot_extraido
-
-            # totalizador (somente analítico)
-            totalizador_encontrado = bool(info.get("totais_proventos_pdf")) if layout == "ANALITICO" else False
-            bate_totalizador = None
-            dif_totalizador_ativos = None
-            dif_totalizador_desligados = None
-            if layout == "ANALITICO" and totalizador_encontrado:
-                tot_pdf = info["totais_proventos_pdf"]
-                dif_totalizador_ativos = float(tot_pdf["ativos"] - tot_extraido["ativos"])
-                dif_totalizador_desligados = float(tot_pdf["desligados"] - tot_extraido["desligados"])
-                bate_totalizador = (
-                    abs(dif_totalizador_ativos) <= tol_totalizador and
-                    abs(dif_totalizador_desligados) <= tol_totalizador
-                )
-
-            # dump eventos
-            df_dump = df.copy()
-            df_dump.insert(0, "arquivo", arquivo.name)
-            df_dump.insert(1, "competencia", comp)
-            df_dump["layout"] = layout
-            df_dump["familia_layout"] = assin["familia_layout"]
-            df_dump["sistema_provavel"] = assin["sistema_provavel"]
-            eventos_dump.append(df_dump)
-
-           # Mapa
-    if mapa_incidencia_on:
-    
-     layout_atual = locals().get("layout", "GLOBAL")
-     grupos = ["ativos", "desligados"] if layout_atual == "ANALITICO" else ["total"]
-
-    for g in grupos:
-        totais_local = locals().get("totais_usados", {})
-        prov_total_g = float(totais_local.get(g, 0.0) or 0.0)
-
-        if prov_total_g <= 0:
-            continue
-
-        tmp = df[df["tipo"] == "PROVENTO"].copy()
-
-        agg = (
-            tmp.groupby(["rubrica", "classificacao"], as_index=False)[g]
-            .sum()
-            .rename(columns={g: "valor"})
-        )
-
-        agg = agg[agg["valor"] != 0].copy()
-        if agg.empty:
-            continue
-
-        agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_g) * 100.0
-
-        # ✅ SEMÁFORO (MAPA) — só se você já colou a função aplicar_semaforo_base()
-        agg = aplicar_semaforo_base(agg, modo="MAPA")
-
-        agg.insert(0, "arquivo", arquivo.name)
-        agg.insert(1, "competencia", comp)
-        agg.insert(2, "grupo", ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL"))
-        agg.insert(3, "proventos_grupo", prov_total_g)
-        agg["layout"] = layout_atual
-        agg["familia_layout"] = assin["familia_layout"]
-        agg["sistema_provavel"] = assin["sistema_provavel"]
-
-        linhas_mapa.extend(agg.to_dict(orient="records"))
-
-
-
-            # Auditoria
-        grupos_auditar = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
-
-        for g in grupos_auditar:
-                res = auditoria_por_exclusao_com_aproximacao(
-                    df=df,
-                    base_oficial=base_of,
-                    totais_proventos=totais_usados,
-                    grupo=g,
-                    top_n_subset=44
-                )
-
-                proventos_g = float(totais_usados.get(g, 0.0) or 0.0)
-
-                # base oficial por grupo
-                if not base_of:
-                    base_of_g = None
+                    "familia_layout": assin.familia_layout,
+                    "sistema_provavel": assin.sistema_provavel,
+                    "proventos_ativos": totais_usados["ativos"],
+                    "proventos_desligados": totais_usados["desligados"],
+                    "proventos_total": totais_usados["total"],
+                    "base_of_ativos": base_of.get("ativos") if base_of else None,
+                    "base_of_desligados": base_of.get("desligados") if base_of else None,
+                    "base_of_total": base_of.get("total") if base_of else None,
+                }
+                # diffs (se houver base)
+                if base_of:
+                    linha_res["gap_ativos"] = totais_usados["ativos"] - float(base_of.get("ativos", 0.0))
+                    linha_res["gap_desligados"] = totais_usados["desligados"] - float(base_of.get("desligados", 0.0))
+                    linha_res["gap_total"] = totais_usados["total"] - float(base_of.get("total", 0.0))
                 else:
-                    base_of_g = base_of.get(g) if isinstance(base_of, dict) else None
-                    if base_of_g is None and isinstance(base_of, dict):
-                        base_of_g = base_of.get("total")
+                    linha_res["gap_ativos"] = None
+                    linha_res["gap_desligados"] = None
+                    linha_res["gap_total"] = None
 
-                indice_incidencia = None
-                gap_bruto = None
-                if indice_incidencia_on and base_of_g is not None and proventos_g > 0:
-                    base_of_gf = float(base_of_g)
-                    indice_incidencia = base_of_gf / proventos_g
-                    gap_bruto = proventos_g - base_of_gf
+                linhas_resumo.append(linha_res)
 
-                erro = res.get("erro_por_baixo")
-                erro_abs = None if erro is None else abs(float(erro))
+                # dump eventos (para excel)
+                df_dump = df.copy()
+                df_dump.insert(0, "arquivo", arquivo.name)
+                df_dump.insert(1, "competencia", comp)
+                df_dump["layout"] = layout
+                df_dump["familia_layout"] = assin.familia_layout
+                df_dump["sistema_provavel"] = assin.sistema_provavel
+                eventos_dump.append(df_dump)
 
-                if not base_of:
-                    status = "INCOMPLETO_BASE"
-                elif layout == "ANALITICO" and totalizador_encontrado and bate_totalizador is False:
-                    status = "FALHA_EXTRACAO_TOTALIZADOR"
-                elif erro_abs is None:
-                    status = "SEM_ERRO"
-                elif erro_abs <= banda_ok:
-                    status = "OK"
-                elif erro_abs <= banda_aceitavel:
-                    status = "ACEITAVEL"
-                else:
-                    status = "RUIM"
+                # =========================
+                # Devolvidas (reconstrução por exclusão)
+                # =========================
+                if base_of:
+                    grupos = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
+                    for g in grupos:
+                        devol, meta = reconstruir_por_exclusao(
+                            df_eventos=df,
+                            base_of=base_of,
+                            grupo=g,
+                            tol_abs=float(tol_max),
+                        )
+                        if not devol.empty:
+                            devol = devol.copy()
+                            devol.insert(0, "arquivo", arquivo.name)
+                            devol.insert(1, "competencia", comp)
+                            devol["layout"] = layout
+                            devol["familia_layout"] = assin.familia_layout
+                            devol["sistema_provavel"] = assin.sistema_provavel
+                            devol["gap_grupo"] = meta.get("gap")
+                            devol["base_oficial_grupo"] = meta.get("base_oficial")
+                            devol["proventos_grupo"] = meta.get("proventos")
+                            linhas_devolvidas.extend(devol.to_dict(orient="records"))
 
-                grupo_label = ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL")
+                # =========================
+                # Mapa (por grupo)
+                # =========================
+                if mapa_incidencia_on:
+                    grupos = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
+                    for g in grupos:
+                        prov_total_g = float(totais_usados.get(g, 0.0) or 0.0)
+                        if prov_total_g <= 0:
+                            continue
 
-                linhas_resumo.append({
-                    "arquivo": arquivo.name,
-                    "competencia": comp,
-                    "layout": layout,
-                    "grupo": grupo_label,
+                        tmp = df[df["tipo"] == "PROVENTO"].copy()
+                        agg = (
+                            tmp.groupby(["rubrica", "classificacao"], as_index=False)[g]
+                            .sum()
+                            .rename(columns={g: "valor"})
+                        )
+                        agg = agg[agg["valor"] != 0].copy()
+                        if agg.empty:
+                            continue
 
-                    "totalizador_encontrado": totalizador_encontrado,
-                    "bate_totalizador": bate_totalizador,
-                    "dif_totalizador_ativos": dif_totalizador_ativos,
-                    "dif_totalizador_desligados": dif_totalizador_desligados,
+                        agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_g) * 100.0
 
-                    "proventos_grupo": proventos_g,
-                    "base_oficial": base_of_g,
+                        # ✅ semáforo no mapa
+                        agg = aplicar_semaforo_base(agg, modo="MAPA")
 
-                    "indice_incidencia": indice_incidencia,
-                    "gap_bruto_prov_menos_base": gap_bruto,
+                        agg.insert(0, "arquivo", arquivo.name)
+                        agg.insert(1, "competencia", comp)
+                        agg.insert(2, "grupo", ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL"))
+                        agg.insert(3, "proventos_grupo", prov_total_g)
+                        agg["layout"] = layout
+                        agg["familia_layout"] = assin.familia_layout
+                        agg["sistema_provavel"] = assin.sistema_provavel
 
-                    "base_exclusao": res.get("base_exclusao"),
-                    "gap": res.get("gap"),
-                    "base_aprox_por_baixo": res.get("base_aprox_por_baixo"),
-                    "erro_por_baixo": erro,
+                        linhas_mapa.extend(agg.to_dict(orient="records"))
 
-                    "status": status,
-
-                    "familia_layout": assin["familia_layout"],
-                    "sistema_provavel": assin["sistema_provavel"],
-                    "confianca_assinatura": assin["confianca"],
-                    "evidencias_assinatura": ", ".join(assin["evidencias"]),
-                })
-
-                devolvidas = res.get("rubricas_devolvidas")
-                if devolvidas is not None and isinstance(devolvidas, pd.DataFrame) and not devolvidas.empty:
-                    for _, r in devolvidas.iterrows():
-                        linhas_devolvidas.append({
-                            "arquivo": arquivo.name,
-                            "competencia": comp,
-                            "layout": layout,
-                            "grupo": grupo_label,
-                            "rubrica": r.get("rubrica"),
-                            "classificacao_origem": r.get("classificacao"),
-                            "valor": float(r.get("valor_alvo", 0.0) or 0.0),
-                            "familia_layout": assin["familia_layout"],
-                            "sistema_provavel": assin["sistema_provavel"],
-                        })
-
-            # Diagnóstico
-        if modo_auditor_prof and layout == "ANALITICO" and totalizador_encontrado and bate_totalizador is False:
-                diag = diagnostico_extracao_proventos(df, tol_inconsistencia=max(1.0, tol_totalizador))
-                if not diag.empty:
-                    dtop = diag.head(50).copy()
-                    dtop.insert(0, "arquivo", arquivo.name)
-                    dtop.insert(1, "competencia", comp)
-                    dtop.insert(2, "layout", layout)
-                    dtop.insert(3, "familia_layout", assin["familia_layout"])
-                    dtop.insert(4, "sistema_provavel", assin["sistema_provavel"])
-                    linhas_diagnostico.extend(dtop.to_dict(orient="records"))
-
-    # ---------------- DataFrames finais ----------------
+    # =========================
+    # Consolida DataFrames
+    # =========================
     df_resumo = pd.DataFrame(linhas_resumo)
     df_devolvidas = pd.DataFrame(linhas_devolvidas)
-    df_diag = pd.DataFrame(linhas_diagnostico)
     df_mapa = pd.DataFrame(linhas_mapa)
     df_eventos = pd.concat(eventos_dump, ignore_index=True) if eventos_dump else pd.DataFrame()
 
-    # Chaves para filtro cruzado
-    if not df_resumo.empty:
-        df_resumo["chave"] = df_resumo["arquivo"].astype(str) + "|" + df_resumo["competencia"].astype(str) + "|" + df_resumo["grupo"].astype(str)
-    if not df_devolvidas.empty:
-        df_devolvidas["chave"] = df_devolvidas["arquivo"].astype(str) + "|" + df_devolvidas["competencia"].astype(str) + "|" + df_devolvidas["grupo"].astype(str)
-    if not df_mapa.empty:
-        df_mapa["chave"] = df_mapa["arquivo"].astype(str) + "|" + df_mapa["competencia"].astype(str) + "|" + df_mapa["grupo"].astype(str)
-    if not df_diag.empty:
-        df_diag["chave"] = df_diag["arquivo"].astype(str) + "|" + df_diag["competencia"].astype(str)
-
-    # ---------------- Filtros globais (sidebar) ----------------
-    st.sidebar.header("🔎 Filtros (lote)")
-
-    if df_resumo.empty:
-        st.warning("Nenhum dado consolidado foi gerado (verifique se as competências foram identificadas).")
-        st.stop()
-
-    familias = sorted(df_resumo["familia_layout"].dropna().unique().tolist())
-    sistemas = sorted(df_resumo["sistema_provavel"].dropna().unique().tolist())
-    layouts = sorted(df_resumo["layout"].dropna().unique().tolist())
-    status_opts = sorted(df_resumo["status"].dropna().unique().tolist())
-
-    fam_sel = st.sidebar.multiselect("Família (assinatura)", familias, default=familias)
-    sis_sel = st.sidebar.multiselect("Sistema provável", sistemas, default=sistemas)
-    lay_sel = st.sidebar.multiselect("Layout (detector)", layouts, default=layouts)
-    sta_sel = st.sidebar.multiselect("Status (auditoria)", status_opts, default=status_opts)
-
-    df_resumo_f = df_resumo[
-        df_resumo["familia_layout"].isin(fam_sel) &
-        df_resumo["sistema_provavel"].isin(sis_sel) &
-        df_resumo["layout"].isin(lay_sel) &
-        df_resumo["status"].isin(sta_sel)
-    ].copy()
-
-    chaves_ok = set(df_resumo_f["chave"].dropna().tolist())
-
-    def _filtrar_por_chaves(df_any: pd.DataFrame) -> pd.DataFrame:
-        if df_any is None or df_any.empty:
-            return df_any
-        if "chave" not in df_any.columns:
-            return df_any
-        return df_any[df_any["chave"].isin(chaves_ok)].copy()
-
-    df_devolvidas_f = _filtrar_por_chaves(df_devolvidas)
-    df_mapa_f = _filtrar_por_chaves(df_mapa)
-
-    # eventos: filtra por arquivo+competencia (mais flexível)
-    if not df_eventos.empty:
-        pares_ok = set((r["arquivo"], r["competencia"]) for _, r in df_resumo_f[["arquivo", "competencia"]].drop_duplicates().iterrows())
-        df_eventos_f = df_eventos[df_eventos.apply(lambda x: (x["arquivo"], x["competencia"]) in pares_ok, axis=1)].copy()
-    else:
-        df_eventos_f = df_eventos
-
-    # diag: filtra por arquivo+competencia
-    if not df_diag.empty:
-        pares_ok2 = set((r["arquivo"], r["competencia"]) for _, r in df_resumo_f[["arquivo", "competencia"]].drop_duplicates().iterrows())
-        df_diag_f = df_diag[df_diag.apply(lambda x: (x["arquivo"], x["competencia"]) in pares_ok2, axis=1)].copy()
-    else:
-        df_diag_f = df_diag
-
-    # ---------------- RADAR (filtrado) ----------------
+    # =========================
+    # Radar estrutural (agregação)
+    # =========================
     df_radar = pd.DataFrame()
-    if radar_on and ((df_devolvidas_f is not None and not df_devolvidas_f.empty) or (df_mapa_f is not None and not df_mapa_f.empty)):
-        base_periodos = df_resumo_f[df_resumo_f["grupo"].isin(["ATIVOS", "DESLIGADOS", "GLOBAL"])].copy()
-        base_periodos["chave_periodo"] = base_periodos["arquivo"].astype(str) + "|" + base_periodos["competencia"].astype(str) + "|" + base_periodos["grupo"].astype(str)
-        tot_periodos = base_periodos.groupby("grupo")["chave_periodo"].nunique().to_dict()
+    if radar_on and (not df_mapa.empty) and (not df_devolvidas.empty):
+        # Agrega devolvidas por rubrica/grupo (meses/valor)
+        d = df_devolvidas.copy()
+        d["meses_devolvida"] = 1
 
-        if df_devolvidas_f is not None and not df_devolvidas_f.empty:
-            d = df_devolvidas_f.copy()
-            d["chave_periodo"] = d["arquivo"].astype(str) + "|" + d["competencia"].astype(str) + "|" + d["grupo"].astype(str)
-            agg_dev = (
-                d.groupby(["grupo", "rubrica"], as_index=False)
-                .agg(
-                    meses_devolvida=("chave_periodo", "nunique"),
-                    valor_total_devolvido=("valor", "sum"),
-                    valor_medio_devolvido=("valor", "mean"),
-                    classificacao_mais_comum=("classificacao_origem", _mode_or_none),
-                )
+        agg_dev = (
+            d.groupby(["rubrica", "grupo"], as_index=False)
+            .agg(
+                meses_devolvida=("meses_devolvida", "sum"),
+                valor_total_devolvido=("valor_devolvido", "sum"),
+                valor_medio_devolvido=("valor_devolvido", "mean"),
             )
-            agg_dev["total_periodos_no_lote"] = agg_dev["grupo"].map(tot_periodos).fillna(0).astype(int)
-            agg_dev["recorrencia_pct"] = agg_dev.apply(
-                lambda r: (r["meses_devolvida"] / r["total_periodos_no_lote"] * 100.0) if r["total_periodos_no_lote"] > 0 else pd.NA,
-                axis=1
-            )
-        else:
-            agg_dev = pd.DataFrame(columns=[
-                "grupo", "rubrica", "meses_devolvida", "valor_total_devolvido",
-                "valor_medio_devolvido", "classificacao_mais_comum",
-                "total_periodos_no_lote", "recorrencia_pct"
-            ])
-
-        if df_mapa_f is not None and not df_mapa_f.empty:
-            m = df_mapa_f.copy()
-            agg_mapa = (
-                m.groupby(["grupo", "rubrica"], as_index=False)
-                .agg(
-                    impacto_medio_pct=("impacto_pct_proventos", "mean"),
-                    impacto_max_pct=("impacto_pct_proventos", "max"),
-                    valor_medio=("valor", "mean"),
-                    classificacao_mapa_mais_comum=("classificacao", _mode_or_none),
-                )
-            )
-        else:
-            agg_mapa = pd.DataFrame(columns=[
-                "grupo", "rubrica", "impacto_medio_pct", "impacto_max_pct",
-                "valor_medio", "classificacao_mapa_mais_comum"
-            ])
-
-        df_radar = pd.merge(agg_dev, agg_mapa, on=["grupo", "rubrica"], how="outer")
-
-        def _score(row):
-            rec = row.get("recorrencia_pct")
-            imp = row.get("impacto_medio_pct")
-            if pd.isna(rec) or pd.isna(imp):
-                return pd.NA
-            return float(rec) * float(imp)
-
-        df_radar["score_risco"] = df_radar.apply(_score, axis=1)
-
-        for c in ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]:
-            if c not in df_radar.columns:
-                df_radar[c] = pd.NA
-
-        df_radar = df_radar.sort_values(
-            ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"],
-            ascending=[False, False, False, False],
-            na_position="last"
-        ).reset_index(drop=True)
-
-    # ---------------- Abas ----------------
-    tab_resumo, tab_eventos, tab_devolvidas, tab_mapa, tab_radar, tab_diag = st.tabs(
-        ["📌 Resumo", "📋 Eventos", "🧩 Devolvidas", "🧭 Mapa", "📡 Radar", "🕵️ Diagnóstico"]
-    )
-
-    with tab_resumo:
-        st.subheader("📌 Resumo consolidado (já filtrado)")
-        st.dataframe(
-            df_resumo_f.sort_values(["competencia", "arquivo", "layout", "grupo"]),
-            use_container_width=True
         )
 
-    with tab_eventos:
-        st.subheader("📋 Eventos extraídos (já filtrado por lote)")
-        if df_eventos_f.empty:
-            st.info("Sem eventos para os filtros selecionados.")
-        else:
-            st.dataframe(df_eventos_f.head(5000), use_container_width=True)
+        # Agrega mapa por rubrica/grupo (impacto e classificação mais comum)
+        m = df_mapa.copy()
+        m["total_periodos_no_lote"] = 1
 
-    with tab_devolvidas:
-        st.subheader("🧩 Rubricas devolvidas (já filtrado)")
-        if df_devolvidas_f is None or df_devolvidas_f.empty:
-            st.info("Nenhuma rubrica devolvida para os filtros selecionados.")
+        # classificação mais comum no mapa
+        def _mode(series: pd.Series) -> str:
+            if series.empty:
+                return "SEM_CLASSIFICACAO"
+            return series.value_counts().index[0]
+
+        agg_mapa = (
+            m.groupby(["rubrica", "grupo"], as_index=False)
+            .agg(
+                total_periodos_no_lote=("total_periodos_no_lote", "sum"),
+                impacto_medio_pct=("impacto_pct_proventos", "mean"),
+                impacto_max_pct=("impacto_pct_proventos", "max"),
+                classificacao_mapa_mais_comum=("classificacao", _mode),
+            )
+        )
+
+        # merge
+        df_radar = agg_mapa.merge(agg_dev, on=["rubrica", "grupo"], how="left")
+        df_radar["meses_devolvida"] = df_radar["meses_devolvida"].fillna(0).astype(int)
+        df_radar["valor_total_devolvido"] = df_radar["valor_total_devolvido"].fillna(0.0)
+        df_radar["valor_medio_devolvido"] = df_radar["valor_medio_devolvido"].fillna(0.0)
+
+        # recorrência de “devolvida”
+        df_radar["recorrencia_pct"] = df_radar.apply(
+            lambda r: 100.0 * _safe_div(float(r["meses_devolvida"]), float(r["total_periodos_no_lote"])),
+            axis=1,
+        )
+
+        # score risco simples (você pode ajustar)
+        df_radar["score_risco"] = (df_radar["impacto_medio_pct"].fillna(0) * 1.2) + (df_radar["recorrencia_pct"].fillna(0) * 0.8)
+
+        # classificação geral “mais comum” (fallback: do mapa)
+        df_radar["classificacao_mais_comum"] = df_radar["classificacao_mapa_mais_comum"]
+
+        # ✅ semáforo no radar
+        df_radar = aplicar_semaforo_base(df_radar, modo="RADAR")
+
+    # =========================
+    # Interface – Tabs
+    # =========================
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["📌 Resumo", "📋 Eventos", "🧩 Devolvidas", "🧭 Mapa de Incidência", "📡 Radar Estrutural"]
+    )
+
+    with tab1:
+        st.subheader("📌 Resumo por Competência")
+        if df_resumo.empty:
+            st.warning("Não foi possível extrair resumo (sem competências/eventos).")
+        else:
+            st.dataframe(df_resumo.sort_values(["arquivo", "competencia"]), use_container_width=True)
+
+    with tab2:
+        st.subheader("📋 Eventos extraídos")
+        if df_eventos.empty:
+            st.warning("Nenhum evento extraído.")
+        else:
+            st.dataframe(df_eventos.sort_values(["arquivo", "competencia", "tipo", "total"], ascending=[True, True, True, False]),
+                         use_container_width=True)
+
+    with tab3:
+        st.subheader("🧩 Rubricas devolvidas (reconstrução por exclusão)")
+        if df_devolvidas.empty:
+            st.info("Nenhuma devolvida detectada (ou base oficial não encontrada no PDF).")
         else:
             st.dataframe(
-                df_devolvidas_f.sort_values(["competencia", "arquivo", "grupo", "valor"], ascending=[True, True, True, False]),
+                df_devolvidas.sort_values(["arquivo", "competencia", "grupo", "valor_devolvido"],
+                                          ascending=[True, True, True, False]),
                 use_container_width=True
             )
 
-    with tab_mapa:
-        st.subheader("🧭 Mapa de Incidência (já filtrado)")
-        if df_mapa_f is None or df_mapa_f.empty:
-            st.info("Mapa vazio para os filtros selecionados.")
+    with tab4:
+        st.subheader("🧭 Mapa de Incidência (peso dentro dos proventos)")
+        if df_mapa.empty:
+            st.info("Mapa vazio. Talvez não tenha proventos ou extração falhou.")
         else:
-            comps = sorted(df_mapa_f["competencia"].unique().tolist())
-            grupos = sorted(df_mapa_f["grupo"].unique().tolist())
+            colf1, colf2, colf3 = st.columns(3)
+            with colf1:
+                f_arquivo = st.selectbox("Arquivo", ["(todos)"] + sorted(df_mapa["arquivo"].unique().tolist()))
+            with colf2:
+                f_comp = st.selectbox("Competência", ["(todas)"] + sorted(df_mapa["competencia"].unique().tolist()))
+            with colf3:
+                f_grupo = st.selectbox("Grupo", ["(todos)"] + sorted(df_mapa["grupo"].unique().tolist()))
 
-            colA, colB, colC = st.columns(3)
-            with colA:
-                comp_sel = st.selectbox("Competência", comps, index=len(comps) - 1, key="map_comp")
-            with colB:
-                grupo_sel = st.selectbox("Grupo", grupos, index=0, key="map_grupo")
-            with colC:
-                topn = st.number_input("Top N", min_value=10, max_value=500, value=50, step=10, key="map_topn")
+            view = df_mapa.copy()
+            if f_arquivo != "(todos)":
+                view = view[view["arquivo"] == f_arquivo]
+            if f_comp != "(todas)":
+                view = view[view["competencia"] == f_comp]
+            if f_grupo != "(todos)":
+                view = view[view["grupo"] == f_grupo]
 
-            class_opts = sorted(df_mapa_f["classificacao"].unique().tolist())
-            class_sel = st.multiselect("Classificação", class_opts, default=class_opts, key="map_class")
+            view = view.sort_values(["impacto_pct_proventos", "valor"], ascending=[False, False])
 
-            view = df_mapa_f[
-                (df_mapa_f["competencia"] == comp_sel) &
-                (df_mapa_f["grupo"] == grupo_sel) &
-                (df_mapa_f["classificacao"].isin(class_sel))
-            ].copy()
-
-            view = view.sort_values(["impacto_pct_proventos", "valor"], ascending=[False, False]).head(int(topn))
             st.dataframe(
-                view[["rubrica", "classificacao", "valor", "impacto_pct_proventos", "proventos_grupo", "arquivo", "layout"]],
+                view[["zona_base", "rubrica", "classificacao", "valor", "impacto_pct_proventos",
+                      "grupo", "competencia", "arquivo", "layout", "sistema_provavel"]],
                 use_container_width=True
             )
 
-    with tab_radar:
-        st.subheader("📡 Radar Estrutural (já filtrado)")
+    with tab5:
+        st.subheader("📡 Radar Estrutural (priorização por recorrência + impacto + devolução)")
         if df_radar.empty:
-            st.info("Radar vazio para os filtros selecionados (precisa de devolvidas e/ou mapa).")
+            st.info("Radar indisponível (precisa de Mapa + Devolvidas).")
         else:
-            grupos = sorted(df_radar["grupo"].dropna().unique().tolist())
-            colA, colB, colC = st.columns(3)
-            with colA:
-                g_sel = st.selectbox("Grupo", grupos, index=0, key="rad_grupo")
-            with colB:
-                min_rec = st.slider("Recorrência mínima (%)", min_value=0, max_value=100, value=30, step=5, key="rad_minrec")
-            with colC:
-                topn = st.number_input("Top N (Radar)", min_value=10, max_value=500, value=50, step=10, key="rad_topn")
+            colr1, colr2 = st.columns(2)
+            with colr1:
+                g_sel = st.selectbox("Grupo (Radar)", sorted(df_radar["grupo"].unique().tolist()))
+            with colr2:
+                topn = st.slider("Top N", min_value=10, max_value=200, value=50, step=10)
 
             v = df_radar[df_radar["grupo"] == g_sel].copy()
 
-            # garante colunas antes de filtro/ordem
-            for c in ["recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido", "score_risco",
-                      "classificacao_mais_comum", "classificacao_mapa_mais_comum"]:
+            # ordenação blindada (evita KeyError)
+            for c in ["zona_base", "score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]:
                 if c not in v.columns:
                     v[c] = pd.NA
 
-            v = v[v["recorrencia_pct"].fillna(0) >= float(min_rec)]
+            v = v.sort_values(
+                ["zona_base", "score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"],
+                ascending=[True, False, False, False, False],
+                na_position="last",
+            ).head(int(topn))
 
-            foco = st.multiselect(
-                "Foco por classificação (origem devolvida / mapa)",
-                options=["FORA", "NEUTRA", "ENTRA", "SEM_CLASSIFICACAO"],
-                default=["FORA", "NEUTRA"],
-                key="rad_foco"
+            st.dataframe(
+                v[["zona_base", "rubrica", "classificacao_mais_comum", "classificacao_mapa_mais_comum",
+                   "meses_devolvida", "total_periodos_no_lote", "recorrencia_pct",
+                   "impacto_medio_pct", "impacto_max_pct", "valor_total_devolvido", "score_risco"]],
+                use_container_width=True
             )
 
-            def _match_foco(row):
-                a = str(row.get("classificacao_mais_comum") or "")
-                b = str(row.get("classificacao_mapa_mais_comum") or "")
-                return (a in foco) or (b in foco)
-
-            v = v[v.apply(_match_foco, axis=1)].copy()
-
-            if v.empty:
-                st.info("Nenhuma rubrica atende aos filtros do Radar.")
-            else:
-                colunas_ordem = ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]
-                for c in colunas_ordem:
-                    if c not in v.columns:
-                        v[c] = pd.NA
-
-                v = aplicar_semaforo_base(v, modo="RADAR")
-
-                v = v.sort_values(
-                    colunas_ordem,
-                    ascending=[False, False, False, False],
-                    na_position="last"
-                ).head(int(topn))
-
-                st.dataframe(
-                    v[[
-                        "zona_base",
-                        "rubrica",
-                        "classificacao_mais_comum",
-                        "classificacao_mapa_mais_comum",
-                        "meses_devolvida",
-                        "total_periodos_no_lote",
-                        "recorrencia_pct",
-                        "impacto_medio_pct",
-                        "impacto_max_pct",
-                        "valor_total_devolvido",
-                        "valor_medio_devolvido",
-                        "score_risco",
-                    ]],
-                    use_container_width=True
-                )
-
-    with tab_diag:
-        st.subheader("🕵️ Diagnóstico (já filtrado)")
-        if df_diag_f is None or df_diag_f.empty:
-            st.info("Sem diagnósticos para os filtros selecionados.")
-        else:
-            st.dataframe(df_diag_f, use_container_width=True)
-
-    # ---------------- Excel consolidado (já filtrado) ----------------
+    # =========================
+    # Export Excel (openpyxl)
+    # =========================
     buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        df_resumo_f.to_excel(writer, index=False, sheet_name="Resumo_Filtrado")
-        df_eventos_f.to_excel(writer, index=False, sheet_name="Eventos_Filtrados")
-        (df_devolvidas_f if df_devolvidas_f is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Devolvidas_Filtradas")
-        (df_mapa_f if df_mapa_f is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Mapa_Filtrado")
-        df_radar.to_excel(writer, index=False, sheet_name="Radar_Filtrado")
-        (df_diag_f if df_diag_f is not None else pd.DataFrame()).to_excel(writer, index=False, sheet_name="Diag_Filtrado")
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df_resumo.to_excel(writer, index=False, sheet_name="Resumo")
+        df_eventos.to_excel(writer, index=False, sheet_name="Eventos")
+        if not df_devolvidas.empty:
+            df_devolvidas.to_excel(writer, index=False, sheet_name="Devolvidas")
+        if not df_mapa.empty:
+            df_mapa.to_excel(writer, index=False, sheet_name="Mapa")
+        if not df_radar.empty:
+            df_radar.to_excel(writer, index=False, sheet_name="Radar")
 
     buffer.seek(0)
+
     st.download_button(
-        "📥 Baixar Excel (dados filtrados)",
+        "📥 Baixar Excel – Auditoria Completa",
         data=buffer,
-        file_name="AUDITOR_INSS_HIBRIDO_FILTRADO.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_name="AUDITORIA_BASE_INSS_COMPLETA.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+else:
+    st.info("Envie um ou mais PDFs para iniciar.")
