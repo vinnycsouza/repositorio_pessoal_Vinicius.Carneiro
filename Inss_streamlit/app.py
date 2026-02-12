@@ -3,6 +3,8 @@ import re
 import pdfplumber
 import pandas as pd
 import streamlit as st
+import traceback
+
 
 # Seus módulos (usados principalmente no layout analítico)
 from extrator_pdf import extrair_eventos_page, extrair_base_empresa_page, pagina_eh_de_bases
@@ -681,7 +683,16 @@ if arquivos:
                     except Exception:
                         dados[comp_atual]["eventos"].extend(extrair_eventos_resumo_page(page))
                 else:
-                  dados[comp_atual]["eventos"].extend(extrair_eventos_resumo_page(page))
+                 try:
+                     ev = extrair_eventos_resumo_page(page)
+                     if ev:  
+                        dados[comp_atual]["eventos"].extend(ev)
+                 except Exception as e:
+                 # loga e segue o baile (não derruba o app)
+                    msg = f"[ERRO_EXTRACAO_RESUMO] arquivo={arquivo.name} comp={comp_atual} pagina={page.page_number} erro={type(e).__name__}: {e}"
+                    st.warning(msg)
+                    st.code(traceback.format_exc())
+
 
         # Por competência
         for comp, info in dados.items():
