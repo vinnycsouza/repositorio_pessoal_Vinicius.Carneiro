@@ -165,7 +165,6 @@ if uploaded_file:
     # 2) Gerar Excel (streaming) mantendo formato
     # =========================================
     from openpyxl import Workbook
-from openpyxl.writer.excel import save_virtual_workbook
 
 # ...
 
