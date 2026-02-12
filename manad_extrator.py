@@ -1,6 +1,12 @@
 import streamlit as st
 import pandas as pd
 import io
+import tempfile
+from pathlib import Path
+from collections import defaultdict
+from openpyxl import Workbook
+from openpyxl.writer.excel import save_virtual_workbook
+
 
 # =========================
 # Cabeçalho por evento MANAD
@@ -21,18 +27,11 @@ def cabecalho_evento(codigo):
     return cabecalhos.get(codigo)
 
 
-# =========================
-# Separação por evento
-# =========================
-def separar_por_evento(linhas):
-    eventos = {}
-    for registro in linhas:
-        registro = str(registro).strip()
-        if len(registro) < 4:
-            continue
-        codigo = registro[:4]
-        eventos.setdefault(codigo, []).append(registro.split('|'))
-    return eventos
+def extrair_codigo_evento(linha: str) -> str | None:
+    linha = (linha or "").strip()
+    if len(linha) < 4:
+        return None
+    return linha[:4]
 
 
 # =========================
@@ -56,88 +55,189 @@ if "excel_bytes" not in st.session_state:
 if "estatisticas" not in st.session_state:
     st.session_state.estatisticas = {}
 
+if "eventos_encontrados" not in st.session_state:
+    st.session_state.eventos_encontrados = []
+
+
 # =========================
-# Leitura do arquivo
+# Leitura do arquivo e Prévia
 # =========================
 if uploaded_file:
     st.success("Arquivo carregado com sucesso!")
 
-    linhas = []
+    # Para TXT grande: vamos “spoolar” em disco por evento (sem estourar RAM)
+    # Para XLSX: mantemos o seu comportamento (mas é mais pesado)
+    is_txt = uploaded_file.name.lower().endswith(".txt")
 
-    # TXT
-    if uploaded_file.name.lower().endswith(".txt"):
-        linhas = uploaded_file.read().decode("latin1").splitlines()
+    # Pasta temporária para armazenar arquivos por evento
+    tmp_dir = Path(tempfile.mkdtemp(prefix="manad_"))
+    st.caption(f"📌 Processamento usando pasta temporária: {tmp_dir}")
 
-    # Excel
+    # Vamos guardar os arquivos por evento (spool) e contar linhas por evento
+    arquivos_evento = {}  # codigo -> Path
+    contagem_linhas = defaultdict(int)
+
+    # =========================================
+    # 1) Spool: separar em arquivos temporários
+    # =========================================
+    status = st.empty()
+    progresso = st.progress(0.0)
+
+    if is_txt:
+        status.info("Separando o TXT por evento (modo econômico de memória)...")
+
+        # Cria handles sob demanda (pra não abrir 200 arquivos sem necessidade)
+        handles = {}
+
+        def get_handle(codigo: str):
+            if codigo not in handles:
+                p = tmp_dir / f"{codigo}.txt"
+                arquivos_evento[codigo] = p
+                handles[codigo] = p.open("w", encoding="utf-8", newline="\n")
+            return handles[codigo]
+
+        # Percorre linha a linha (não usa read())
+        total_bytes = getattr(uploaded_file, "size", None) or 1
+        bytes_lidos = 0
+
+        for raw in uploaded_file:
+            bytes_lidos += len(raw)
+            # Atualiza progresso por bytes (aproximado)
+            progresso.progress(min(bytes_lidos / total_bytes, 1.0))
+
+            linha = raw.decode("latin1", errors="ignore").rstrip("\n")
+            codigo = extrair_codigo_evento(linha)
+            if not codigo:
+                continue
+
+            # grava a linha completa no arquivo do evento
+            h = get_handle(codigo)
+            h.write(linha + "\n")
+            contagem_linhas[codigo] += 1
+
+        # fecha todos
+        for h in handles.values():
+            h.close()
+
+        eventos = sorted(arquivos_evento.keys())
+        st.session_state.eventos_encontrados = eventos
+        status.success(f"Eventos encontrados: {', '.join(eventos)}")
+
     else:
+        # XLSX como entrada: lê e faz spool por evento (pode ser mais lento/pesado)
+        status.info("Lendo XLSX e separando por evento...")
         xls = pd.ExcelFile(uploaded_file)
-        for aba in xls.sheet_names:
+        handles = {}
+
+        def get_handle(codigo: str):
+            if codigo not in handles:
+                p = tmp_dir / f"{codigo}.txt"
+                arquivos_evento[codigo] = p
+                handles[codigo] = p.open("w", encoding="utf-8", newline="\n")
+            return handles[codigo]
+
+        total_abas = len(xls.sheet_names) or 1
+        for i, aba in enumerate(xls.sheet_names, start=1):
+            progresso.progress(i / total_abas)
+            status.text(f"Lendo aba: {aba} ({i}/{total_abas})")
             df_aba = pd.read_excel(xls, sheet_name=aba, header=None)
-            linhas.extend(df_aba[0].dropna().astype(str).tolist())
 
-    eventos = separar_por_evento(linhas)
-    st.info(f"Eventos encontrados: {', '.join(eventos.keys())}")
+            # Espera-se que esteja na coluna 0, como você já faz
+            for v in df_aba[0].dropna().astype(str).tolist():
+                v = v.strip()
+                codigo = extrair_codigo_evento(v)
+                if not codigo:
+                    continue
+                h = get_handle(codigo)
+                h.write(v + "\n")
+                contagem_linhas[codigo] += 1
 
-    # =========================
-    # Geração do Excel
-    # =========================
+        for h in handles.values():
+            h.close()
+
+        eventos = sorted(arquivos_evento.keys())
+        st.session_state.eventos_encontrados = eventos
+        status.success(f"Eventos encontrados: {', '.join(eventos)}")
+
+    progresso.empty()
+
+    # =========================================
+    # 2) Gerar Excel (streaming) mantendo formato
+    # =========================================
     if st.button("⚙️ Gerar arquivo Excel por evento", key="gerar_excel"):
-        output = io.BytesIO()
-
         MAX_ROWS_EXCEL = 1_048_576
         MAX_DADOS_POR_ABA = MAX_ROWS_EXCEL - 1
 
-        progresso = st.progress(0.0)
-        status = st.empty()
+        progresso2 = st.progress(0.0)
+        status2 = st.empty()
 
-        total_eventos = len(eventos)
-        eventos_processados = 0
+        eventos = st.session_state.eventos_encontrados
+        total_eventos = len(eventos) or 1
         estatisticas = {}
 
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            for codigo, registros in eventos.items():
-                eventos_processados += 1
-                progresso.progress(eventos_processados / total_eventos)
-                status.text(f"Processando evento {codigo} ({eventos_processados}/{total_eventos})")
+        wb = Workbook(write_only=True)
 
-                cabecalho = cabecalho_evento(codigo)
-                if not cabecalho or not registros:
-                    continue
+        for idx_evento, codigo in enumerate(eventos, start=1):
+            progresso2.progress(idx_evento / total_eventos)
+            status2.text(f"Gerando Excel: evento {codigo} ({idx_evento}/{total_eventos})")
 
-                df_evento = pd.DataFrame(registros)
-                df_evento = df_evento.iloc[:, :len(cabecalho)]
-                df_evento.columns = cabecalho[:df_evento.shape[1]]
+            cabecalho = cabecalho_evento(codigo)
+            if not cabecalho:
+                continue
 
-                if df_evento.empty:
-                    continue
+            path_evento = arquivos_evento.get(codigo)
+            if not path_evento or not path_evento.exists():
+                continue
 
-                total_linhas = len(df_evento)
-                total_abas = (
-                    total_linhas // MAX_DADOS_POR_ABA
-                    + (1 if total_linhas % MAX_DADOS_POR_ABA else 0)
-                )
+            total_linhas = contagem_linhas.get(codigo, 0)
+            if total_linhas <= 0:
+                continue
 
-                estatisticas[codigo] = {
-                    "Total de linhas": total_linhas,
-                    "Total de abas": total_abas
-                }
+            total_abas = (
+                total_linhas // MAX_DADOS_POR_ABA
+                + (1 if total_linhas % MAX_DADOS_POR_ABA else 0)
+            )
 
-                for i in range(total_abas):
-                    inicio = i * MAX_DADOS_POR_ABA
-                    fim = inicio + MAX_DADOS_POR_ABA
-                    nome_aba = codigo if total_abas == 1 else f"{codigo}_{i + 1}"
+            estatisticas[codigo] = {
+                "Total de linhas": int(total_linhas),
+                "Total de abas": int(total_abas),
+            }
 
-                    df_evento.iloc[inicio:fim].to_excel(
-                        writer,
-                        sheet_name=nome_aba[:31],
-                        index=False
-                    )
+            # Abas sequenciais com limite do Excel
+            linha_atual = 0
+            aba_idx = 1
+            ws = None
 
-        progresso.empty()
-        status.success("✅ Excel gerado com sucesso!")
+            def nova_aba():
+                nonlocal ws, aba_idx
+                nome_aba = codigo if total_abas == 1 else f"{codigo}_{aba_idx}"
+                ws = wb.create_sheet(title=nome_aba[:31])
+                ws.append(cabecalho)
+                aba_idx += 1
 
-        output.seek(0)
-        st.session_state.excel_bytes = output
+            nova_aba()
+
+            with path_evento.open("r", encoding="utf-8", errors="ignore") as f:
+                for linha in f:
+                    linha = linha.rstrip("\n")
+                    partes = linha.split("|")
+                    # corta / completa para bater com cabeçalho
+                    partes = partes[:len(cabecalho)]
+                    if len(partes) < len(cabecalho):
+                        partes += [""] * (len(cabecalho) - len(partes))
+
+                    ws.append(partes)
+                    linha_atual += 1
+
+                    # Ao atingir limite, cria próxima aba
+                    if linha_atual % MAX_DADOS_POR_ABA == 0 and linha_atual < total_linhas:
+                        nova_aba()
+
+        progresso2.empty()
+        status2.success("✅ Excel gerado com sucesso!")
+
+        excel_bytes = save_virtual_workbook(wb)  # bytes (estável no Cloud)
+        st.session_state.excel_bytes = excel_bytes
         st.session_state.estatisticas = estatisticas
 
     # =========================
