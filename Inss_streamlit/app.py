@@ -681,7 +681,7 @@ if arquivos:
                     except Exception:
                         dados[comp_atual]["eventos"].extend(extrair_eventos_resumo_page(page))
                 else:
-                    dados[comp_atual]["eventos"].extend(extrair_eventos_resumo_page(page))
+                  dados[comp_atual]["eventos"].extend(extrair_eventos_resumo_page(page))
 
         # Por competência
         for comp, info in dados.items():
