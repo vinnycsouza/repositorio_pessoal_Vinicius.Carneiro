@@ -665,7 +665,9 @@ if mapa_incidencia_on:
     grupos = ["ativos", "desligados"] if layout_atual == "ANALITICO" else ["total"]
 
     for g in grupos:
-        prov_total_g = float(totais_usados.get(g, 0.0) or 0.0)
+        totais_local = locals().get("totais_usados", {})
+        prov_total_g = float(totais_local.get(g, 0.0) or 0.0)
+
         if prov_total_g <= 0:
             continue
 
