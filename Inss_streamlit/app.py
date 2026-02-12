@@ -146,17 +146,31 @@ def normalizar_valor_br(txt: str):
 
 
 def extrair_competencia_sem_fallback(page):
-    txt = (page.extract_text() or "").lower()
+    txt_raw = page.extract_text() or ""
+    txt = txt_raw.lower()
 
-    # 1) 01/2021
-    m = re.search(r"\b(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b", txt)
+    # 0) PRIORIDADE: "Mês/Ano: 12/2018" (ou "Mes/Ano")
+    m = re.search(
+        r"\b(m[eê]s\s*/\s*ano|mes\s*/\s*ano)\s*[:\-]?\s*(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b",
+        txt,
+        flags=re.IGNORECASE
+    )
+    if m:
+        mm = m.group(2).zfill(2)
+        aa = m.group(3)
+        return f"{mm}/{aa}"
+
+    # 1) 01/2021  (EVITA capturar 11/2023 dentro de 29/11/2023)
+    #    Se tiver um dia antes, vai estar precedido por "d/" (ex.: "29/11/2023")
+    m = re.search(r"(?<!\d/)\b(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b", txt)
     if m:
         mm = m.group(1).zfill(2)
         aa = m.group(2)
         return f"{mm}/{aa}"
 
     # 2) 01.2012 ou 01-2012
-    m = re.search(r"\b(0?[1-9]|1[0-2])\s*[.\-]\s*(20\d{2})\b", txt)
+    #    Evita casar dentro de datas como 29-11-2023 (se aparecer)
+    m = re.search(r"(?<!\d[-.])\b(0?[1-9]|1[0-2])\s*[.\-]\s*(20\d{2})\b", txt)
     if m:
         mm = m.group(1).zfill(2)
         aa = m.group(2)
@@ -179,6 +193,7 @@ def extrair_competencia_sem_fallback(page):
             return f"{MESES[mes_txt]}/{aa}"
 
     return None
+
 
 
 def extrair_competencia_robusta(page, competencia_atual=None):
@@ -384,8 +399,9 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
         return normalizar_valor_br(nums[-1])
 
     def primeiro_codigo(s: str):
-        m = re.search(r"\b(\d{3,6})\b", s)
+        m = re.search(r"\b(\d{5})\b", s)
         return m.group(1) if m else None
+
 
     def limpar_desc(cod: str, chunk: str):
         x = re.sub(r"^\s*" + re.escape(cod) + r"\s+", "", chunk).strip()
@@ -448,7 +464,7 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
 
         # Modelo “grudado”: 2 códigos na mesma linha
         cod_pos = []
-        for m in re.finditer(r"\b(\d{3,6})\b", ln):
+        for m in re.finditer(r"\b(\d{5})\b", ln):
             cod = m.group(1)
             after = ln[m.end():m.end()+2]
             if after.strip() == "":
@@ -471,7 +487,7 @@ def extrair_eventos_resumo_page(page) -> list[dict]:
             continue
 
         # Linha simples (1 rubrica)
-        m_cod = re.match(r"^\s*(\d{3,6})\s+(.+)$", ln)
+        m_cod = re.match(r"^\s*(\d{5})\s+(.+)$", ln)
         if not m_cod:
             continue
 
