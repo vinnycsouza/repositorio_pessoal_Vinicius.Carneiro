@@ -118,6 +118,77 @@ def _mode_or_none(series: pd.Series):
     vc = series.value_counts(dropna=True)
     return vc.index[0] if len(vc) else None
 
+def aplicar_semaforo_base(df: pd.DataFrame, modo: str = "RADAR") -> pd.DataFrame:
+    """
+    Define zona_base usando evidências estruturais.
+    modo:
+      - "RADAR": usa impacto_medio_pct + recorrencia_pct + meses_devolvida
+      - "MAPA":  usa impacto_pct_proventos + classificacao
+    """
+    out = df.copy()
+
+    # garante colunas esperadas (evita KeyError)
+    if "classificacao" not in out.columns:
+        out["classificacao"] = "SEM_CLASSIFICACAO"
+
+    if modo.upper() == "RADAR":
+        for c in ["impacto_medio_pct", "recorrencia_pct", "meses_devolvida", "valor_total_devolvido", "score_risco"]:
+            if c not in out.columns:
+                out[c] = pd.NA
+
+        # “devolvida” = apareceu devolvida em pelo menos 1 período
+        # (meses_devolvida vem do merge do radar; se não vier, fica 0)
+        out["devolvida"] = out["meses_devolvida"].fillna(0).astype(float) > 0
+
+        def _cls(row):
+            cls = str(row.get("classificacao_mais_comum") or row.get("classificacao") or "")
+            cls2 = str(row.get("classificacao_mapa_mais_comum") or "")
+            impacto = float(row.get("impacto_medio_pct") or 0)
+            rec = float(row.get("recorrencia_pct") or 0)
+            score = row.get("score_risco")
+            score = float(score) if score is not None and not pd.isna(score) else (rec * impacto)
+            devolvida = bool(row.get("devolvida", False))
+
+            # 🔴 FORA: tende a ficar fora e sem “oscilação”
+            if ("FORA" in (cls, cls2)) and (rec >= 50) and (impacto < 2) and (not devolvida):
+                return "🔴 FORA"
+
+            # 🟢 INCIDE: ENTRA/estável e sem sinal estrutural de oscilação
+            if ("ENTRA" in (cls, cls2)) and (rec < 30) and (impacto >= 2) and (not devolvida):
+                return "🟢 INCIDE"
+
+            # 🟡 ZONA CINZA: onde mora o crédito (oscilação/recorrência/impacto/devolvida)
+            if devolvida or rec >= 30 or impacto >= 3 or score >= 60:
+                return "🟡 ZONA_CINZA"
+
+            return "🟢 INCIDE"
+
+        out["zona_base"] = out.apply(_cls, axis=1)
+
+    else:  # MODO MAPA
+        for c in ["impacto_pct_proventos", "valor"]:
+            if c not in out.columns:
+                out[c] = 0.0
+
+        def _cls_map(row):
+            cls = str(row.get("classificacao") or "")
+            impacto = float(row.get("impacto_pct_proventos") or 0)
+
+            if cls == "FORA" and impacto < 2:
+                return "🔴 FORA"
+            if cls == "ENTRA" and impacto >= 3:
+                return "🟢 INCIDE"
+            # neutra/sem_classificação com impacto relevante = zona cinza
+            if cls in ("NEUTRA", "SEM_CLASSIFICACAO") and impacto >= 1:
+                return "🟡 ZONA_CINZA"
+            # qualquer coisa com impacto grande merece amarelo
+            if impacto >= 3:
+                return "🟡 ZONA_CINZA"
+            return "🟢 INCIDE"
+
+        out["zona_base"] = out.apply(_cls_map, axis=1)
+
+    return out
 
 # ---------------------------
 # Detector híbrido de layout
@@ -589,35 +660,45 @@ if arquivos:
             eventos_dump.append(df_dump)
 
             # Mapa
-            if mapa_incidencia_on:
-                grupos = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
-                for g in grupos:
-                    prov_total_g = float(totais_usados.get(g, 0.0) or 0.0)
-                    if prov_total_g <= 0:
-                        continue
-                    tmp = df[df["tipo"] == "PROVENTO"].copy()
-                    agg = (
-                        tmp.groupby(["rubrica", "classificacao"], as_index=False)[g]
-                        .sum()
-                        .rename(columns={g: "valor"})
-                    )
-                    agg = agg[agg["valor"] != 0].copy()
-                    if agg.empty:
-                        continue
-                    agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_g) * 100.0
-                    agg.insert(0, "arquivo", arquivo.name)
-                    agg.insert(1, "competencia", comp)
-                    agg.insert(2, "grupo", ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL"))
-                    agg.insert(3, "proventos_grupo", prov_total_g)
-                    agg["layout"] = layout
-                    agg["familia_layout"] = assin["familia_layout"]
-                    agg["sistema_provavel"] = assin["sistema_provavel"]
-                    linhas_mapa.extend(agg.to_dict(orient="records"))
+if mapa_incidencia_on:
+    grupos = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
+    for g in grupos:
+        prov_total_g = float(totais_usados.get(g, 0.0) or 0.0)
+        if prov_total_g <= 0:
+            continue
+
+        tmp = df[df["tipo"] == "PROVENTO"].copy()
+
+        agg = (
+            tmp.groupby(["rubrica", "classificacao"], as_index=False)[g]
+            .sum()
+            .rename(columns={g: "valor"})
+        )
+
+        agg = agg[agg["valor"] != 0].copy()
+        if agg.empty:
+            continue
+
+        agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_g) * 100.0
+
+        # ✅ SEMÁFORO (MAPA)
+        agg = aplicar_semaforo_base(agg, modo="MAPA")
+
+        agg.insert(0, "arquivo", arquivo.name)
+        agg.insert(1, "competencia", comp)
+        agg.insert(2, "grupo", ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL"))
+        agg.insert(3, "proventos_grupo", prov_total_g)
+        agg["layout"] = layout
+        agg["familia_layout"] = assin["familia_layout"]
+        agg["sistema_provavel"] = assin["sistema_provavel"]
+
+        linhas_mapa.extend(agg.to_dict(orient="records"))
+
 
             # Auditoria
-            grupos_auditar = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
+        grupos_auditar = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
 
-            for g in grupos_auditar:
+        for g in grupos_auditar:
                 res = auditoria_por_exclusao_com_aproximacao(
                     df=df,
                     base_oficial=base_of,
@@ -707,7 +788,7 @@ if arquivos:
                         })
 
             # Diagnóstico
-            if modo_auditor_prof and layout == "ANALITICO" and totalizador_encontrado and bate_totalizador is False:
+        if modo_auditor_prof and layout == "ANALITICO" and totalizador_encontrado and bate_totalizador is False:
                 diag = diagnostico_extracao_proventos(df, tol_inconsistencia=max(1.0, tol_totalizador))
                 if not diag.empty:
                     dtop = diag.head(50).copy()
@@ -960,6 +1041,8 @@ if arquivos:
                     if c not in v.columns:
                         v[c] = pd.NA
 
+                v = aplicar_semaforo_base(v, modo="RADAR")
+
                 v = v.sort_values(
                     colunas_ordem,
                     ascending=[False, False, False, False],
@@ -968,6 +1051,7 @@ if arquivos:
 
                 st.dataframe(
                     v[[
+                        "zona_base",
                         "rubrica",
                         "classificacao_mais_comum",
                         "classificacao_mapa_mais_comum",
