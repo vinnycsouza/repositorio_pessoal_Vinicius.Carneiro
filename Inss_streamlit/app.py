@@ -659,9 +659,11 @@ if arquivos:
             df_dump["sistema_provavel"] = assin["sistema_provavel"]
             eventos_dump.append(df_dump)
 
-            # Mapa
+           # Mapa
 if mapa_incidencia_on:
-    grupos = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
+    layout_atual = locals().get("layout", "GLOBAL")
+    grupos = ["ativos", "desligados"] if layout_atual == "ANALITICO" else ["total"]
+
     for g in grupos:
         prov_total_g = float(totais_usados.get(g, 0.0) or 0.0)
         if prov_total_g <= 0:
@@ -681,18 +683,19 @@ if mapa_incidencia_on:
 
         agg["impacto_pct_proventos"] = (agg["valor"] / prov_total_g) * 100.0
 
-        # ✅ SEMÁFORO (MAPA)
+        # ✅ SEMÁFORO (MAPA) — só se você já colou a função aplicar_semaforo_base()
         agg = aplicar_semaforo_base(agg, modo="MAPA")
 
         agg.insert(0, "arquivo", arquivo.name)
         agg.insert(1, "competencia", comp)
         agg.insert(2, "grupo", ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL"))
         agg.insert(3, "proventos_grupo", prov_total_g)
-        agg["layout"] = layout
+        agg["layout"] = layout_atual
         agg["familia_layout"] = assin["familia_layout"]
         agg["sistema_provavel"] = assin["sistema_provavel"]
 
         linhas_mapa.extend(agg.to_dict(orient="records"))
+
 
 
             # Auditoria
