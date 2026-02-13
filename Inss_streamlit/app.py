@@ -679,16 +679,24 @@ def semaforo(status: str) -> str:
 def _styler_semaforo(df: pd.DataFrame):
     if df is None or df.empty or "semaforo" not in df.columns:
         return df
+
     def _row_style(row):
         s = row.get("semaforo", "")
+
+        # NÃO força cor do texto → deixa o Streamlit usar o claro padrão
         if s == "🟢":
-            return ["background-color: #d9f7e3"] * len(row)
+            return ["background-color: rgba(40,167,69,0.20);"] * len(row)
+
         if s == "🟡":
-            return ["background-color: #fff6d6"] * len(row)
+            return ["background-color: rgba(255,193,7,0.20);"] * len(row)
+
         if s == "🔴":
-            return ["background-color: #ffe0e0"] * len(row)
+            return ["background-color: rgba(220,53,69,0.20);"] * len(row)
+
         return [""] * len(row)
+
     return df.style.apply(_row_style, axis=1)
+
 
 
 # ---------------------------
