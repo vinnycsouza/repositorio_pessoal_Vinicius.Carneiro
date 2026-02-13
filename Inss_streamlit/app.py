@@ -1,6 +1,5 @@
 import io
 import re
-import traceback
 import pdfplumber
 import pandas as pd
 import streamlit as st
@@ -46,6 +45,121 @@ def normalizar_valor_br(txt: str):
         return None
 
 
+def _linha_contem_emissao(linha: str) -> bool:
+    l = (linha or "").lower()
+    return (
+        "emissao" in l
+        or "emitido em" in l
+        or re.search(r"\bdata\s*:\s*\d{1,2}/\d{1,2}/\d{4}\b", l) is not None
+        or re.search(r"\bhora\s*:\s*\d{1,2}:\d{2}", l) is not None
+    )
+
+
+def extrair_competencia_sem_fallback(page):
+    """
+    Extrai competência com prioridade para:
+    - "Mês/Ano: 01/2018" (Situação: Geral 2018)
+    - "Período: ... Dezembro/2012" (Hierarquia empresarial)
+    - "Competencia 31/01/2021" (analítico VRC) -> 01/2021
+    Evita pegar datas de emissão ("EMISSAO", "Emitido em", "Data:").
+    """
+    texto = page.extract_text() or ""
+    txt = texto.lower()
+
+    # 0) Preferência absoluta: "Mês/Ano: 01/2018"
+    m = re.search(r"\bm[eê]s\s*/\s*ano\s*:\s*(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b", txt, flags=re.IGNORECASE)
+    if m:
+        mm = m.group(1).zfill(2)
+        aa = m.group(2)
+        return f"{mm}/{aa}"
+
+    # 1) "Período: ... Dezembro/2012" (ou "jan/2012" por extenso)
+    # Ex.: "Período: Folha mensal : 01 à 31/12/2012 Dezembro/2012"
+    m = re.search(r"\b(per[ií]odo)\s*:\s*.*?\b([a-zç]{3,9})\s*/\s*(20\d{2})\b", txt, flags=re.IGNORECASE)
+    if m:
+        mes_txt = m.group(2).replace("ç", "c")
+        aa = m.group(3)
+        if mes_txt in MESES:
+            return f"{MESES[mes_txt]}/{aa}"
+
+    # 2) "COMPETENCIA 31/01/2021" => 01/2021
+    # (modelo analítico VRC — reforço para não cair em emissão)
+    m = re.search(r"\bcompet[eê]ncia\b\s*(\d{1,2})\s*/\s*(\d{1,2})\s*/\s*(20\d{2})\b", txt, flags=re.IGNORECASE)
+    if m:
+        dd = int(m.group(1))
+        mm = int(m.group(2))
+        aa = m.group(3)
+        if 1 <= mm <= 12 and 1 <= dd <= 31:
+            return f"{str(mm).zfill(2)}/{aa}"
+
+    # 3) fallback por linhas, evitando emissão:
+    linhas = [ln.strip() for ln in texto.splitlines() if ln.strip()]
+    linhas_validas = [ln for ln in linhas if not _linha_contem_emissao(ln)]
+
+    joined = "\n".join(linhas_validas).lower()
+
+    # 3.1) 01/2021
+    m = re.search(r"\b(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b", joined)
+    if m:
+        mm = m.group(1).zfill(2)
+        aa = m.group(2)
+        return f"{mm}/{aa}"
+
+    # 3.2) 01.2012 ou 01-2012
+    m = re.search(r"\b(0?[1-9]|1[0-2])\s*[.\-]\s*(20\d{2})\b", joined)
+    if m:
+        mm = m.group(1).zfill(2)
+        aa = m.group(2)
+        return f"{mm}/{aa}"
+
+    # 3.3) jan/21
+    m = re.search(r"\b([a-zç]{3,9})\s*/\s*(\d{2})\b", joined)
+    if m:
+        mes_txt = m.group(1).replace("ç", "c")
+        ano2 = m.group(2)
+        if mes_txt in MESES:
+            return f"{MESES[mes_txt]}/20{ano2}"
+
+    # 3.4) janeiro 2021
+    m = re.search(r"\b([a-zç]{3,9})\s+(20\d{2})\b", joined)
+    if m:
+        mes_txt = m.group(1).replace("ç", "c")
+        aa = m.group(2)
+        if mes_txt in MESES:
+            return f"{MESES[mes_txt]}/{aa}"
+
+    return None
+
+
+def extrair_competencia_robusta(page, competencia_atual=None):
+    comp = extrair_competencia_sem_fallback(page)
+    return comp if comp else competencia_atual
+
+
+def extrair_totais_proventos_page(page) -> dict | None:
+    """
+    Extrai TOTAIS PROVENTOS ativos desligados total (layout analítico).
+    """
+    padrao = re.compile(
+        r"totais\s+proventos.*?(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
+        r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
+        r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
+        re.IGNORECASE
+    )
+    txt = page.extract_text() or ""
+    m = padrao.search(txt)
+    if not m:
+        return None
+
+    a = normalizar_valor_br(m.group(1))
+    d = normalizar_valor_br(m.group(2))
+    t = normalizar_valor_br(m.group(3))
+    if a is None or d is None or t is None:
+        return None
+
+    return {"ativos": a, "desligados": d, "total": t}
+
+
 def _safe_classificacao(df: pd.DataFrame) -> pd.DataFrame:
     if "classificacao" not in df.columns:
         df["classificacao"] = "SEM_CLASSIFICACAO"
@@ -58,116 +172,6 @@ def _mode_or_none(series: pd.Series):
         return None
     vc = series.value_counts(dropna=True)
     return vc.index[0] if len(vc) else None
-
-
-# ---------------------------
-# Competência robusta (RESUMO/ANALÍTICO)
-# - Prioriza "Mês/Ano" (modelo 2018)
-# - Prioriza intervalo dd/mm/aaaa a dd/mm/aaaa (modelo 2012)
-# - Evita datas de emissão/geração (Data:, Emissão:, Gerado em etc.)
-# ---------------------------
-
-def extrair_competencia_sem_fallback_texto(texto: str):
-    if not texto:
-        return None
-
-    txt = " ".join(texto.split()).lower()
-
-    # (1) MODELO 2018: "Mês/Ano: 01/2018" (ou variações)
-    m = re.search(
-        r"\bm[eê]s\s*/\s*ano\s*:\s*(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b",
-        txt, flags=re.IGNORECASE
-    )
-    if m:
-        return f"{m.group(1).zfill(2)}/{m.group(2)}"
-
-    # (2) MODELO 2012: "01/01/2012 A 31/01/2012" (ou "até", "-", "à")
-    m = re.search(
-        r"\b(0?[1-9]|[12]\d|3[01])\s*/\s*(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\s*(a|à|até|-)\s*"
-        r"(0?[1-9]|[12]\d|3[01])\s*/\s*(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b",
-        txt, flags=re.IGNORECASE
-    )
-    if m:
-        mm = m.group(2).zfill(2)
-        aa = m.group(3)
-        return f"{mm}/{aa}"
-
-    # (3) Remover/neutralizar datas completas dd/mm/aaaa próximas de contexto de emissão
-    # para reduzir captura acidental de "mm/aaaa" em relatórios anuais.
-    # Obs: não retornamos dd/mm/aaaa como competência; apenas limpamos ruído.
-    emis_ctx = ["emissão", "emissao", "emitido", "data:", "data :", "gerado", "impress", "hora:"]
-    for dm in re.finditer(r"\b(0?[1-9]|[12]\d|3[01])\s*/\s*(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b", txt):
-        i, j = dm.start(), dm.end()
-        janela = txt[max(0, i - 50):j]
-        if any(k in janela for k in emis_ctx):
-            txt = txt[:i] + " " * (j - i) + txt[j:]
-
-    # (4) mm/aaaa (genérico)
-    m = re.search(r"\b(0?[1-9]|1[0-2])\s*/\s*(20\d{2})\b", txt)
-    if m:
-        mm = m.group(1).zfill(2)
-        aa = m.group(2)
-        return f"{mm}/{aa}"
-
-    # (5) 01.2012 ou 01-2012
-    m = re.search(r"\b(0?[1-9]|1[0-2])\s*[.\-]\s*(20\d{2})\b", txt)
-    if m:
-        mm = m.group(1).zfill(2)
-        aa = m.group(2)
-        return f"{mm}/{aa}"
-
-    # (6) jan/21
-    m = re.search(r"\b([a-zç]{3,9})\s*/\s*(\d{2})\b", txt)
-    if m:
-        mes_txt = m.group(1).replace("ç", "c")
-        ano2 = m.group(2)
-        if mes_txt in MESES:
-            return f"{MESES[mes_txt]}/20{ano2}"
-
-    # (7) janeiro 2021
-    m = re.search(r"\b([a-zç]{3,9})\s+(20\d{2})\b", txt)
-    if m:
-        mes_txt = m.group(1).replace("ç", "c")
-        aa = m.group(2)
-        if mes_txt in MESES:
-            return f"{MESES[mes_txt]}/{aa}"
-
-    return None
-
-
-def extrair_competencia_robusta_texto(texto: str, competencia_atual=None):
-    comp = extrair_competencia_sem_fallback_texto(texto)
-    return comp if comp else competencia_atual
-
-
-# ---------------------------
-# Totalizador analítico (por TEXTO)
-# ---------------------------
-
-def extrair_totais_proventos_texto(texto: str):
-    """
-    Extrai TOTAIS PROVENTOS ativos desligados total (layout analítico) via texto.
-    """
-    if not texto:
-        return None
-
-    padrao = re.compile(
-        r"totais\s+proventos.*?(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
-        r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s+"
-        r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})",
-        re.IGNORECASE | re.DOTALL
-    )
-    m = padrao.search(texto)
-    if not m:
-        return None
-
-    a = normalizar_valor_br(m.group(1))
-    d = normalizar_valor_br(m.group(2))
-    t = normalizar_valor_br(m.group(3))
-    if a is None or d is None or t is None:
-        return None
-
-    return {"ativos": a, "desligados": d, "total": t}
 
 
 # ---------------------------
@@ -185,16 +189,8 @@ def detectar_layout_pdf(pages_text: list[str]) -> str:
         return "ANALITICO"
     if ("ativos" in joined and "desligados" in joined and "totais proventos" in joined):
         return "ANALITICO"
-
-    # Evidência de resumo:
-    if "resumo da folha" in joined:
-        return "RESUMO"
-    if "resumo geral" in joined:
-        return "RESUMO"
-    if ("vencimentos" in joined and "descontos" in joined and ("base inss" in joined or "inss base" in joined)):
-        return "RESUMO"
-    if ("evento" in joined and ("descr" in joined or "descricao" in joined) and "valor" in joined):
-        return "RESUMO"
+    if ("resumo gerencial analitico" in joined and "totais proventos" in joined):
+        return "ANALITICO"
 
     return "RESUMO"
 
@@ -206,52 +202,56 @@ def detectar_layout_pdf(pages_text: list[str]) -> str:
 def _score_any(text: str, patterns: list[str]) -> int:
     return sum(1 for p in patterns if p in text)
 
-
 def reconhecer_sistema_por_assinatura(pages_text: list[str]) -> dict:
     joined = "\n".join([t for t in pages_text if t]).lower()
     evid = []
 
-    s_analitico = _score_any(joined, [
-        "cod provento", "cod desconto", "ativos", "desligados", "totais proventos"
-    ])
-    s_evento_qtd = _score_any(joined, [
-        "evento", "descr", "descricao", "qtd", "refer", "valor"
-    ])
-    s_venc_desc = _score_any(joined, [
-        "vencimentos", "descontos", "base inss", "inss base", "base inss empresa", "base inss (empresa)"
-    ])
+    # Detalhe: "hierarquia empresarial" é uma família (nem sempre dá pra cravar vendor)
+    s_hierarquia = _score_any(joined, ["resumo da hierarquia empresarial", "previdência social", "total da base empresa"])
+    s_analitico = _score_any(joined, ["cod provento", "cod desconto", "ativos", "desligados", "totais proventos", "resumo gerencial analitico"])
+    s_situacao_geral = _score_any(joined, ["situação: geral", "mês/ano", "bases de cálculo", "base inss empresa"])
+    s_evento_qtd = _score_any(joined, ["evento", "descr", "qtd", "refer", "valor"])
+    s_resumo_folha = _score_any(joined, ["resumo da folha de pagamento", "base inss (empresa)"])
 
     scores = {
         "ANALITICO_ESPELHADO": s_analitico,
-        "RESUMO_EVENTO_QTD": s_evento_qtd,
-        "RESUMO_VENC_DESC_BASE": s_venc_desc,
+        "RESUMO_SITUACAO_GERAL_2018": s_situacao_geral,
+        "RESUMO_FOLHA_2012_COLUNAS": s_resumo_folha + s_evento_qtd,
+        "RESUMO_HIERARQUIA_EMPRESARIAL": s_hierarquia,
     }
     familia = max(scores, key=scores.get)
     top = scores[familia]
     if top == 0:
         familia = "DESCONHECIDO"
 
+    # evidências
+    if "resumo da hierarquia empresarial" in joined: evid.append("RESUMO DA HIERARQUIA EMPRESARIAL")
+    if "total da base empresa" in joined: evid.append("TOTAL DA BASE EMPRESA")
+    if "situação: geral" in joined: evid.append("SITUAÇÃO: GERAL")
+    if "mês/ano" in joined or "mes/ano" in joined: evid.append("MÊS/ANO")
+    if "bases de cálculo" in joined or "bases de calculo" in joined: evid.append("BASES DE CÁLCULO")
+    if "base inss empresa" in joined: evid.append("BASE INSS EMPRESA")
+    if "resumo da folha de pagamento" in joined: evid.append("RESUMO DA FOLHA DE PAGAMENTO")
+    if "base inss (empresa)" in joined: evid.append("BASE INSS (EMPRESA)")
     if "cod provento" in joined: evid.append("COD PROVENTO")
     if "cod desconto" in joined: evid.append("COD DESCONTO")
-    if "ativos" in joined: evid.append("ATIVOS")
-    if "desligados" in joined: evid.append("DESLIGADOS")
     if "totais proventos" in joined: evid.append("TOTAIS PROVENTOS")
-    if "resumo da folha" in joined: evid.append("RESUMO DA FOLHA")
-    if "resumo geral" in joined: evid.append("RESUMO GERAL")
-    if "vencimentos" in joined: evid.append("VENCIMENTOS")
-    if "descontos" in joined: evid.append("DESCONTOS")
-    if ("base inss empresa" in joined) or ("base inss (empresa)" in joined) or ("inss base" in joined): evid.append("BASE INSS EMPRESA")
-    if "evento" in joined and "qtd" in joined: evid.append("EVENTO/QTD")
+    if "resumo gerencial analitico" in joined: evid.append("RESUMO GERENCIAL ANALÍTICO")
 
+    # sistema provável (heurístico)
     if familia == "ANALITICO_ESPELHADO":
         sistema = "Domínio/Questor/Mastermaq (família analítica espelhada)"
         confianca = min(95, 60 + top * 10)
-    elif familia == "RESUMO_EVENTO_QTD":
-        sistema = "Senior/Alterdata/TOTVS (família resumo por evento)"
+    elif familia == "RESUMO_SITUACAO_GERAL_2018":
+        # Não cravo vendor: deixo como família de relatório + traços típicos
+        sistema = "Relatório 'Situação: Geral' (família 2018) — sistema provável: Senior/TOTVS (heurística)"
         confianca = min(90, 55 + top * 10)
-    elif familia == "RESUMO_VENC_DESC_BASE":
-        sistema = "TOTVS (Protheus/RM)/Senior (família vencimentos/descontos/base)"
+    elif familia == "RESUMO_FOLHA_2012_COLUNAS":
+        sistema = "Relatório 'Resumo da Folha de Pagamento' (família 2012 colunas) — sistema provável: legado"
         confianca = min(90, 55 + top * 10)
+    elif familia == "RESUMO_HIERARQUIA_EMPRESARIAL":
+        sistema = "Relatório consolidado 'Hierarquia Empresarial' (família antiga) — vendor não identificado"
+        confianca = min(85, 50 + top * 10)
     else:
         sistema = "Não identificado"
         confianca = 10
@@ -260,7 +260,7 @@ def reconhecer_sistema_por_assinatura(pages_text: list[str]) -> dict:
         "familia_layout": familia,
         "sistema_provavel": sistema,
         "confianca": int(confianca),
-        "evidencias": evid[:10],
+        "evidencias": evid[:12],
         "scores": scores,
     }
 
@@ -269,11 +269,10 @@ def reconhecer_sistema_por_assinatura(pages_text: list[str]) -> dict:
 # Extratores para layout RESUMO
 # ---------------------------
 
-def extrair_base_inss_global_texto(texto: str):
+def extrair_base_inss_global_texto(texto: str) -> float | None:
     """
-    Base INSS empresa em PDFs de resumo (2012/2018).
-    Atenção: alguns layouts aparecem como "BASE INSS (EMPRESA)" e outros como "INSS BASE (EMPRESA)".
-    Retorna o MAIOR candidato.
+    Base INSS empresa em PDFs de resumo (2012/2018/hierarquia).
+    Retorna o MAIOR candidato, mas dá prioridade a 'Total da base empresa' quando existir.
     """
     if not texto:
         return None
@@ -281,21 +280,20 @@ def extrair_base_inss_global_texto(texto: str):
     txt = " ".join((texto or "").split())
     VAL_RE = r"(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})"
 
-    # cobre: BASE INSS (EMPRESA) / BASE INSS EMPRESA / BASE INSS - EMPRESA
-    # e também: INSS BASE (EMPRESA) / INSS BASE EMPRESA (alguns relatórios invertem)
+    # prioridade máxima (hierarquia empresarial)
+    pri = re.findall(rf"\btotal\s+da\s+base\s+empresa\s*[:\-]?\s*{VAL_RE}\b", txt, flags=re.IGNORECASE)
+    if pri:
+        vals = [normalizar_valor_br(v) for v in pri]
+        vals = [v for v in vals if v is not None]
+        if vals:
+            return float(max(vals))
+
     padroes = [
         rf"\bbase\s+inss\s*\(\s*empresa\s*\)\s*[:\-]?\s*{VAL_RE}",
-        rf"\bbase\s+inss\s*\(\s*.*?empresa.*?\)\s*[:\-]?\s*{VAL_RE}",
         rf"\bbase\s+inss\s+empresa\s*[:\-]?\s*{VAL_RE}",
-        rf"\bbase\s+inss\s*[-–]\s*empresa\s*[:\-]?\s*{VAL_RE}",
-
-        rf"\binss\s+base\s*\(\s*empresa\s*\)\s*[:\-]?\s*{VAL_RE}",
-        rf"\binss\s+base\s+empresa\s*[:\-]?\s*{VAL_RE}",
-        rf"\binss\s+base\s*[-–]\s*empresa\s*[:\-]?\s*{VAL_RE}",
-
-        # fallback final (último recurso):
-        rf"\bbase\s+inss\s*[:\-]?\s*{VAL_RE}",
-        rf"\binss\s+base\s*[:\-]?\s*{VAL_RE}",
+        rf"\bbase\s+de\s+inss\s*[-–]\s*empresa\s*[:\-]?\s*{VAL_RE}",
+        rf"\bsal[aá]rio\s+contribui[cç][aã]o\s+empresa\s*[:\-]?\s*{VAL_RE}",  # se algum resumo trouxer isso
+        rf"\bbase\s+empresa\s*[:\-]?\s*{VAL_RE}",  # aparece na hierarquia, mas sem “total”
     ]
 
     candidatos = []
@@ -311,14 +309,38 @@ def extrair_base_inss_global_texto(texto: str):
     return max(candidatos)
 
 
-def extrair_eventos_resumo_texto(texto: str) -> list[dict]:
+def _find_codigos_resumo(linha: str) -> list[tuple[str, int]]:
+    """
+    Encontra códigos 3-6 dígitos na linha, MAS ignora números que fazem parte de valores
+    (ex.: 1.959,80 não pode gerar código 959).
+    Regras:
+    - token deve ser 'isolado' por não-dígito nas bordas
+    - e não pode estar colado em '.' ou ',' imediatamente antes/depois
+    """
+    cod_pos = []
+    for m in re.finditer(r"\b(\d{3,6})\b", linha):
+        start, end = m.start(1), m.end(1)
+        prev = linha[start - 1] if start - 1 >= 0 else " "
+        nxt = linha[end] if end < len(linha) else " "
+
+        # se estiver colado em separador de milhar/decimal, ignora
+        if prev in ".,":  # ex.: "1.959,80" -> o "959" tem prev='.'
+            continue
+        if nxt in ".,":   # prevenção extra
+            continue
+
+        cod_pos.append((m.group(1), start))
+    return sorted(cod_pos, key=lambda x: x[1])
+
+
+def extrair_eventos_resumo_page(page) -> list[dict]:
     """
     Extrai eventos em RESUMO respeitando 2 colunas:
     - Modelo com '|' separando PROVENTO (esq) e DESCONTO (dir)
     - Modelo “grudado”: 2 rubricas na mesma linha (sem '|')
-    Inclui (quando possível): referencia e quantidade.
+    Corrigido para NÃO quebrar em números internos de valores (bug 2018).
     """
-    txt = texto or ""
+    txt = page.extract_text() or ""
     if not txt.strip():
         return []
 
@@ -348,8 +370,8 @@ def extrair_eventos_resumo_texto(texto: str) -> list[dict]:
         return normalizar_valor_br(nums[-3])
 
     def primeiro_codigo(s: str):
-        m = re.search(r"\b(\d{3,6})\b", s)
-        return m.group(1) if m else None
+        cods = _find_codigos_resumo(s)
+        return cods[0][0] if cods else None
 
     def limpar_desc(cod: str, chunk: str):
         x = re.sub(r"^\s*" + re.escape(cod) + r"\s+", "", chunk).strip()
@@ -383,7 +405,7 @@ def extrair_eventos_resumo_texto(texto: str) -> list[dict]:
             continue
 
         # ignora áreas que não são eventos
-        if ("base inss" in l) or ("inss base" in l):
+        if "base inss" in l or "bases de c" in l or "bases de cá" in l:
             continue
         if "resumo" in l and "folha" in l:
             continue
@@ -391,13 +413,15 @@ def extrair_eventos_resumo_texto(texto: str) -> list[dict]:
             continue
         if "totalização" in l or "totalizacao" in l:
             continue
-        if ("evento" in l and ("descricao" in l or "descr" in l) and "valor" in l):
+        if ("evento" in l and "descricao" in l and "valor" in l) or ("evento" in l and "descr" in l and "valor" in l):
+            continue
+        if "resumo do pagamento mensal" in l and "situação" in l:
             continue
 
         # 1) Modelo com colunas separadas por '|'
         if "|" in ln:
             partes = [p.strip() for p in ln.split("|")]
-            blocos = [p for p in partes if p and re.search(r"\b\d{3,6}\b", p)]
+            blocos = [p for p in partes if p and primeiro_codigo(p)]
             if len(blocos) >= 2:
                 esq, dir = blocos[0], blocos[1]
 
@@ -424,12 +448,8 @@ def extrair_eventos_resumo_texto(texto: str) -> list[dict]:
             elif len(blocos) == 1:
                 ln = blocos[0]
 
-        # 2) Modelo “grudado”: 2 códigos na mesma linha
-        cod_pos = []
-        for m in re.finditer(r"\b(\d{3,6})\b", ln):
-            cod = m.group(1)
-            cod_pos.append((cod, m.start()))
-        cod_pos = sorted(cod_pos, key=lambda x: x[1])
+        # 2) Modelo “grudado”: 2 códigos na mesma linha (sem '|')
+        cod_pos = _find_codigos_resumo(ln)
 
         if len(cod_pos) >= 2:
             (cod1, p1), (cod2, p2) = cod_pos[0], cod_pos[1]
@@ -452,7 +472,7 @@ def extrair_eventos_resumo_texto(texto: str) -> list[dict]:
                 add_event("DESCONTO", cod2, limpar_desc(cod2, chunk2), v2, r2, quant2)
             continue
 
-        # 3) Linha simples (1 rubrica) — robusta (não mata 2012)
+        # 3) Linha simples (1 rubrica)
         m_cod = re.match(r"^\s*(\d{3,6})\s+(.+)$", ln)
         if not m_cod:
             continue
@@ -465,7 +485,6 @@ def extrair_eventos_resumo_texto(texto: str) -> list[dict]:
             continue
 
         ref = penultimo_numero_br(resto)
-
         q = antepenultimo_numero_br(resto)
         quant = q if (q is not None and q <= 10000) else None
 
@@ -524,12 +543,12 @@ def diagnostico_extracao_proventos(df_eventos: pd.DataFrame, tol_inconsistencia:
 # ---------------------------
 
 st.set_page_config(layout="wide")
-st.title("🧾 Auditor INSS — Híbrido + Assinatura Estrutural (robusto 2012/2018)")
+st.title("🧾 Auditor INSS — Híbrido + Assinatura Estrutural (4 modelos)")
 
 arquivos = st.file_uploader("Envie 1 ou mais PDFs", type="pdf", accept_multiple_files=True)
 
 st.markdown("### Configurações")
-c1, c2, c3, c4, c5 = st.columns(5)
+c1, c2, c3, c4 = st.columns(4)
 with c1:
     tol_totalizador = st.number_input("Tolerância totalizador (R$)", min_value=0.0, value=1.00, step=0.50)
 with c2:
@@ -538,18 +557,31 @@ with c3:
     banda_aceitavel = st.number_input("Banda ACEITÁVEL (|erro| ≤)", min_value=0.0, value=10000.0, step=100.0)
 with c4:
     modo_auditor_prof = st.checkbox("🕵️ Auditor Profissional (diagnóstico extração)", value=True)
-with c5:
-    top_n_subset = st.number_input("Top N (subset auditoria)", min_value=10, max_value=120, value=44, step=1)
 
 indice_incidencia_on = st.checkbox("📈 Índice de Incidência", value=True)
 mapa_incidencia_on = st.checkbox("🧭 Mapa de Incidência (impacto %)", value=True)
 radar_on = st.checkbox("📡 Radar Estrutural Automático", value=True)
 
 st.info(
-    "✅ Detector Híbrido decide entre **ANALÍTICO** (ATIVOS/DESLIGADOS) e **RESUMO** (GLOBAL).\n"
-    "✅ Assinatura estrutural sugere a **família** e um **sistema provável** (heurística).\n"
-    "✅ 2012/2018 com competência por **Mês/Ano** ou **intervalo do período**, e base por **BASE INSS (EMPRESA)** / **INSS BASE (EMPRESA)**."
+    "✅ Suporte a 4 famílias:\n"
+    "- **ANALÍTICO** (cod provento/desconto + totais)\n"
+    "- **RESUMO DA FOLHA** (2012 colunas |)\n"
+    "- **SITUAÇÃO: GERAL** (2018 Mês/Ano)\n"
+    "- **HIERARQUIA EMPRESARIAL** (base por 'Total da base empresa')\n"
+    "\n"
+    "✅ Correção de competência: prioriza Mês/Ano e Período; ignora emissão.\n"
+    "✅ Correção do bug 2018: não transforma '959' de '1.959,80' em código."
 )
+
+def _semaforo(status: str) -> str:
+    s = (status or "").upper()
+    if s == "OK":
+        return "🟢"
+    if s in ("ACEITAVEL", "INCOMPLETO_BASE", "SEM_EVENTOS", "SEM_ERRO"):
+        return "🟡"
+    if s in ("RUIM", "FALHA_EXTRACAO_TOTALIZADOR"):
+        return "🔴"
+    return "🟡"
 
 if arquivos:
     linhas_resumo = []
@@ -561,13 +593,7 @@ if arquivos:
 
     for arquivo in arquivos:
         with pdfplumber.open(arquivo) as pdf:
-            # amostra de até 10 páginas com texto útil para detectar layout/assinatura com mais precisão
-            texts = []
-            for p in pdf.pages[:10]:
-                t = (p.extract_text() or "").strip()
-                if t:
-                    texts.append(t)
-
+            texts = [(p.extract_text() or "") for p in pdf.pages[:2]]
             layout = detectar_layout_pdf(texts)
             assin = reconhecer_sistema_por_assinatura(texts)
 
@@ -575,9 +601,7 @@ if arquivos:
             comp_atual = None
 
             for page in pdf.pages:
-                page_text = page.extract_text() or ""
-
-                comp_atual = extrair_competencia_robusta_texto(page_text, comp_atual)
+                comp_atual = extrair_competencia_robusta(page, comp_atual)
                 if not comp_atual:
                     comp_atual = "SEM_COMP"
 
@@ -600,15 +624,11 @@ if arquivos:
                         if base and dados[comp_atual]["base_empresa"] is None:
                             dados[comp_atual]["base_empresa"] = base
                 else:
-                    # RESUMO: tenta base INSS (Empresa) por regex (2012/2018)
+                    # RESUMO: base por regex, incluindo "Total da base empresa"
                     try:
-                        b = extrair_base_inss_global_texto(page_text)
+                        b = extrair_base_inss_global_texto(page.extract_text() or "")
                         if b is not None:
-                            if dados[comp_atual]["base_empresa"] is None:
-                                dados[comp_atual]["base_empresa"] = {"total": float(b)}
-                            else:
-                                atual = float((dados[comp_atual]["base_empresa"] or {}).get("total", 0.0) or 0.0)
-                                dados[comp_atual]["base_empresa"]["total"] = max(atual, float(b))
+                            dados[comp_atual]["base_empresa"] = {"total": float(b)}
                     except Exception as e:
                         linhas_erros.append({
                             "arquivo": arquivo.name,
@@ -621,7 +641,7 @@ if arquivos:
                 # ---------- Totalizador (somente analítico) ----------
                 if layout == "ANALITICO":
                     try:
-                        tot = extrair_totais_proventos_texto(page_text)
+                        tot = extrair_totais_proventos_page(page)
                         if tot and dados[comp_atual]["totais_proventos_pdf"] is None:
                             dados[comp_atual]["totais_proventos_pdf"] = tot
                     except Exception as e:
@@ -635,7 +655,6 @@ if arquivos:
 
                 # ---------- Eventos ----------
                 if layout == "ANALITICO":
-                    # Não mistura páginas de bases dentro de eventos
                     if pagina_eh_de_bases(page):
                         continue
                     try:
@@ -648,9 +667,9 @@ if arquivos:
                             "etapa": "EVENTOS_ANALITICO",
                             "erro": f"{type(e).__name__}: {e}",
                         })
-                        # fallback pro resumo, se quiser tentar salvar alguma coisa:
+                        # fallback pro resumo (não quebra)
                         try:
-                            ev = extrair_eventos_resumo_texto(page_text)
+                            ev = extrair_eventos_resumo_page(page)
                             if ev:
                                 dados[comp_atual]["eventos"].extend(ev)
                         except Exception as e2:
@@ -663,7 +682,7 @@ if arquivos:
                             })
                 else:
                     try:
-                        ev = extrair_eventos_resumo_texto(page_text)
+                        ev = extrair_eventos_resumo_page(page)
                         if ev:
                             dados[comp_atual]["eventos"].extend(ev)
                     except Exception as e:
@@ -685,7 +704,7 @@ if arquivos:
                     "layout": layout,
                     "grupo": "",
                     "status": "SEM_EVENTOS",
-                    "semaforo": "🟡 AMARELO",
+                    "semaforo": "🟡",
                     "familia_layout": assin["familia_layout"],
                     "sistema_provavel": assin["sistema_provavel"],
                     "confianca_assinatura": assin["confianca"],
@@ -744,7 +763,7 @@ if arquivos:
                     abs(dif_totalizador_desligados) <= tol_totalizador
                 )
 
-            # dump eventos (pra aba Eventos e Excel)
+            # dump eventos
             df_dump = df.copy()
             df_dump.insert(0, "arquivo", arquivo.name)
             df_dump.insert(1, "competencia", comp)
@@ -753,7 +772,7 @@ if arquivos:
             df_dump["sistema_provavel"] = assin["sistema_provavel"]
             eventos_dump.append(df_dump)
 
-            # ---------- Mapa de incidência (robusto) ----------
+            # ---------- Mapa de incidência ----------
             if mapa_incidencia_on:
                 grupos = ["ativos", "desligados"] if layout == "ANALITICO" else ["total"]
                 for g in grupos:
@@ -796,7 +815,7 @@ if arquivos:
                         base_oficial=base_of,
                         totais_proventos=totais_usados,
                         grupo=g,
-                        top_n_subset=int(top_n_subset)
+                        top_n_subset=44
                     )
                 except Exception as e:
                     linhas_erros.append({
@@ -841,14 +860,6 @@ if arquivos:
                 else:
                     status = "RUIM"
 
-                # --- Semáforo simples (🟢🟡🔴) ---
-                if status == "OK":
-                    semaforo = "🟢 VERDE"
-                elif status in ("ACEITAVEL", "INCOMPLETO_BASE", "SEM_EVENTOS", "SEM_ERRO"):
-                    semaforo = "🟡 AMARELO"
-                else:
-                    semaforo = "🔴 VERMELHO"
-
                 grupo_label = ("ATIVOS" if g == "ativos" else "DESLIGADOS" if g == "desligados" else "GLOBAL")
 
                 linhas_resumo.append({
@@ -856,8 +867,6 @@ if arquivos:
                     "competencia": comp,
                     "layout": layout,
                     "grupo": grupo_label,
-
-                    "semaforo": semaforo,
 
                     "totalizador_encontrado": totalizador_encontrado,
                     "bate_totalizador": bate_totalizador,
@@ -876,6 +885,7 @@ if arquivos:
                     "erro_por_baixo": erro,
 
                     "status": status,
+                    "semaforo": _semaforo(status),
 
                     "familia_layout": assin["familia_layout"],
                     "sistema_provavel": assin["sistema_provavel"],
@@ -963,17 +973,17 @@ if arquivos:
     df_devolvidas_f = _filtrar_por_chaves(df_devolvidas)
     df_mapa_f = _filtrar_por_chaves(df_mapa)
 
-    # eventos: filtra por merge (mais rápido que apply)
+    # eventos: filtra por arquivo+competencia
     if not df_eventos.empty:
-        pares_df = df_resumo_f[["arquivo", "competencia"]].drop_duplicates()
-        df_eventos_f = df_eventos.merge(pares_df, on=["arquivo", "competencia"], how="inner")
+        pares_ok = set((r["arquivo"], r["competencia"]) for _, r in df_resumo_f[["arquivo", "competencia"]].drop_duplicates().iterrows())
+        df_eventos_f = df_eventos[df_eventos.apply(lambda x: (x["arquivo"], x["competencia"]) in pares_ok, axis=1)].copy()
     else:
         df_eventos_f = df_eventos
 
-    # diag: filtra por merge (mais rápido que apply)
+    # diag: filtra por arquivo+competencia
     if not df_diag.empty:
-        pares_df2 = df_resumo_f[["arquivo", "competencia"]].drop_duplicates()
-        df_diag_f = df_diag.merge(pares_df2, on=["arquivo", "competencia"], how="inner")
+        pares_ok2 = set((r["arquivo"], r["competencia"]) for _, r in df_resumo_f[["arquivo", "competencia"]].drop_duplicates().iterrows())
+        df_diag_f = df_diag[df_diag.apply(lambda x: (x["arquivo"], x["competencia"]) in pares_ok2, axis=1)].copy()
     else:
         df_diag_f = df_diag
 
@@ -1036,7 +1046,6 @@ if arquivos:
 
         df_radar["score_risco"] = df_radar.apply(_score, axis=1)
 
-        # garante colunas para ordenação sem KeyError
         for c in ["score_risco", "recorrencia_pct", "impacto_medio_pct", "valor_total_devolvido"]:
             if c not in df_radar.columns:
                 df_radar[c] = pd.NA
@@ -1054,23 +1063,10 @@ if arquivos:
 
     with tab_resumo:
         st.subheader("📌 Resumo consolidado (filtrado)")
-
-        # contadores de semáforo (bem visível e leve)
-        if "semaforo" in df_resumo_f.columns:
-            v = int((df_resumo_f["semaforo"].astype(str).str.startswith("🟢")).sum())
-            a = int((df_resumo_f["semaforo"].astype(str).str.startswith("🟡")).sum())
-            r = int((df_resumo_f["semaforo"].astype(str).str.startswith("🔴")).sum())
-            cc1, cc2, cc3 = st.columns(3)
-            cc1.metric("🟢 Verdes", v)
-            cc2.metric("🟡 Amarelos", a)
-            cc3.metric("🔴 Vermelhos", r)
-
-        cols = df_resumo_f.columns.tolist()
-        if "semaforo" in cols:
-            cols = ["semaforo"] + [c for c in cols if c != "semaforo"]
-
+        cols_front = ["semaforo", "status", "competencia", "arquivo", "layout", "grupo", "proventos_grupo", "base_oficial", "erro_por_baixo"]
+        cols_front = [c for c in cols_front if c in df_resumo_f.columns]
         st.dataframe(
-            df_resumo_f[cols].sort_values(["semaforo", "competencia", "arquivo", "layout", "grupo"]),
+            df_resumo_f.sort_values(["competencia", "arquivo", "layout", "grupo"])[cols_front + [c for c in df_resumo_f.columns if c not in cols_front]],
             use_container_width=True
         )
 
