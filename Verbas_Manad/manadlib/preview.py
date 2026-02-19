@@ -25,7 +25,7 @@ def ler_catalogo_k150(path_k150: Path) -> pd.DataFrame:
     Lê K150.txt e retorna DataFrame com:
       COD_RUBRICA, DESC_RUBRICA
 
-    ✅ Ordenação: por COD_RUBRICA crescente (como você pediu).
+    ✅ Ordena por COD_RUBRICA crescente (ordem numérica real quando possível).
     """
     rows = []
     with path_k150.open("r", encoding="utf-8", errors="ignore") as f:
@@ -33,24 +33,44 @@ def ler_catalogo_k150(path_k150: Path) -> pd.DataFrame:
             linha = linha.rstrip("\n")
             partes = linha.split("|")
 
+            # normaliza para tamanho do CAB_K150
             partes = partes[: len(CAB_K150)]
             if len(partes) < len(CAB_K150):
                 partes += [""] * (len(CAB_K150) - len(partes))
 
+            # índices: 3=COD_RUBRICA, 4=DESC_RUBRICA
             cod = (partes[3] or "").strip()
             desc = (partes[4] or "").strip()
+
             if cod:
                 rows.append((cod, desc))
 
     df = pd.DataFrame(rows, columns=["COD_RUBRICA", "DESC_RUBRICA"]).drop_duplicates()
+    if df.empty:
+        return df
 
-    # ✅ ORDEM POR CÓDIGO (string) — preserva zeros à esquerda
-    df["COD_RUBRICA"] = df["COD_RUBRICA"].astype(str)
-    df = df.sort_values(["COD_RUBRICA"], kind="stable").reset_index(drop=True)
+    # ✅ Ordenação por código (numérica quando possível; mantém string original)
+    df["COD_RUBRICA"] = df["COD_RUBRICA"].astype(str).str.strip()
+
+    # chave numérica para ordenar corretamente 50, 234, 238, 417, 8140...
+    df["_COD_NUM"] = pd.to_numeric(df["COD_RUBRICA"], errors="coerce")
+
+    # Se houver códigos não-numéricos (NaN), eles ficam por último, mas mantemos estável
+    df = (
+        df.sort_values(by=["_COD_NUM", "COD_RUBRICA"], kind="stable", na_position="last")
+          .drop(columns=["_COD_NUM"])
+          .reset_index(drop=True)
+    )
     return df
 
 
-def alertas_descricoes_repetidas(df_rubricas: pd.DataFrame, selected_codigos: Set[str]) -> Optional[pd.DataFrame]:
+def alertas_descricoes_repetidas(
+    df_rubricas: pd.DataFrame,
+    selected_codigos: Set[str],
+) -> Optional[pd.DataFrame]:
+    """
+    Retorna DF com descrições que possuem múltiplos códigos (no universo selecionado).
+    """
     if df_rubricas is None or df_rubricas.empty:
         return None
 
@@ -74,6 +94,7 @@ def alertas_descricoes_repetidas(df_rubricas: pd.DataFrame, selected_codigos: Se
         .apply(lambda s: ", ".join(sorted(set(s))))
         .reset_index(name="codigos")
     )
+
     out = grp.merge(cods, on="DESC_RUBRICA", how="left")
     out.columns = ["Descrição", "Qtd códigos", "Códigos"]
     return out
@@ -87,10 +108,18 @@ def gerar_previa_k300(
     df_rubricas: pd.DataFrame,
     sample_size: int = 200,
 ) -> Dict:
+    """
+    Scan linha a linha no K300.txt, aplica filtros, calcula:
+      - totais por rubrica
+      - totais por competência
+      - amostra de linhas
+      - alertas (rubricas sem movimento)
+    """
     selected_codigos = set(map(str, selected_codigos))
     allowed_ind_rubr = set(map(str, allowed_ind_rubr))
     allowed_ind_base_ps = set(map(str, allowed_ind_base_ps))
 
+    # mapa código -> descrição
     desc_map = {}
     if df_rubricas is not None and not df_rubricas.empty:
         for _, r in df_rubricas.iterrows():
@@ -112,16 +141,20 @@ def gerar_previa_k300(
             linha = linha.rstrip("\n")
             partes = linha.split("|")
 
+            # normaliza para CAB_K300 (11 colunas)
             partes = partes[: len(CAB_K300)]
             if len(partes) < len(CAB_K300):
                 partes += [""] * (len(CAB_K300) - len(partes))
 
+            # índices K300:
+            # 5=DT_COMP, 6=COD_RUBR, 7=VLR_RUBR, 8=IND_RUBR, 10=IND_BASE_PS
             dt_comp = (partes[5] or "").strip()
             cod_rubr = (partes[6] or "").strip()
             vl = (partes[7] or "").strip()
             ind_rubr = (partes[8] or "").strip()
             ind_base_ps = (partes[10] or "").strip()
 
+            # filtros
             if cod_rubr not in selected_codigos:
                 continue
             if allowed_ind_rubr and ind_rubr not in allowed_ind_rubr:
@@ -147,6 +180,7 @@ def gerar_previa_k300(
 
     total_geral = sum(totais_rub.values(), Decimal("0"))
 
+    # totais por rubrica
     rows_r = []
     for cod, total in totais_rub.items():
         rows_r.append(
@@ -162,6 +196,7 @@ def gerar_previa_k300(
         df_totais_r["% TOTAL"] = df_totais_r["TOTAL"] / float(total_geral) if total_geral != 0 else 0
         df_totais_r = df_totais_r.sort_values("TOTAL", ascending=False).reset_index(drop=True)
 
+    # totais por competência
     rows_c = []
     for comp, total in totais_comp.items():
         rows_c.append({"DT_COMP": comp, "TOTAL": float(total), "QTD LINHAS": int(qtd_comp.get(comp, 0))})
@@ -170,11 +205,14 @@ def gerar_previa_k300(
         df_totais_c["ord"] = pd.to_numeric(df_totais_c["DT_COMP"], errors="coerce")
         df_totais_c = df_totais_c.sort_values("ord").drop(columns=["ord"]).reset_index(drop=True)
 
+    # amostra
     df_amostra = pd.DataFrame(amostra, columns=CAB_K300) if amostra else pd.DataFrame(columns=CAB_K300)
 
+    # sem movimento
     sem_mov_rows = [{"COD_RUBR": cod, "DESCRIÇÃO": desc_map.get(cod, "")} for cod in sorted(rubricas_sem_mov)]
     df_sem_mov = pd.DataFrame(sem_mov_rows)
 
+    # format pt-BR simples
     total_fmt = f"R$ {float(total_geral):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     return {
