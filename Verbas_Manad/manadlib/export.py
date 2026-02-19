@@ -70,7 +70,8 @@ def gerar_excel_interno(
         df_sel = df_rubricas.copy()
         df_sel["COD_RUBRICA"] = df_sel["COD_RUBRICA"].astype(str)
         df_sel = df_sel[df_sel["COD_RUBRICA"].isin(selected_codigos)].drop_duplicates()
-        df_sel = df_sel.sort_values(["DESC_RUBRICA", "COD_RUBRICA"], kind="stable")
+        # ✅ ORDEM POR CÓDIGO
+        df_sel = df_sel.sort_values(["COD_RUBRICA"], kind="stable")
         for _, r in df_sel.iterrows():
             ws_k150.append([str(r["COD_RUBRICA"]), str(r["DESC_RUBRICA"])])
 
