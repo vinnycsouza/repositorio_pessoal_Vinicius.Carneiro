@@ -16,15 +16,6 @@ from manadlib.spool import spool_step, spool_init_state
 from manadlib.preview import gerar_previa_k300, ler_catalogo_k150, alertas_descricoes_repetidas
 from manadlib.export import gerar_excel_interno
 
-# ✅ DEBUG: confirmar qual arquivo o Streamlit está usando
-import manadlib.aggregate as agg
-import manadlib.export as exp
-import manadlib.preview as prev
-
-st.caption(f"aggregate.py carregado de: {agg.__file__}")
-st.caption(f"export.py carregado de: {exp.__file__}")
-st.caption(f"preview.py carregado de: {prev.__file__}")
-
 
 # =========================
 # Streamlit UI
@@ -66,9 +57,7 @@ def ss_init():
 
 ss_init()
 
-# =========================
-# Helper: reset quando troca arquivo
-# =========================
+
 def reset_for_new_upload(new_fp: str):
     st.session_state.uploaded_fingerprint = new_fp
     st.session_state.manad_processado = False
@@ -88,7 +77,7 @@ def reset_for_new_upload(new_fp: str):
 
 
 # =========================
-# Etapa 0: Upload (NÃO processa pesado aqui)
+# Etapa 0: Upload
 # =========================
 if not uploaded_file:
     st.info("Envie um arquivo MANAD para começar.")
@@ -99,12 +88,11 @@ if st.session_state.uploaded_fingerprint != fp:
     reset_for_new_upload(fp)
 
 st.success("Arquivo carregado! ✅")
-st.caption("Agora você controla o processamento pelo botão (isso evita travar enquanto você busca rubricas).")
-
+st.caption("Você controla o processamento pelo botão (evita travar enquanto busca rubricas).")
 st.divider()
 
 # =========================
-# Etapa 1: Processar MANAD (spool pesado — Cloud-safe incremental)
+# Etapa 1: Processar MANAD (incremental)
 # =========================
 eventos_alvo = {"K150", "K300", "K050"}
 
@@ -112,15 +100,14 @@ col1, col2 = st.columns([1, 2])
 with col1:
     iniciar = st.button("1) ⚙️ Processar MANAD (separar eventos)", key="btn_processar")
 with col2:
-    st.caption("Processa em lotes (Cloud-safe) para evitar crash no Streamlit Cloud.")
+    st.caption("Processa em lotes (Cloud-safe) para evitar crash em arquivos grandes.")
 
 if iniciar:
-    # cria pasta temporária do processamento
     st.session_state.tmp_dir = str(Path(tempfile.mkdtemp(prefix="manad_")))
     st.session_state.manad_processado = False
     st.session_state.spool_state = spool_init_state()
 
-# Processa em passos (rerun) até concluir
+# roda em passos até concluir
 if st.session_state.spool_state is not None and not st.session_state.manad_processado:
     tmp_dir = Path(st.session_state.tmp_dir)
 
@@ -132,7 +119,7 @@ if st.session_state.spool_state is not None and not st.session_state.manad_proce
         uploaded_file=uploaded_file,
         tmp_dir=tmp_dir,
         eventos_alvo=eventos_alvo,
-        batch_bytes=8_000_000,  # se ainda cair no Cloud, use 4_000_000
+        batch_bytes=8_000_000,  # se ainda ficar instável no Cloud, reduza para 4_000_000
         progress_bar=prog,
         status_slot=status,
     )
@@ -148,11 +135,11 @@ if st.session_state.spool_state is not None and not st.session_state.manad_proce
         prog.empty()
         status.success("✅ Processamento concluído!")
 
-        st.session_state.arquivos_evento = st.session_state.spool_state["paths"]
+        st.session_state.arquivos_evento = st.session_state.spool_state.get("paths", {})
         st.session_state.contagem_linhas = {k: int(v) for k, v in counts.items()}
         st.session_state.eventos_encontrados = sorted(list(st.session_state.arquivos_evento.keys()))
 
-        # carrega catálogo K150 (se houver)
+        # carrega catálogo K150
         p_k150 = st.session_state.arquivos_evento.get("K150")
         if p_k150 and Path(p_k150).exists():
             st.session_state.df_rubricas = ler_catalogo_k150(Path(p_k150))
@@ -163,13 +150,12 @@ if st.session_state.spool_state is not None and not st.session_state.manad_proce
         st.session_state.spool_state = None
 
     else:
-        # “respira” e continua sem matar healthcheck
         time.sleep(0.05)
         st.rerun()
 
-# Se ainda não processou, para aqui
+# gate
 if not st.session_state.manad_processado:
-    st.info("Clique em **Processar MANAD** para liberar o checklist, filtros, prévia e exportação.")
+    st.info("Clique em **Processar MANAD** para liberar checklist, filtros, prévia e exportação.")
     st.stop()
 
 # =========================
@@ -191,7 +177,7 @@ if not p_k300 or not Path(p_k300).exists():
 st.divider()
 
 # =========================
-# Etapa 2: Seleção de Rubricas (Checklist + busca)
+# Etapa 2: Seleção de Rubricas
 # =========================
 st.subheader("2) Seleção de Rubricas (K150) — Checklist + busca")
 
@@ -234,7 +220,6 @@ else:
         key="editor_rubricas",
     )
 
-    # sincroniza seleção
     marcados = set(edited.loc[edited["Selecionar"], "COD_RUBRICA"].astype(str).tolist())
     desmarcados = set(edited.loc[~edited["Selecionar"], "COD_RUBRICA"].astype(str).tolist())
 
@@ -242,11 +227,10 @@ else:
     st.session_state.selected_codigos -= (desmarcados & set(df_view["COD_RUBRICA"].astype(str).tolist()))
 
 st.caption(f"✅ Rubricas selecionadas: {len(st.session_state.selected_codigos)}")
-
 st.divider()
 
 # =========================
-# Etapa 3: Filtros do K300 (leve)
+# Etapa 3: Filtros K300
 # =========================
 st.subheader("3) Filtros do K300")
 
@@ -274,7 +258,7 @@ with colf2:
 st.divider()
 
 # =========================
-# Etapa 4: Prévia (pesado) — só roda no botão
+# Etapa 4: Prévia (botão)
 # =========================
 st.subheader("4) Prévia (antes de gerar o Excel)")
 
@@ -288,7 +272,7 @@ with colp2:
 
 if btn_previa:
     if not st.session_state.selected_codigos:
-        st.warning("Selecione ao menos uma rubrica no checklist (K150) para gerar a prévia.")
+        st.warning("Selecione ao menos uma rubrica (K150) para gerar a prévia.")
     else:
         with st.spinner("Calculando prévia (scan no K300)..."):
             st.session_state.preview_result = gerar_previa_k300(
@@ -303,14 +287,10 @@ if btn_previa:
 prev = st.session_state.preview_result
 if prev:
     m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("📌 Rubricas selecionadas", prev["rubricas_selecionadas"])
-    with m2:
-        st.metric("📄 Linhas K300 filtradas", prev["linhas_filtradas"])
-    with m3:
-        st.metric("💰 Total (Σ VLR_RUBR)", prev["total_geral_formatado"])
-    with m4:
-        st.metric("📆 Competências distintas", prev["competencias_distintas"])
+    m1.metric("📌 Rubricas selecionadas", prev["rubricas_selecionadas"])
+    m2.metric("📄 Linhas K300 filtradas", prev["linhas_filtradas"])
+    m3.metric("💰 Total (Σ VLR_RUBR)", prev["total_geral_formatado"])
+    m4.metric("📆 Competências distintas", prev["competencias_distintas"])
 
     st.markdown("### Totais por rubrica (após filtros)")
     st.dataframe(prev["df_totais_rubrica"], use_container_width=True)
@@ -320,24 +300,24 @@ if prev:
 
     st.markdown("### Alertas")
     if prev["rubricas_sem_movimento"]:
-        st.warning(f"Rubricas selecionadas sem movimento (com esses filtros): {len(prev['rubricas_sem_movimento'])}")
+        st.warning(f"Rubricas selecionadas sem movimento: {len(prev['rubricas_sem_movimento'])}")
         st.dataframe(prev["df_sem_movimento"], use_container_width=True)
     else:
         st.success("Nenhuma rubrica selecionada ficou sem movimento com os filtros atuais.")
 
     if df_repetidas is not None and not df_repetidas.empty:
-        st.info("Descrições com múltiplos códigos (revisar se você marcou todos os códigos desejados):")
+        st.info("Descrições com múltiplos códigos (revisar se marcou todos os códigos desejados):")
         st.dataframe(df_repetidas, use_container_width=True)
 
     st.markdown("### Amostra (primeiras linhas que irão para o Excel)")
     st.dataframe(prev["df_amostra"], use_container_width=True)
 else:
-    st.info("Gere a prévia para visualizar totais e validar filtros antes de exportar.")
+    st.info("Gere a prévia para validar filtros antes de exportar.")
 
 st.divider()
 
 # =========================
-# Etapa 5: Gerar Excel (pesado) — só roda no botão
+# Etapa 5: Excel interno (botão)
 # =========================
 st.subheader("5) Gerar Excel interno")
 
@@ -345,7 +325,7 @@ colg1, colg2 = st.columns([1, 3])
 with colg1:
     btn_excel = st.button("⚙️ Gerar Excel interno", key="btn_gerar_excel")
 with colg2:
-    st.caption("Gera K300_FILTRADO + (se atualizado) RESUMO_DT_COMP + K150_SELECIONADAS + K050_TRABALHADORES.")
+    st.caption("Gera K300_FILTRADO + RESUMO_DT_COMP + K150_SELECIONADAS + K050_TRABALHADORES.")
 
 if btn_excel:
     if not st.session_state.selected_codigos:
