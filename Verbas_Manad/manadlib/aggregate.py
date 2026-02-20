@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, Set, Tuple
 
 import pandas as pd
 
@@ -20,6 +20,21 @@ def _parse_decimal_ptbr(v: str) -> Decimal:
         return Decimal("0")
 
 
+def _ord_mmAAAA(x: str) -> int:
+    """
+    Ordenação cronológica para DT_COMP no padrão MANAD: MMAAAA (ex.: 012012, 112023).
+    Retorna uma chave numérica AAAAMM.
+    NÃO altera o valor original do DT_COMP (apenas ordena).
+    """
+    s = (str(x) or "").strip()
+    if len(s) == 6 and s.isdigit():
+        mm = int(s[:2])
+        aaaa = int(s[2:])
+        if 1 <= mm <= 12:
+            return aaaa * 100 + mm
+    return 99999999
+
+
 def montar_pivot_dtcomp_por_rubrica(
     path_k300: Path,
     selected_codigos: Set[str],
@@ -29,11 +44,14 @@ def montar_pivot_dtcomp_por_rubrica(
 ) -> pd.DataFrame:
     """
     Retorna um DataFrame com:
-      linhas: DT_COMP
-      colunas: rubricas selecionadas (cada uma vira uma coluna)
-      valores: soma(VLR_RUBR)
+      - linhas: DT_COMP (MMAAAA, exatamente como vem no MANAD)
+      - colunas: rubricas selecionadas (cada uma vira uma coluna)
+      - valores: soma(VLR_RUBR)
 
-    OBS: respeita os filtros (COD_RUBR, IND_RUBR, IND_BASE_PS).
+    Respeita filtros:
+      - COD_RUBR
+      - IND_RUBR
+      - IND_BASE_PS
     """
     selected_codigos = set(map(str, selected_codigos))
     allowed_ind_rubr = set(map(str, allowed_ind_rubr))
@@ -51,11 +69,11 @@ def montar_pivot_dtcomp_por_rubrica(
             if len(partes) < len(CAB_K300):
                 partes += [""] * (len(CAB_K300) - len(partes))
 
-            dt_comp = (partes[5] or "").strip()
-            cod_rubr = (partes[6] or "").strip()
-            vl = (partes[7] or "").strip()
-            ind_rubr = (partes[8] or "").strip()
-            ind_base_ps = (partes[10] or "").strip()
+            dt_comp = (partes[5] or "").strip()      # DT_COMP (MMAAAA)
+            cod_rubr = (partes[6] or "").strip()     # COD_RUBR
+            vl = (partes[7] or "").strip()           # VLR_RUBR
+            ind_rubr = (partes[8] or "").strip()     # IND_RUBR
+            ind_base_ps = (partes[10] or "").strip() # IND_BASE_PS
 
             if not dt_comp:
                 continue
@@ -71,14 +89,10 @@ def montar_pivot_dtcomp_por_rubrica(
             acc[key] = acc.get(key, Decimal("0")) + valor
 
     if not acc:
-        # tabela vazia com colunas esperadas
         return pd.DataFrame(columns=["DT_COMP"])
 
-    # construir tabela longa
-    rows = []
-    for (dt, cod), total in acc.items():
-        rows.append({"DT_COMP": dt, "COD_RUBR": cod, "TOTAL": float(total)})
-
+    # tabela longa
+    rows = [{"DT_COMP": dt, "COD_RUBR": cod, "TOTAL": float(total)} for (dt, cod), total in acc.items()]
     df_long = pd.DataFrame(rows)
 
     # pivot: linhas DT_COMP, colunas COD_RUBR
@@ -90,8 +104,8 @@ def montar_pivot_dtcomp_por_rubrica(
         fill_value=0.0,
     ).reset_index()
 
-    # ordenar DT_COMP numericamente (ex.: 012012, 022012...)
-    df_pivot["_ord"] = pd.to_numeric(df_pivot["DT_COMP"], errors="coerce")
+    # ✅ ordenação cronológica (MMAAAA -> AAAAMM)
+    df_pivot["_ord"] = df_pivot["DT_COMP"].apply(_ord_mmAAAA)
     df_pivot = df_pivot.sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
 
     # renomear colunas para "COD - DESCRIÇÃO"
