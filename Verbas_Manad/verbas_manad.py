@@ -1,5 +1,6 @@
 import io
 import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -11,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from manadlib.spool import spool_por_evento
+from manadlib.spool import spool_step, spool_init_state
 from manadlib.preview import gerar_previa_k300, ler_catalogo_k150, alertas_descricoes_repetidas
 from manadlib.export import gerar_excel_interno
 
@@ -44,12 +45,15 @@ def ss_init():
     st.session_state.setdefault("selected_codigos", set())  # set[str]
 
     # filtros
-    st.session_state.setdefault("filtro_ind_rubr", {"P"})       # P=provento (default)
+    st.session_state.setdefault("filtro_ind_rubr", {"P"})          # P=provento (default)
     st.session_state.setdefault("filtro_ind_base_ps", {"1", "2"})  # default 1 e 2
 
     # outputs
     st.session_state.setdefault("preview_result", None)
     st.session_state.setdefault("excel_bytes", None)
+
+    # spool incremental
+    st.session_state.setdefault("spool_state", None)
 
 ss_init()
 
@@ -71,6 +75,8 @@ def reset_for_new_upload(new_fp: str):
     st.session_state.preview_result = None
     st.session_state.excel_bytes = None
 
+    st.session_state.spool_state = None
+
 
 # =========================
 # Etapa 0: Upload (NÃO processa pesado aqui)
@@ -89,38 +95,53 @@ st.caption("Agora você controla o processamento pelo botão (isso evita travar 
 st.divider()
 
 # =========================
-# Etapa 1: Processar MANAD (spool pesado)
+# Etapa 1: Processar MANAD (spool pesado — Cloud-safe incremental)
 # =========================
+eventos_alvo = {"K150", "K300", "K050"}
+
 col1, col2 = st.columns([1, 2])
 with col1:
-    processar = st.button("1) ⚙️ Processar MANAD (separar eventos)", key="btn_processar")
+    iniciar = st.button("1) ⚙️ Processar MANAD (separar eventos)", key="btn_processar")
 with col2:
-    st.caption("Processa apenas K150, K300 e K050 (modo econômico de memória).")
+    st.caption("Processa em lotes (Cloud-safe) para evitar crash no Streamlit Cloud.")
 
-if processar:
+if iniciar:
     # cria pasta temporária do processamento
     st.session_state.tmp_dir = str(Path(tempfile.mkdtemp(prefix="manad_")))
-    tmp_dir = Path(st.session_state.tmp_dir)
+    st.session_state.manad_processado = False
+    st.session_state.spool_state = spool_init_state()
 
-    eventos_alvo = {"K150", "K300", "K050"}
+# Processa em passos (rerun) até concluir
+if st.session_state.spool_state is not None and not st.session_state.manad_processado:
+    tmp_dir = Path(st.session_state.tmp_dir)
 
     status = st.empty()
     prog = st.progress(0.0)
 
-    try:
-        status.info("Separando o arquivo por evento (K150/K300/K050)...")
+    st.session_state.spool_state = spool_step(
+        state=st.session_state.spool_state,
+        uploaded_file=uploaded_file,
+        tmp_dir=tmp_dir,
+        eventos_alvo=eventos_alvo,
+        batch_bytes=8_000_000,  # se ainda cair no Cloud, use 4_000_000
+        progress_bar=prog,
+        status_slot=status,
+    )
 
-        arquivos_evento, contagem_linhas, eventos = spool_por_evento(
-            uploaded_file=uploaded_file,
-            tmp_dir=tmp_dir,
-            eventos_alvo=eventos_alvo,
-            progress_bar=prog,
-            status_slot=status,
-        )
+    counts = st.session_state.spool_state.get("counts", {}) or {}
+    st.caption(
+        f"Linhas até agora — K150: {counts.get('K150', 0)}, "
+        f"K300: {counts.get('K300', 0)}, "
+        f"K050: {counts.get('K050', 0)}"
+    )
 
-        st.session_state.arquivos_evento = {k: str(v) for k, v in arquivos_evento.items()}
-        st.session_state.contagem_linhas = {k: int(v) for k, v in contagem_linhas.items()}
-        st.session_state.eventos_encontrados = list(eventos)
+    if st.session_state.spool_state.get("done"):
+        prog.empty()
+        status.success("✅ Processamento concluído!")
+
+        st.session_state.arquivos_evento = st.session_state.spool_state["paths"]
+        st.session_state.contagem_linhas = {k: int(v) for k, v in counts.items()}
+        st.session_state.eventos_encontrados = sorted(list(st.session_state.arquivos_evento.keys()))
 
         # carrega catálogo K150 (se houver)
         p_k150 = st.session_state.arquivos_evento.get("K150")
@@ -130,14 +151,12 @@ if processar:
             st.session_state.df_rubricas = pd.DataFrame(columns=["COD_RUBRICA", "DESC_RUBRICA"])
 
         st.session_state.manad_processado = True
+        st.session_state.spool_state = None
 
-        prog.empty()
-        status.success(f"Eventos prontos: {', '.join(eventos) if eventos else 'nenhum'}")
-
-    except Exception as e:
-        prog.empty()
-        status.error(f"Falha ao processar o arquivo: {e}")
-        st.session_state.manad_processado = False
+    else:
+        # “respira” e continua sem matar healthcheck
+        time.sleep(0.05)
+        st.rerun()
 
 # Se ainda não processou, para aqui
 if not st.session_state.manad_processado:
