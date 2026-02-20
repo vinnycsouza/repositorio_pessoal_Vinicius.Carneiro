@@ -80,12 +80,20 @@ def gerar_excel_interno(
 
     # 2) Aba RESUMO_DT_COMP (DT_COMP x Rubricas)
     df_pivot = montar_pivot_dtcomp_por_rubrica(
-        path_k300=path_k300,
-        selected_codigos=selected_codigos,
-        allowed_ind_rubr=allowed_ind_rubr,
-        allowed_ind_base_ps=allowed_ind_base_ps,
-        desc_map=desc_map,
-    )
+       path_k300=path_k300,
+       selected_codigos=selected_codigos,
+       allowed_ind_rubr=allowed_ind_rubr,
+       allowed_ind_base_ps=allowed_ind_base_ps,
+       desc_map=desc_map,
+)
+
+    # ✅ DEBUG: conferir ordem real antes de escrever a aba
+    if not df_pivot.empty and "DT_COMP" in df_pivot.columns:
+       head = df_pivot["DT_COMP"].head(30).tolist()
+       tail = df_pivot["DT_COMP"].tail(10).tolist()
+       print("DEBUG RESUMO_DT_COMP head:", head)
+       print("DEBUG RESUMO_DT_COMP tail:", tail)
+
     ws_resumo = wb.create_sheet(title="RESUMO_DT_COMP")
     _write_df_to_sheet(ws_resumo, df_pivot)
 
