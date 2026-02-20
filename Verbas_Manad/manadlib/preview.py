@@ -20,6 +20,21 @@ def _parse_decimal_ptbr(v: str) -> Decimal:
         return Decimal("0")
 
 
+def _ord_dt_comp_mmaaaa(dt_comp: str) -> int:
+    """
+    DT_COMP no MANAD vem como MMAAAA (ex.: 122024, 012012).
+    Para ordenar cronologicamente, usamos uma chave AAAAMM (ex.: 202412, 201201).
+    Mantém o DT_COMP original — só cria chave para ordenação.
+    """
+    s = (str(dt_comp) or "").strip().zfill(6)
+    if len(s) == 6 and s.isdigit():
+        mm = int(s[:2])
+        aaaa = int(s[2:])
+        if 1 <= mm <= 12:
+            return aaaa * 100 + mm
+    return 99999999
+
+
 def ler_catalogo_k150(path_k150: Path) -> pd.DataFrame:
     """
     Lê K150.txt e retorna DataFrame com:
@@ -168,9 +183,10 @@ def gerar_previa_k300(
             qtd_rub[cod_rubr] = qtd_rub.get(cod_rubr, 0) + 1
 
             if dt_comp:
-                totais_comp[dt_comp] = totais_comp.get(dt_comp, Decimal("0")) + valor
-                qtd_comp[dt_comp] = qtd_comp.get(dt_comp, 0) + 1
-                comps_distintas.add(dt_comp)
+                dt_comp_norm = str(dt_comp).strip().zfill(6)
+                totais_comp[dt_comp_norm] = totais_comp.get(dt_comp_norm, Decimal("0")) + valor
+                qtd_comp[dt_comp_norm] = qtd_comp.get(dt_comp_norm, 0) + 1
+                comps_distintas.add(dt_comp_norm)
 
             rubricas_sem_mov.discard(cod_rubr)
             linhas_filtradas += 1
@@ -196,14 +212,15 @@ def gerar_previa_k300(
         df_totais_r["% TOTAL"] = df_totais_r["TOTAL"] / float(total_geral) if total_geral != 0 else 0
         df_totais_r = df_totais_r.sort_values("TOTAL", ascending=False).reset_index(drop=True)
 
-    # totais por competência
+    # totais por competência (✅ ORDENADO CRONOLOGICAMENTE)
     rows_c = []
     for comp, total in totais_comp.items():
         rows_c.append({"DT_COMP": comp, "TOTAL": float(total), "QTD LINHAS": int(qtd_comp.get(comp, 0))})
     df_totais_c = pd.DataFrame(rows_c)
     if not df_totais_c.empty:
-        df_totais_c["ord"] = pd.to_numeric(df_totais_c["DT_COMP"], errors="coerce")
-        df_totais_c = df_totais_c.sort_values("ord").drop(columns=["ord"]).reset_index(drop=True)
+        df_totais_c["DT_COMP"] = df_totais_c["DT_COMP"].astype(str).str.strip().str.zfill(6)
+        df_totais_c["_ord"] = df_totais_c["DT_COMP"].apply(_ord_dt_comp_mmaaaa)
+        df_totais_c = df_totais_c.sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
 
     # amostra
     df_amostra = pd.DataFrame(amostra, columns=CAB_K300) if amostra else pd.DataFrame(columns=CAB_K300)
