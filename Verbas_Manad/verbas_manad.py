@@ -16,6 +16,15 @@ from manadlib.spool import spool_step, spool_init_state
 from manadlib.preview import gerar_previa_k300, ler_catalogo_k150, alertas_descricoes_repetidas
 from manadlib.export import gerar_excel_interno
 
+# ✅ DEBUG: confirmar qual arquivo o Streamlit está usando
+import manadlib.aggregate as agg
+import manadlib.export as exp
+import manadlib.preview as prev
+
+st.caption(f"aggregate.py carregado de: {agg.__file__}")
+st.caption(f"export.py carregado de: {exp.__file__}")
+st.caption(f"preview.py carregado de: {prev.__file__}")
+
 
 # =========================
 # Streamlit UI
