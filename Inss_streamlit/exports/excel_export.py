@@ -21,6 +21,7 @@ def export_resumos_encontrados(resumos: List[ResumoIndexado]) -> bytes:
                 "resumo_nome": r.resumo_nome,
                 "pag_ini": r.pag_ini,
                 "pag_fim": r.pag_fim,
+                "pag_range": f"p{r.pag_ini+1}-{r.pag_fim+1}" if r.pag_ini != r.pag_fim else f"p{r.pag_ini+1}",
                 "confianca_modelo": r.confianca_modelo.value,
                 "score_modelo": r.score_modelo,
                 "sinais_detectados": "; ".join(r.sinais_detectados or []),
