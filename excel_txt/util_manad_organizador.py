@@ -1,134 +1,109 @@
 import streamlit as st
 import pandas as pd
 import io
-import zipfile
 from datetime import datetime
 
-st.set_page_config(page_title="Organizador MANAD (TXT)", layout="centered")
-st.title("🗂️ Organizador MANAD — TXT completos")
-st.caption("Gera um ZIP com os arquivos MANAD sem quebrar o padrão do Manual, e opcionalmente um Excel de conferência.")
+st.set_page_config(page_title="Unir MANAD (TXT/Excel)", layout="centered")
+st.title("🧷 Unir MANAD — TXT único (bruto) ou Excel único")
+st.caption(
+    "TXT único (bruto) = concatena bytes sem alterar nada. "
+    "Excel = representação para manipular (precisa decode)."
+)
 
 arquivos = st.file_uploader(
-    "Envie os TXT do MANAD (arquivos completos: 0000...9999)",
+    "Envie os TXT do MANAD (selecione na ordem correta)",
     type=["txt"],
     accept_multiple_files=True
 )
 
-# MANAD: ASCII ISO-8859-1 (Latin-1) :contentReference[oaicite:3]{index=3}
-encoding_leitura = st.selectbox("Encoding de leitura (recomendado: latin-1)", ["latin-1", "utf-8"], index=0)
+st.divider()
 
-normalizar_quebras = st.checkbox("Normalizar quebras de linha para \\n (recomendado)", value=True)
-regravar_latin1 = st.checkbox("Salvar no ZIP em Latin-1 (recomendado p/ padrão)", value=True)
+col1, col2 = st.columns(2)
 
-gerar_excel = st.checkbox("Gerar Excel de conferência", value=True)
-
-def ler_txt(uploaded_file) -> str:
-    txt = uploaded_file.getvalue().decode(encoding_leitura, errors="ignore")
-    if normalizar_quebras:
-        txt = txt.replace("\r\n", "\n").replace("\r", "\n")
-    # remove linhas vazias no final
-    while txt.endswith("\n\n"):
-        txt = txt[:-1]
-    return txt
-
-def primeiro_registro(txt: str) -> str:
-    for ln in txt.splitlines():
-        if ln.strip():
-            return ln[:4]
-    return ""
-
-def ultimo_registro(txt: str) -> str:
-    lines = [ln for ln in txt.splitlines() if ln.strip()]
-    return lines[-1][:4] if lines else ""
-
-def extrair_qtd_lin_9999(txt: str):
-    # 9999|QTD_LIN
-    for ln in reversed([l for l in txt.splitlines() if l.strip()]):
-        if ln.startswith("9999"):
-            parts = ln.split("|")
-            # formato: 9999|<qtd>
-            if len(parts) >= 2:
-                try:
-                    return int(parts[1])
-                except:
-                    return None
-    return None
-
-def contar_linhas_arquivo(txt: str) -> int:
-    # Manual: QTD_LIN considera todas as linhas entre o primeiro 0000 e o 9999, inclusive :contentReference[oaicite:4]{index=4}
-    lines = [ln for ln in txt.splitlines() if ln.strip() != ""]
-    return len(lines)
-
-if arquivos:
-    agora = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    rel = []
-    zip_buffer = io.BytesIO()
-
-    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for f in arquivos:
-            txt = ler_txt(f)
-
-            reg_ini = primeiro_registro(txt)
-            reg_fim = ultimo_registro(txt)
-
-            qtd_9999 = extrair_qtd_lin_9999(txt)
-            qtd_calc = contar_linhas_arquivo(txt)
-
-            # MANAD: cada linha é um registro e o REG são os 4 primeiros caracteres :contentReference[oaicite:5]{index=5}
-            ok_ini = (reg_ini == "0000")
-            ok_fim = (reg_fim == "9999")
-
-            ok_qtd = (qtd_9999 == qtd_calc) if (qtd_9999 is not None) else False
-
-            rel.append({
-                "arquivo": f.name,
-                "inicio_REG": reg_ini,
-                "fim_REG": reg_fim,
-                "tem_0000": ok_ini,
-                "tem_9999": ok_fim,
-                "QTD_LIN_9999": qtd_9999,
-                "QTD_LIN_calculada": qtd_calc,
-                "QTD_LIN_bate": ok_qtd
-            })
-
-            # grava no zip (preferência: Latin-1) :contentReference[oaicite:6]{index=6}
-            if regravar_latin1:
-                data = txt.encode("latin-1", errors="replace")
-            else:
-                data = txt.encode("utf-8", errors="ignore")
-
-            zf.writestr(f.name, data)
-
-    st.success(f"{len(arquivos)} arquivo(s) processado(s).")
-
-    # download do ZIP com os originais “organizados”
-    st.download_button(
-        "⬇️ Baixar ZIP com os TXT (padrão MANAD)",
-        data=zip_buffer.getvalue(),
-        file_name=f"manad_txts_{agora}.zip",
-        mime="application/zip"
+# Opções (afetando SOMENTE o TXT bruto)
+with col1:
+    adicionar_quebra_entre = st.checkbox(
+        "Adicionar 1 quebra de linha ENTRE arquivos (altera 1 byte entre eles)",
+        value=False
     )
 
-    df_rel = pd.DataFrame(rel).sort_values(["QTD_LIN_bate", "arquivo"], ascending=[True, True])
-    st.subheader("Conferência rápida")
-    st.dataframe(df_rel, use_container_width=True)
-
-    if gerar_excel:
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-            df_rel.to_excel(writer, index=False, sheet_name="CONFERENCIA")
-        st.download_button(
-            "⬇️ Baixar Excel de conferência",
-            data=excel_buffer.getvalue(),
-            file_name=f"conferencia_manad_{agora}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    st.info(
-        "Observação: este utilitário NÃO concatena arquivos completos em um TXT único, "
-        "porque isso geralmente quebra a estrutura (múltiplos 0000/9999) e a contagem do 9999 "
-        "(QTD_LIN do primeiro 0000 ao 9999)."
+# Opções (afetando SOMENTE o Excel)
+with col2:
+    encoding_excel = st.selectbox(
+        "Encoding para gerar o Excel (mais comum no MANAD: latin-1)",
+        ["latin-1", "utf-8"],
+        index=0
     )
-else:
-    st.warning("Envie os TXT para começar.")
+
+incluir_origem_excel = st.checkbox("Excel: incluir ARQ_ORIGEM e N_LINHA", value=True)
+
+def gerar_txt_bruto(files, add_newline_between: bool) -> bytes:
+    """Concatena os arquivos em bytes, sem alterar conteúdo."""
+    out = io.BytesIO()
+    for i, f in enumerate(files):
+        out.write(f.getvalue())  # bytes brutos
+        if add_newline_between and i < len(files) - 1:
+            out.write(b"\n")  # altera o resultado (opcional)
+    return out.getvalue()
+
+def gerar_excel(files, encoding: str, incluir_origem: bool) -> bytes:
+    """
+    Gera Excel com 1 linha por linha do TXT.
+    Observação: Excel exige decode -> isso é para análise/manipulação.
+    """
+    rows = []
+
+    for f in files:
+        b = f.getvalue()
+        texto = b.decode(encoding, errors="replace")  # representação
+        linhas = texto.splitlines()
+
+        if incluir_origem:
+            for idx, ln in enumerate(linhas, start=1):
+                rows.append({"ARQ_ORIGEM": f.name, "N_LINHA": idx, "LINHA": ln})
+        else:
+            for ln in linhas:
+                rows.append({"LINHA": ln})
+
+    df = pd.DataFrame(rows)
+
+    buff = io.BytesIO()
+    with pd.ExcelWriter(buff, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="MANAD_LINHAS")
+    return buff.getvalue()
+
+if not arquivos:
+    st.info("Envie os arquivos .txt para habilitar os downloads.")
+    st.stop()
+
+st.success(f"{len(arquivos)} arquivo(s) carregado(s).")
+
+agora = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# ---------- BOTÃO 1: TXT único (bruto) ----------
+txt_bytes = gerar_txt_bruto(arquivos, adicionar_quebra_entre)
+
+st.download_button(
+    "⬇️ Baixar TXT único (BRUTO, sem alterar nada)",
+    data=txt_bytes,
+    file_name=f"manad_unido_bruto_{agora}.txt",
+    mime="text/plain"
+)
+
+# ---------- BOTÃO 2: Excel único ----------
+excel_bytes = gerar_excel(arquivos, encoding_excel, incluir_origem_excel)
+
+st.download_button(
+    "⬇️ Baixar Excel único (XLSX)",
+    data=excel_bytes,
+    file_name=f"manad_unido_{agora}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+with st.expander("Prévia rápida"):
+    st.write(f"Tamanho do TXT bruto: **{len(txt_bytes):,} bytes**")
+    st.write("Primeiras 30 linhas (do Excel gerado):")
+    # mostra preview do excel (a partir do mesmo dataframe seria mais caro; aqui simplificamos)
+    # então mostramos prévia do primeiro arquivo decodificado:
+    prev = arquivos[0].getvalue().decode(encoding_excel, errors="replace").splitlines()[:30]
+    st.text("\n".join(prev))
