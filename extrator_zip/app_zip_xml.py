@@ -1,4 +1,4 @@
-i# app_zip_xml.py
+# app_zip_xml.py
 # 📦 Coletor de XML (NF-e / NFC-e) — Multi ZIP ➜ Novo ZIP
 # ✅ Lê XML dentro de ZIP (e ZIP dentro de ZIP)
 # ✅ Ignora Cancelados / Inutilizados / Denegados (por pasta/nome + por conteúdo)
