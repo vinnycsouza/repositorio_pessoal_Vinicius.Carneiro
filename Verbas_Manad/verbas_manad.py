@@ -1,19 +1,22 @@
 import io
 import sys
-import time
 import tempfile
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-# Garante imports quando rodar como "streamlit run ..."
+# Garante imports quando rodar como "streamlit run Verbas_Manad/verbas_manad.py"
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from manadlib.spool import spool_step, spool_init_state
-from manadlib.preview import gerar_previa_k300, ler_catalogo_k150, alertas_descricoes_repetidas
+from manadlib.spool import spool_por_evento  # ou spool_step/spool_init_state se seu spool for incremental
+from manadlib.preview import (
+    gerar_previa_k300,
+    ler_catalogo_k150,
+    alertas_descricoes_repetidas,
+)
 from manadlib.export import gerar_excel_interno
 
 
@@ -28,6 +31,7 @@ uploaded_file = st.file_uploader(
     type=["txt", "xlsx"],
     key="upload_manad",
 )
+
 
 # =========================
 # Estado da sessão
@@ -44,16 +48,18 @@ def ss_init():
     st.session_state.setdefault("df_rubricas", None)        # catálogo K150
     st.session_state.setdefault("selected_codigos", set())  # set[str]
 
-    # filtros
+    # filtros do K300
     st.session_state.setdefault("filtro_ind_rubr", {"P"})          # P=provento (default)
     st.session_state.setdefault("filtro_ind_base_ps", {"1", "2"})  # default 1 e 2
+
+    # ✅ regra jurídica 1/3 férias
+    st.session_state.setdefault("aplicar_regra_terco_ferias", False)
+    st.session_state.setdefault("rubricas_terco_ferias", set())
 
     # outputs
     st.session_state.setdefault("preview_result", None)
     st.session_state.setdefault("excel_bytes", None)
 
-    # spool incremental
-    st.session_state.setdefault("spool_state", None)
 
 ss_init()
 
@@ -70,14 +76,16 @@ def reset_for_new_upload(new_fp: str):
     st.session_state.df_rubricas = None
     st.session_state.selected_codigos = set()
 
+    # ✅ reset regra 1/3 férias
+    st.session_state.aplicar_regra_terco_ferias = False
+    st.session_state.rubricas_terco_ferias = set()
+
     st.session_state.preview_result = None
     st.session_state.excel_bytes = None
 
-    st.session_state.spool_state = None
-
 
 # =========================
-# Etapa 0: Upload
+# Etapa 0: Upload (não processa pesado aqui)
 # =========================
 if not uploaded_file:
     st.info("Envie um arquivo MANAD para começar.")
@@ -89,57 +97,44 @@ if st.session_state.uploaded_fingerprint != fp:
 
 st.success("Arquivo carregado! ✅")
 st.caption("Você controla o processamento pelo botão (evita travar enquanto busca rubricas).")
+
 st.divider()
 
-# =========================
-# Etapa 1: Processar MANAD (incremental)
-# =========================
-eventos_alvo = {"K150", "K300", "K050"}
 
+# =========================
+# Etapa 1: Processar MANAD (spool pesado)
+# =========================
 col1, col2 = st.columns([1, 2])
 with col1:
-    iniciar = st.button("1) ⚙️ Processar MANAD (separar eventos)", key="btn_processar")
+    processar = st.button("1) ⚙️ Processar MANAD (separar eventos)", key="btn_processar")
 with col2:
-    st.caption("Processa em lotes (Cloud-safe) para evitar crash em arquivos grandes.")
+    st.caption("Processa apenas K150, K300 e K050 (modo econômico de memória).")
 
-if iniciar:
+if processar:
     st.session_state.tmp_dir = str(Path(tempfile.mkdtemp(prefix="manad_")))
-    st.session_state.manad_processado = False
-    st.session_state.spool_state = spool_init_state()
-
-# roda em passos até concluir
-if st.session_state.spool_state is not None and not st.session_state.manad_processado:
     tmp_dir = Path(st.session_state.tmp_dir)
+
+    eventos_alvo = {"K150", "K300", "K050"}
 
     status = st.empty()
     prog = st.progress(0.0)
 
-    st.session_state.spool_state = spool_step(
-        state=st.session_state.spool_state,
-        uploaded_file=uploaded_file,
-        tmp_dir=tmp_dir,
-        eventos_alvo=eventos_alvo,
-        batch_bytes=8_000_000,  # se ainda ficar instável no Cloud, reduza para 4_000_000
-        progress_bar=prog,
-        status_slot=status,
-    )
+    try:
+        status.info("Separando o arquivo por evento (K150/K300/K050)...")
 
-    counts = st.session_state.spool_state.get("counts", {}) or {}
-    st.caption(
-        f"Linhas até agora — K150: {counts.get('K150', 0)}, "
-        f"K300: {counts.get('K300', 0)}, "
-        f"K050: {counts.get('K050', 0)}"
-    )
+        arquivos_evento, contagem_linhas, eventos = spool_por_evento(
+            uploaded_file=uploaded_file,
+            tmp_dir=tmp_dir,
+            eventos_alvo=eventos_alvo,
+            progress_bar=prog,
+            status_slot=status,
+        )
 
-    if st.session_state.spool_state.get("done"):
-        prog.empty()
-        status.success("✅ Processamento concluído!")
+        st.session_state.arquivos_evento = {k: str(v) for k, v in arquivos_evento.items()}
+        st.session_state.contagem_linhas = {k: int(v) for k, v in contagem_linhas.items()}
+        st.session_state.eventos_encontrados = list(eventos)
 
-        st.session_state.arquivos_evento = st.session_state.spool_state.get("paths", {})
-        st.session_state.contagem_linhas = {k: int(v) for k, v in counts.items()}
-        st.session_state.eventos_encontrados = sorted(list(st.session_state.arquivos_evento.keys()))
-
-        # carrega catálogo K150
+        # carrega catálogo K150 (se houver)
         p_k150 = st.session_state.arquivos_evento.get("K150")
         if p_k150 and Path(p_k150).exists():
             st.session_state.df_rubricas = ler_catalogo_k150(Path(p_k150))
@@ -147,16 +142,19 @@ if st.session_state.spool_state is not None and not st.session_state.manad_proce
             st.session_state.df_rubricas = pd.DataFrame(columns=["COD_RUBRICA", "DESC_RUBRICA"])
 
         st.session_state.manad_processado = True
-        st.session_state.spool_state = None
 
-    else:
-        time.sleep(0.05)
-        st.rerun()
+        prog.empty()
+        status.success(f"Eventos prontos: {', '.join(eventos) if eventos else 'nenhum'}")
 
-# gate
+    except Exception as e:
+        prog.empty()
+        status.error(f"Falha ao processar o arquivo: {e}")
+        st.session_state.manad_processado = False
+
 if not st.session_state.manad_processado:
     st.info("Clique em **Processar MANAD** para liberar checklist, filtros, prévia e exportação.")
     st.stop()
+
 
 # =========================
 # Diagnóstico rápido
@@ -176,8 +174,9 @@ if not p_k300 or not Path(p_k300).exists():
 
 st.divider()
 
+
 # =========================
-# Etapa 2: Seleção de Rubricas
+# Etapa 2: Seleção de Rubricas (Checklist + busca)
 # =========================
 st.subheader("2) Seleção de Rubricas (K150) — Checklist + busca")
 
@@ -227,10 +226,12 @@ else:
     st.session_state.selected_codigos -= (desmarcados & set(df_view["COD_RUBRICA"].astype(str).tolist()))
 
 st.caption(f"✅ Rubricas selecionadas: {len(st.session_state.selected_codigos)}")
+
 st.divider()
 
+
 # =========================
-# Etapa 3: Filtros K300
+# Etapa 3: Filtros do K300 (leve)
 # =========================
 st.subheader("3) Filtros do K300")
 
@@ -257,8 +258,42 @@ with colf2:
 
 st.divider()
 
+
 # =========================
-# Etapa 4: Prévia (botão)
+# Etapa 3.1: Regra jurídica 1/3 férias
+# =========================
+st.subheader("3.1) Regra jurídica — 1/3 de férias")
+
+st.session_state.aplicar_regra_terco_ferias = st.checkbox(
+    "Aplicar regra: 1/3 de férias só entra até 09/2020 (inclusive)",
+    value=bool(st.session_state.aplicar_regra_terco_ferias),
+    key="chk_terco_ferias",
+)
+
+# Sugestão automática: descrições contendo "1/3" e "FER"
+auto_terco = set()
+if df_rubricas is not None and not df_rubricas.empty:
+    tmp = df_rubricas.copy()
+    tmp["COD_RUBRICA"] = tmp["COD_RUBRICA"].astype(str)
+    tmp["DESC_RUBRICA"] = tmp["DESC_RUBRICA"].astype(str)
+    mask = tmp["DESC_RUBRICA"].str.upper().str.contains("1/3", na=False) & tmp["DESC_RUBRICA"].str.upper().str.contains("FER", na=False)
+    auto_terco = set(tmp.loc[mask, "COD_RUBRICA"].tolist())
+
+rubricas_terco_default = sorted(st.session_state.rubricas_terco_ferias or auto_terco)
+
+rubricas_terco_sel = st.multiselect(
+    "Selecione as rubricas que representam 1/3 de férias (serão limitadas até 09/2020)",
+    options=sorted(df_rubricas["COD_RUBRICA"].astype(str).tolist()) if df_rubricas is not None and not df_rubricas.empty else [],
+    default=rubricas_terco_default,
+    key="ms_terco_ferias",
+)
+st.session_state.rubricas_terco_ferias = set(map(str, rubricas_terco_sel))
+
+st.divider()
+
+
+# =========================
+# Etapa 4: Prévia (pesado) — só roda no botão
 # =========================
 st.subheader("4) Prévia (antes de gerar o Excel)")
 
@@ -272,7 +307,7 @@ with colp2:
 
 if btn_previa:
     if not st.session_state.selected_codigos:
-        st.warning("Selecione ao menos uma rubrica (K150) para gerar a prévia.")
+        st.warning("Selecione ao menos uma rubrica no checklist (K150) para gerar a prévia.")
     else:
         with st.spinner("Calculando prévia (scan no K300)..."):
             st.session_state.preview_result = gerar_previa_k300(
@@ -282,15 +317,21 @@ if btn_previa:
                 allowed_ind_base_ps=set(st.session_state.filtro_ind_base_ps),
                 df_rubricas=df_rubricas,
                 sample_size=200,
+                aplicar_regra_terco_ferias=bool(st.session_state.aplicar_regra_terco_ferias),
+                rubricas_terco_ferias=set(st.session_state.rubricas_terco_ferias),
             )
 
 prev = st.session_state.preview_result
 if prev:
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("📌 Rubricas selecionadas", prev["rubricas_selecionadas"])
-    m2.metric("📄 Linhas K300 filtradas", prev["linhas_filtradas"])
-    m3.metric("💰 Total (Σ VLR_RUBR)", prev["total_geral_formatado"])
-    m4.metric("📆 Competências distintas", prev["competencias_distintas"])
+    with m1:
+        st.metric("📌 Rubricas selecionadas", prev["rubricas_selecionadas"])
+    with m2:
+        st.metric("📄 Linhas K300 filtradas", prev["linhas_filtradas"])
+    with m3:
+        st.metric("💰 Total (Σ VLR_RUBR)", prev["total_geral_formatado"])
+    with m4:
+        st.metric("📆 Competências distintas", prev["competencias_distintas"])
 
     st.markdown("### Totais por rubrica (após filtros)")
     st.dataframe(prev["df_totais_rubrica"], use_container_width=True)
@@ -300,24 +341,25 @@ if prev:
 
     st.markdown("### Alertas")
     if prev["rubricas_sem_movimento"]:
-        st.warning(f"Rubricas selecionadas sem movimento: {len(prev['rubricas_sem_movimento'])}")
+        st.warning(f"Rubricas selecionadas sem movimento (com esses filtros): {len(prev['rubricas_sem_movimento'])}")
         st.dataframe(prev["df_sem_movimento"], use_container_width=True)
     else:
         st.success("Nenhuma rubrica selecionada ficou sem movimento com os filtros atuais.")
 
     if df_repetidas is not None and not df_repetidas.empty:
-        st.info("Descrições com múltiplos códigos (revisar se marcou todos os códigos desejados):")
+        st.info("Descrições com múltiplos códigos (revisar se você marcou todos os códigos desejados):")
         st.dataframe(df_repetidas, use_container_width=True)
 
     st.markdown("### Amostra (primeiras linhas que irão para o Excel)")
     st.dataframe(prev["df_amostra"], use_container_width=True)
 else:
-    st.info("Gere a prévia para validar filtros antes de exportar.")
+    st.info("Gere a prévia para visualizar totais e validar filtros antes de exportar.")
 
 st.divider()
 
+
 # =========================
-# Etapa 5: Excel interno (botão)
+# Etapa 5: Gerar Excel (pesado) — só roda no botão
 # =========================
 st.subheader("5) Gerar Excel interno")
 
@@ -325,7 +367,7 @@ colg1, colg2 = st.columns([1, 3])
 with colg1:
     btn_excel = st.button("⚙️ Gerar Excel interno", key="btn_gerar_excel")
 with colg2:
-    st.caption("Gera K300_FILTRADO + RESUMO_DT_COMP + K150_SELECIONADAS + K050_TRABALHADORES.")
+    st.caption("Gera K300_FILTRADO (ordenado) + RESUMO_DT_COMP + K300_PIVOT_TRAB + K150_SELECIONADAS + K050_TRABALHADORES.")
 
 if btn_excel:
     if not st.session_state.selected_codigos:
@@ -343,6 +385,8 @@ if btn_excel:
                 allowed_ind_rubr=set(st.session_state.filtro_ind_rubr),
                 allowed_ind_base_ps=set(st.session_state.filtro_ind_base_ps),
                 df_rubricas=df_rubricas,
+                aplicar_regra_terco_ferias=bool(st.session_state.aplicar_regra_terco_ferias),
+                rubricas_terco_ferias=set(st.session_state.rubricas_terco_ferias),
             )
 
         st.success("✅ Excel interno gerado!")

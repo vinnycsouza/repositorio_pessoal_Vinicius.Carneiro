@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, Set, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -40,10 +40,15 @@ def montar_pivot_dtcomp_por_rubrica(
     allowed_ind_rubr: Set[str],
     allowed_ind_base_ps: Set[str],
     desc_map: Dict[str, str],
+    aplicar_regra_terco_ferias: bool = False,
+    rubricas_terco_ferias: Optional[Set[str]] = None,
 ) -> pd.DataFrame:
     selected_codigos = set(map(str, selected_codigos))
     allowed_ind_rubr = set(map(str, allowed_ind_rubr))
     allowed_ind_base_ps = set(map(str, allowed_ind_base_ps))
+    rubricas_terco_ferias = set(map(str, rubricas_terco_ferias or set()))
+
+    cutoff_ord = 202009
 
     acc: Dict[Tuple[str, str], Decimal] = {}
 
@@ -70,6 +75,11 @@ def montar_pivot_dtcomp_por_rubrica(
                 continue
             if allowed_ind_base_ps and ind_base_ps not in allowed_ind_base_ps:
                 continue
+
+            # regra jurídica 1/3 férias
+            if aplicar_regra_terco_ferias and cod_rubr in rubricas_terco_ferias:
+                if _ord_dt_comp_mmaaaa(dt_comp) > cutoff_ord:
+                    continue
 
             valor = _parse_decimal_ptbr(vl)
             key = (dt_comp, cod_rubr)

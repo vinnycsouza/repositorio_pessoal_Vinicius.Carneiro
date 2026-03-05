@@ -20,8 +20,12 @@ def _parse_decimal_ptbr(v: str) -> Decimal:
         return Decimal("0")
 
 
-def _ord_dt_comp_mmaaaa(dt_comp: str) -> int:
-    s = (str(dt_comp) or "").strip().zfill(6)
+def _norm_dt_comp_mmaaaa(x: str) -> str:
+    return (str(x) or "").strip().zfill(6)
+
+
+def _ord_dt_comp_mmaaaa(x: str) -> int:
+    s = _norm_dt_comp_mmaaaa(x)
     if len(s) == 6 and s.isdigit():
         mm = int(s[:2])
         aaaa = int(s[2:])
@@ -96,11 +100,15 @@ def gerar_previa_k300(
     allowed_ind_base_ps: Set[str],
     df_rubricas: pd.DataFrame,
     sample_size: int = 200,
+    aplicar_regra_terco_ferias: bool = False,
+    rubricas_terco_ferias: Optional[Set[str]] = None,
 ) -> Dict:
     selected_codigos = set(map(str, selected_codigos))
     allowed_ind_rubr = set(map(str, allowed_ind_rubr))
     allowed_ind_base_ps = set(map(str, allowed_ind_base_ps))
+    rubricas_terco_ferias = set(map(str, rubricas_terco_ferias or set()))
 
+    # mapa código -> descrição
     desc_map = {}
     if df_rubricas is not None and not df_rubricas.empty:
         for _, r in df_rubricas.iterrows():
@@ -117,6 +125,8 @@ def gerar_previa_k300(
     linhas_filtradas = 0
     comps_distintas = set()
 
+    cutoff_ord = 202009  # até 09/2020
+
     with path_k300.open("r", encoding="utf-8", errors="ignore") as f:
         for linha in f:
             linha = linha.rstrip("\n")
@@ -126,12 +136,14 @@ def gerar_previa_k300(
             if len(partes) < len(CAB_K300):
                 partes += [""] * (len(CAB_K300) - len(partes))
 
-            dt_comp = (partes[5] or "").strip()
+            dt_comp_raw = (partes[5] or "").strip()
+            dt_comp = _norm_dt_comp_mmaaaa(dt_comp_raw)
             cod_rubr = (partes[6] or "").strip()
             vl = (partes[7] or "").strip()
             ind_rubr = (partes[8] or "").strip()
             ind_base_ps = (partes[10] or "").strip()
 
+            # filtros
             if cod_rubr not in selected_codigos:
                 continue
             if allowed_ind_rubr and ind_rubr not in allowed_ind_rubr:
@@ -139,16 +151,20 @@ def gerar_previa_k300(
             if allowed_ind_base_ps and ind_base_ps not in allowed_ind_base_ps:
                 continue
 
+            # regra jurídica 1/3 férias
+            if aplicar_regra_terco_ferias and cod_rubr in rubricas_terco_ferias:
+                if _ord_dt_comp_mmaaaa(dt_comp) > cutoff_ord:
+                    continue
+
             valor = _parse_decimal_ptbr(vl)
 
             totais_rub[cod_rubr] = totais_rub.get(cod_rubr, Decimal("0")) + valor
             qtd_rub[cod_rubr] = qtd_rub.get(cod_rubr, 0) + 1
 
             if dt_comp:
-                dt_comp_norm = str(dt_comp).strip().zfill(6)
-                totais_comp[dt_comp_norm] = totais_comp.get(dt_comp_norm, Decimal("0")) + valor
-                qtd_comp[dt_comp_norm] = qtd_comp.get(dt_comp_norm, 0) + 1
-                comps_distintas.add(dt_comp_norm)
+                totais_comp[dt_comp] = totais_comp.get(dt_comp, Decimal("0")) + valor
+                qtd_comp[dt_comp] = qtd_comp.get(dt_comp, 0) + 1
+                comps_distintas.add(dt_comp)
 
             rubricas_sem_mov.discard(cod_rubr)
             linhas_filtradas += 1
@@ -158,6 +174,7 @@ def gerar_previa_k300(
 
     total_geral = sum(totais_rub.values(), Decimal("0"))
 
+    # totais por rubrica
     rows_r = []
     for cod, total in totais_rub.items():
         rows_r.append(
@@ -173,6 +190,7 @@ def gerar_previa_k300(
         df_totais_r["% TOTAL"] = df_totais_r["TOTAL"] / float(total_geral) if total_geral != 0 else 0
         df_totais_r = df_totais_r.sort_values("TOTAL", ascending=False).reset_index(drop=True)
 
+    # totais por competência (cronológico)
     rows_c = []
     for comp, total in totais_comp.items():
         rows_c.append({"DT_COMP": comp, "TOTAL": float(total), "QTD LINHAS": int(qtd_comp.get(comp, 0))})
