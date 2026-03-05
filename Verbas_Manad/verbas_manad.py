@@ -1,27 +1,19 @@
-# verbas_manad.py
-# ✅ MANAD — Levantamento de Verbas Indenizatórias (K150/K300) + K050
-# ✅ Spool por botão (não trava na busca)
-# ✅ Regra 1/3 férias até 09/2020 (checkbox + seleção de rubricas)
-# ✅ Passa parâmetros para preview/export (manadlib atualizado)
-
+import io
 import sys
+import time
 import tempfile
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-# Garante imports quando rodar como "streamlit run Verbas_Manad/verbas_manad.py"
+# Garante imports quando rodar como "streamlit run ..."
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from manadlib.spool import spool_step  # <-- seu spool atual exige (uploaded_file, tmp_dir, eventos_alvo)
-from manadlib.preview import (
-    gerar_previa_k300,
-    ler_catalogo_k150,
-    alertas_descricoes_repetidas,
-)
+from manadlib.spool import spool_step, spool_init_state
+from manadlib.preview import gerar_previa_k300, ler_catalogo_k150, alertas_descricoes_repetidas
 from manadlib.export import gerar_excel_interno
 
 
@@ -36,7 +28,6 @@ uploaded_file = st.file_uploader(
     type=["txt", "xlsx"],
     key="upload_manad",
 )
-
 
 # =========================
 # Estado da sessão
@@ -57,16 +48,16 @@ def ss_init():
     st.session_state.setdefault("filtro_ind_rubr", {"P"})          # P=provento (default)
     st.session_state.setdefault("filtro_ind_base_ps", {"1", "2"})  # default 1 e 2
 
-    # ✅ regra jurídica 1/3 férias
-    st.session_state.setdefault("aplicar_regra_terco_ferias", False)
-    st.session_state.setdefault("rubricas_terco_ferias", set())
-
     # outputs
     st.session_state.setdefault("preview_result", None)
     st.session_state.setdefault("excel_bytes", None)
 
-    # spool: se seu spool_step usa state incremental interno
+    # spool incremental
     st.session_state.setdefault("spool_state", None)
+
+    # ✅ NOVO: regra jurídica 1/3 férias
+    st.session_state.setdefault("aplicar_regra_terco_ferias", False)
+    st.session_state.setdefault("rubricas_terco_ferias", set())
 
 ss_init()
 
@@ -94,7 +85,7 @@ def reset_for_new_upload(new_fp: str):
 
 
 # =========================
-# Etapa 0: Upload (não processa pesado aqui)
+# Etapa 0: Upload
 # =========================
 if not uploaded_file:
     st.info("Envie um arquivo MANAD para começar.")
@@ -106,134 +97,86 @@ if st.session_state.uploaded_fingerprint != fp:
 
 st.success("Arquivo carregado! ✅")
 st.caption("Você controla o processamento pelo botão (evita travar enquanto busca rubricas).")
-
 st.divider()
 
+# =========================
+# Etapa 1: Processar MANAD (incremental)
+# =========================
+eventos_alvo = {"K150", "K300", "K050"}
 
-# =========================
-# Etapa 1: Processar MANAD (spool via spool_step)
-# =========================
 col1, col2 = st.columns([1, 2])
 with col1:
-    processar = st.button("1) ⚙️ Processar MANAD (separar eventos)", key="btn_processar")
+    iniciar = st.button("1) ⚙️ Processar MANAD (separar eventos)", key="btn_processar")
 with col2:
-    st.caption("Processa apenas K150, K300 e K050 (modo econômico de memória).")
+    st.caption("Processa em lotes (Cloud-safe) para evitar crash em arquivos grandes.")
 
-if processar:
+if iniciar:
     st.session_state.tmp_dir = str(Path(tempfile.mkdtemp(prefix="manad_")))
-    tmp_dir = Path(st.session_state.tmp_dir)
+    st.session_state.manad_processado = False
+    st.session_state.spool_state = spool_init_state()
 
-    eventos_alvo = {"K150", "K300", "K050"}
+# roda em passos até concluir
+if st.session_state.spool_state is not None and not st.session_state.manad_processado:
+    tmp_dir = Path(st.session_state.tmp_dir)
 
     status = st.empty()
     prog = st.progress(0.0)
 
-    try:
-        status.info("Separando o arquivo por evento (K150/K300/K050)...")
+    st.session_state.spool_state = spool_step(
+        state=st.session_state.spool_state,
+        uploaded_file=uploaded_file,
+        tmp_dir=tmp_dir,
+        eventos_alvo=eventos_alvo,
+        batch_bytes=8_000_000,  # se ainda ficar instável no Cloud, reduza para 4_000_000
+        progress_bar=prog,
+        status_slot=status,
+    )
 
-        # ✅ roda spool_step até finalizar
-        # suportando 2 padrões:
-        #  A) spool_step(uploaded_file, tmp_dir, eventos_alvo, ..., state=...)
-        #  B) spool_step(uploaded_file, tmp_dir, eventos_alvo, ...)
-        for _ in range(10_000_000):
-            try:
-                out = spool_step(
-                    uploaded_file=uploaded_file,
-                    tmp_dir=tmp_dir,
-                    eventos_alvo=eventos_alvo,
-                    progress_bar=prog,
-                    status_slot=status,
-                    state=st.session_state.spool_state,
-                )
-            except TypeError:
-                out = spool_step(
-                    uploaded_file=uploaded_file,
-                    tmp_dir=tmp_dir,
-                    eventos_alvo=eventos_alvo,
-                    progress_bar=prog,
-                    status_slot=status,
-                )
+    # ✅ segurança contra None
+    counts = {}
+    if isinstance(st.session_state.spool_state, dict):
+        counts = st.session_state.spool_state.get("counts", {}) or {}
 
-           # depois do out = spool_step(...)
+    st.caption(
+        f"Linhas até agora — K150: {counts.get('K150', 0)}, "
+        f"K300: {counts.get('K300', 0)}, "
+        f"K050: {counts.get('K050', 0)}"
+    )
 
-        # ✅ NORMALIZA: se spool_step devolver None, não quebra
-        if out is None:
-           done = False
-           info = {}
-        elif isinstance(out, tuple) and len(out) >= 1:
-            done = bool(out[0])
-            info = out[1] if len(out) > 1 and isinstance(out[1], dict) else {}
-        elif isinstance(out, dict):
-            info = out
-            done = bool(info.get("done") or info.get("finalizado") or info.get("finished") or info.get("is_done"))
-        elif isinstance(out, bool):
-            done = out
-            info = {}
-        else:
-            done = False
-            info = {}
+    done = False
+    if isinstance(st.session_state.spool_state, dict):
+        done = bool(st.session_state.spool_state.get("done"))
 
-            # se o spool mantém estado, guarda
-            if isinstance(info, dict) and "state" in info:
-                st.session_state.spool_state = info["state"]
-
-            if done:
-                # tenta extrair resultados
-                arquivos_evento = info.get("arquivos_evento") or info.get("event_files") or info.get("files_by_event")
-                contagem_linhas = info.get("contagem_linhas") or info.get("line_counts") or {}
-
-                # fallback: se vierem em state
-                if arquivos_evento is None and isinstance(st.session_state.spool_state, dict):
-                    arquivos_evento = (
-                        st.session_state.spool_state.get("arquivos_evento")
-                        or st.session_state.spool_state.get("event_files")
-                        or st.session_state.spool_state.get("files_by_event")
-                    )
-                    contagem_linhas = (
-                        contagem_linhas
-                        or st.session_state.spool_state.get("contagem_linhas")
-                        or st.session_state.spool_state.get("line_counts")
-                        or {}
-                    )
-
-                if not arquivos_evento:
-                    raise RuntimeError("Spool finalizou, mas não retornou 'arquivos_evento'.")
-
-                # normaliza
-                arquivos_evento = {str(k): str(v) for k, v in dict(arquivos_evento).items()}
-                contagem_linhas = {str(k): int(v) for k, v in dict(contagem_linhas).items()}
-
-                eventos = sorted(arquivos_evento.keys())
-
-                st.session_state.arquivos_evento = arquivos_evento
-                st.session_state.contagem_linhas = contagem_linhas
-                st.session_state.eventos_encontrados = eventos
-
-                # carrega catálogo K150
-                p_k150 = st.session_state.arquivos_evento.get("K150")
-                if p_k150 and Path(p_k150).exists():
-                    st.session_state.df_rubricas = ler_catalogo_k150(Path(p_k150))
-                else:
-                    st.session_state.df_rubricas = pd.DataFrame(columns=["COD_RUBRICA", "DESC_RUBRICA"])
-
-                st.session_state.manad_processado = True
-                st.rerun()
-
+    if done:
         prog.empty()
-        if st.session_state.manad_processado:
-            status.success(f"Eventos prontos: {', '.join(st.session_state.eventos_encontrados) if st.session_state.eventos_encontrados else 'nenhum'}")
+        status.success("✅ Processamento concluído!")
+
+        paths = {}
+        if isinstance(st.session_state.spool_state, dict):
+            paths = st.session_state.spool_state.get("paths", {}) or {}
+
+        st.session_state.arquivos_evento = paths
+        st.session_state.contagem_linhas = {k: int(v) for k, v in counts.items()}
+        st.session_state.eventos_encontrados = sorted(list(st.session_state.arquivos_evento.keys()))
+
+        # carrega catálogo K150
+        p_k150 = st.session_state.arquivos_evento.get("K150")
+        if p_k150 and Path(p_k150).exists():
+            st.session_state.df_rubricas = ler_catalogo_k150(Path(p_k150))
         else:
-            status.error("Falha: spool não finalizou (loop excedeu limite).")
+            st.session_state.df_rubricas = pd.DataFrame(columns=["COD_RUBRICA", "DESC_RUBRICA"])
 
-    except Exception as e:
-        prog.empty()
-        status.error(f"Falha ao processar o arquivo: {e}")
-        st.session_state.manad_processado = False
+        st.session_state.manad_processado = True
+        st.session_state.spool_state = None
 
+    else:
+        time.sleep(0.05)
+        st.rerun()
+
+# gate
 if not st.session_state.manad_processado:
     st.info("Clique em **Processar MANAD** para liberar checklist, filtros, prévia e exportação.")
     st.stop()
-
 
 # =========================
 # Diagnóstico rápido
@@ -253,9 +196,8 @@ if not p_k300 or not Path(p_k300).exists():
 
 st.divider()
 
-
 # =========================
-# Etapa 2: Seleção de Rubricas (Checklist + busca)
+# Etapa 2: Seleção de Rubricas
 # =========================
 st.subheader("2) Seleção de Rubricas (K150) — Checklist + busca")
 
@@ -305,12 +247,42 @@ else:
     st.session_state.selected_codigos -= (desmarcados & set(df_view["COD_RUBRICA"].astype(str).tolist()))
 
 st.caption(f"✅ Rubricas selecionadas: {len(st.session_state.selected_codigos)}")
+st.divider()
+
+# =========================
+# ✅ NOVO: Regra 1/3 férias
+# =========================
+st.subheader("2.1) Regra jurídica — 1/3 de férias")
+
+st.session_state.aplicar_regra_terco_ferias = st.checkbox(
+    "Aplicar regra: 1/3 de férias só pode ser recuperado até 09/2020 (inclusive)",
+    value=bool(st.session_state.aplicar_regra_terco_ferias),
+    key="chk_terco_ferias",
+)
+
+# sugestão automática por descrição (não obriga)
+auto_terco = set()
+if df_rubricas is not None and not df_rubricas.empty:
+    tmp = df_rubricas.copy()
+    tmp["COD_RUBRICA"] = tmp["COD_RUBRICA"].astype(str)
+    tmp["DESC_RUBRICA"] = tmp["DESC_RUBRICA"].astype(str)
+    m = tmp["DESC_RUBRICA"].str.upper().str.contains("1/3", na=False) & tmp["DESC_RUBRICA"].str.upper().str.contains("FER", na=False)
+    auto_terco = set(tmp.loc[m, "COD_RUBRICA"].tolist())
+
+default_terco = sorted(st.session_state.rubricas_terco_ferias or auto_terco)
+
+rub_terco = st.multiselect(
+    "Quais rubricas são 1/3 de férias? (essas serão limitadas até 09/2020)",
+    options=sorted(df_rubricas["COD_RUBRICA"].astype(str).tolist()) if df_rubricas is not None and not df_rubricas.empty else [],
+    default=default_terco,
+    key="ms_terco_ferias",
+)
+st.session_state.rubricas_terco_ferias = set(map(str, rub_terco))
 
 st.divider()
 
-
 # =========================
-# Etapa 3: Filtros do K300 (leve)
+# Etapa 3: Filtros K300
 # =========================
 st.subheader("3) Filtros do K300")
 
@@ -337,39 +309,6 @@ with colf2:
 
 st.divider()
 
-
-# =========================
-# Etapa 3.1: Regra jurídica 1/3 férias
-# =========================
-st.subheader("3.1) Regra jurídica — 1/3 de férias")
-
-st.session_state.aplicar_regra_terco_ferias = st.checkbox(
-    "Aplicar regra: 1/3 de férias só entra até 09/2020 (inclusive)",
-    value=bool(st.session_state.aplicar_regra_terco_ferias),
-    key="chk_terco_ferias",
-)
-
-auto_terco = set()
-if df_rubricas is not None and not df_rubricas.empty:
-    tmp = df_rubricas.copy()
-    tmp["COD_RUBRICA"] = tmp["COD_RUBRICA"].astype(str)
-    tmp["DESC_RUBRICA"] = tmp["DESC_RUBRICA"].astype(str)
-    mask = tmp["DESC_RUBRICA"].str.upper().str.contains("1/3", na=False) & tmp["DESC_RUBRICA"].str.upper().str.contains("FER", na=False)
-    auto_terco = set(tmp.loc[mask, "COD_RUBRICA"].tolist())
-
-rubricas_terco_default = sorted(st.session_state.rubricas_terco_ferias or auto_terco)
-
-rubricas_terco_sel = st.multiselect(
-    "Selecione as rubricas que representam 1/3 de férias (serão limitadas até 09/2020)",
-    options=sorted(df_rubricas["COD_RUBRICA"].astype(str).tolist()) if df_rubricas is not None and not df_rubricas.empty else [],
-    default=rubricas_terco_default,
-    key="ms_terco_ferias",
-)
-st.session_state.rubricas_terco_ferias = set(map(str, rubricas_terco_sel))
-
-st.divider()
-
-
 # =========================
 # Etapa 4: Prévia (botão)
 # =========================
@@ -385,7 +324,7 @@ with colp2:
 
 if btn_previa:
     if not st.session_state.selected_codigos:
-        st.warning("Selecione ao menos uma rubrica no checklist (K150) para gerar a prévia.")
+        st.warning("Selecione ao menos uma rubrica (K150) para gerar a prévia.")
     else:
         with st.spinner("Calculando prévia (scan no K300)..."):
             st.session_state.preview_result = gerar_previa_k300(
@@ -402,14 +341,10 @@ if btn_previa:
 prev = st.session_state.preview_result
 if prev:
     m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("📌 Rubricas selecionadas", prev["rubricas_selecionadas"])
-    with m2:
-        st.metric("📄 Linhas K300 filtradas", prev["linhas_filtradas"])
-    with m3:
-        st.metric("💰 Total (Σ VLR_RUBR)", prev["total_geral_formatado"])
-    with m4:
-        st.metric("📆 Competências distintas", prev["competencias_distintas"])
+    m1.metric("📌 Rubricas selecionadas", prev["rubricas_selecionadas"])
+    m2.metric("📄 Linhas K300 filtradas", prev["linhas_filtradas"])
+    m3.metric("💰 Total (Σ VLR_RUBR)", prev["total_geral_formatado"])
+    m4.metric("📆 Competências distintas", prev["competencias_distintas"])
 
     st.markdown("### Totais por rubrica (após filtros)")
     st.dataframe(prev["df_totais_rubrica"], use_container_width=True)
@@ -419,25 +354,24 @@ if prev:
 
     st.markdown("### Alertas")
     if prev["rubricas_sem_movimento"]:
-        st.warning(f"Rubricas selecionadas sem movimento (com esses filtros): {len(prev['rubricas_sem_movimento'])}")
+        st.warning(f"Rubricas selecionadas sem movimento: {len(prev['rubricas_sem_movimento'])}")
         st.dataframe(prev["df_sem_movimento"], use_container_width=True)
     else:
         st.success("Nenhuma rubrica selecionada ficou sem movimento com os filtros atuais.")
 
     if df_repetidas is not None and not df_repetidas.empty:
-        st.info("Descrições com múltiplos códigos (revisar se você marcou todos os códigos desejados):")
+        st.info("Descrições com múltiplos códigos (revisar se marcou todos os códigos desejados):")
         st.dataframe(df_repetidas, use_container_width=True)
 
     st.markdown("### Amostra (primeiras linhas que irão para o Excel)")
     st.dataframe(prev["df_amostra"], use_container_width=True)
 else:
-    st.info("Gere a prévia para visualizar totais e validar filtros antes de exportar.")
+    st.info("Gere a prévia para validar filtros antes de exportar.")
 
 st.divider()
 
-
 # =========================
-# Etapa 5: Gerar Excel (botão)
+# Etapa 5: Excel interno (botão)
 # =========================
 st.subheader("5) Gerar Excel interno")
 
@@ -445,7 +379,7 @@ colg1, colg2 = st.columns([1, 3])
 with colg1:
     btn_excel = st.button("⚙️ Gerar Excel interno", key="btn_gerar_excel")
 with colg2:
-    st.caption("Gera K300_FILTRADO + RESUMO_DT_COMP + K300_PIVOT_TRAB + K150_SELECIONADAS + K050_TRABALHADORES.")
+    st.caption("Gera K300_FILTRADO + RESUMO_DT_COMP + K150_SELECIONADAS + K050_TRABALHADORES.")
 
 if btn_excel:
     if not st.session_state.selected_codigos:
