@@ -20,12 +20,12 @@ def _parse_decimal_ptbr(v: str) -> Decimal:
         return Decimal("0")
 
 
-def _norm_dt_comp_mmaaaa(x: str) -> str:
-    return (str(x) or "").strip().zfill(6)
-
-
-def _ord_dt_comp_mmaaaa(x: str) -> int:
-    s = _norm_dt_comp_mmaaaa(x)
+def _ord_mmAAAA(x: str) -> int:
+    """
+    Ordenação cronológica para DT_COMP no padrão MANAD: MMAAAA (ex.: 012012, 112023).
+    Retorna chave AAAAMM. NÃO altera o valor original.
+    """
+    s = (str(x) or "").strip()
     if len(s) == 6 and s.isdigit():
         mm = int(s[:2])
         aaaa = int(s[2:])
@@ -35,6 +35,10 @@ def _ord_dt_comp_mmaaaa(x: str) -> int:
 
 
 def ler_catalogo_k150(path_k150: Path) -> pd.DataFrame:
+    """
+    Lê K150.txt e retorna DataFrame com COD_RUBRICA, DESC_RUBRICA
+    ✅ Ordena por COD_RUBRICA crescente (ordem numérica real quando possível).
+    """
     rows = []
     with path_k150.open("r", encoding="utf-8", errors="ignore") as f:
         for linha in f:
@@ -47,6 +51,7 @@ def ler_catalogo_k150(path_k150: Path) -> pd.DataFrame:
 
             cod = (partes[3] or "").strip()
             desc = (partes[4] or "").strip()
+
             if cod:
                 rows.append((cod, desc))
 
@@ -58,13 +63,16 @@ def ler_catalogo_k150(path_k150: Path) -> pd.DataFrame:
     df["_COD_NUM"] = pd.to_numeric(df["COD_RUBRICA"], errors="coerce")
     df = (
         df.sort_values(by=["_COD_NUM", "COD_RUBRICA"], kind="stable", na_position="last")
-        .drop(columns=["_COD_NUM"])
-        .reset_index(drop=True)
+          .drop(columns=["_COD_NUM"])
+          .reset_index(drop=True)
     )
     return df
 
 
-def alertas_descricoes_repetidas(df_rubricas: pd.DataFrame, selected_codigos: Set[str]) -> Optional[pd.DataFrame]:
+def alertas_descricoes_repetidas(
+    df_rubricas: pd.DataFrame,
+    selected_codigos: Set[str],
+) -> Optional[pd.DataFrame]:
     if df_rubricas is None or df_rubricas.empty:
         return None
 
@@ -106,7 +114,9 @@ def gerar_previa_k300(
     selected_codigos = set(map(str, selected_codigos))
     allowed_ind_rubr = set(map(str, allowed_ind_rubr))
     allowed_ind_base_ps = set(map(str, allowed_ind_base_ps))
+
     rubricas_terco_ferias = set(map(str, rubricas_terco_ferias or set()))
+    LIMITE_TERCO = 202009  # AAAAMM
 
     # mapa código -> descrição
     desc_map = {}
@@ -125,8 +135,6 @@ def gerar_previa_k300(
     linhas_filtradas = 0
     comps_distintas = set()
 
-    cutoff_ord = 202009  # até 09/2020
-
     with path_k300.open("r", encoding="utf-8", errors="ignore") as f:
         for linha in f:
             linha = linha.rstrip("\n")
@@ -136,14 +144,12 @@ def gerar_previa_k300(
             if len(partes) < len(CAB_K300):
                 partes += [""] * (len(CAB_K300) - len(partes))
 
-            dt_comp_raw = (partes[5] or "").strip()
-            dt_comp = _norm_dt_comp_mmaaaa(dt_comp_raw)
+            dt_comp = (partes[5] or "").strip()
             cod_rubr = (partes[6] or "").strip()
             vl = (partes[7] or "").strip()
             ind_rubr = (partes[8] or "").strip()
             ind_base_ps = (partes[10] or "").strip()
 
-            # filtros
             if cod_rubr not in selected_codigos:
                 continue
             if allowed_ind_rubr and ind_rubr not in allowed_ind_rubr:
@@ -151,9 +157,9 @@ def gerar_previa_k300(
             if allowed_ind_base_ps and ind_base_ps not in allowed_ind_base_ps:
                 continue
 
-            # regra jurídica 1/3 férias
+            # ✅ regra 1/3 férias até 09/2020 (sem alterar dt_comp)
             if aplicar_regra_terco_ferias and cod_rubr in rubricas_terco_ferias:
-                if _ord_dt_comp_mmaaaa(dt_comp) > cutoff_ord:
+                if _ord_mmAAAA(dt_comp) > LIMITE_TERCO:
                     continue
 
             valor = _parse_decimal_ptbr(vl)
@@ -190,14 +196,13 @@ def gerar_previa_k300(
         df_totais_r["% TOTAL"] = df_totais_r["TOTAL"] / float(total_geral) if total_geral != 0 else 0
         df_totais_r = df_totais_r.sort_values("TOTAL", ascending=False).reset_index(drop=True)
 
-    # totais por competência (cronológico)
+    # totais por competência (ordenado corretamente)
     rows_c = []
     for comp, total in totais_comp.items():
         rows_c.append({"DT_COMP": comp, "TOTAL": float(total), "QTD LINHAS": int(qtd_comp.get(comp, 0))})
     df_totais_c = pd.DataFrame(rows_c)
     if not df_totais_c.empty:
-        df_totais_c["DT_COMP"] = df_totais_c["DT_COMP"].astype(str).str.strip().str.zfill(6)
-        df_totais_c["_ord"] = df_totais_c["DT_COMP"].apply(_ord_dt_comp_mmaaaa)
+        df_totais_c["_ord"] = df_totais_c["DT_COMP"].apply(_ord_mmAAAA)
         df_totais_c = df_totais_c.sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
 
     df_amostra = pd.DataFrame(amostra, columns=CAB_K300) if amostra else pd.DataFrame(columns=CAB_K300)
