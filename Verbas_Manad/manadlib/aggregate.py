@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Set, Tuple, Optional
 
 import pandas as pd
 
@@ -20,12 +20,12 @@ def _parse_decimal_ptbr(v: str) -> Decimal:
         return Decimal("0")
 
 
-def _norm_dt_comp_mmaaaa(x: str) -> str:
-    return (str(x) or "").strip().zfill(6)
-
-
-def _ord_dt_comp_mmaaaa(x: str) -> int:
-    s = _norm_dt_comp_mmaaaa(x)
+def _ord_mmAAAA(x: str) -> int:
+    """
+    Ordenação cronológica para DT_COMP no padrão MANAD: MMAAAA.
+    Retorna chave AAAAMM. NÃO altera o valor original.
+    """
+    s = (str(x) or "").strip()
     if len(s) == 6 and s.isdigit():
         mm = int(s[:2])
         aaaa = int(s[2:])
@@ -43,12 +43,16 @@ def montar_pivot_dtcomp_por_rubrica(
     aplicar_regra_terco_ferias: bool = False,
     rubricas_terco_ferias: Optional[Set[str]] = None,
 ) -> pd.DataFrame:
+    """
+    DT_COMP (MMAAAA) x Rubricas selecionadas (colunas), soma(VLR_RUBR).
+    ✅ Agora também aplica modulação do 1/3 de férias até 09/2020 quando ativada.
+    """
     selected_codigos = set(map(str, selected_codigos))
     allowed_ind_rubr = set(map(str, allowed_ind_rubr))
     allowed_ind_base_ps = set(map(str, allowed_ind_base_ps))
-    rubricas_terco_ferias = set(map(str, rubricas_terco_ferias or set()))
 
-    cutoff_ord = 202009
+    rubricas_terco_ferias = set(map(str, rubricas_terco_ferias or set()))
+    LIMITE_TERCO = 202009  # AAAAMM (09/2020)
 
     acc: Dict[Tuple[str, str], Decimal] = {}
 
@@ -61,13 +65,13 @@ def montar_pivot_dtcomp_por_rubrica(
             if len(partes) < len(CAB_K300):
                 partes += [""] * (len(CAB_K300) - len(partes))
 
-            dt_comp = _norm_dt_comp_mmaaaa(partes[5])
+            dt_comp = (partes[5] or "").strip()
             cod_rubr = (partes[6] or "").strip()
             vl = (partes[7] or "").strip()
             ind_rubr = (partes[8] or "").strip()
             ind_base_ps = (partes[10] or "").strip()
 
-            if not dt_comp.strip():
+            if not dt_comp:
                 continue
             if cod_rubr not in selected_codigos:
                 continue
@@ -76,9 +80,9 @@ def montar_pivot_dtcomp_por_rubrica(
             if allowed_ind_base_ps and ind_base_ps not in allowed_ind_base_ps:
                 continue
 
-            # regra jurídica 1/3 férias
+            # ✅ regra 1/3 férias
             if aplicar_regra_terco_ferias and cod_rubr in rubricas_terco_ferias:
-                if _ord_dt_comp_mmaaaa(dt_comp) > cutoff_ord:
+                if _ord_mmAAAA(dt_comp) > LIMITE_TERCO:
                     continue
 
             valor = _parse_decimal_ptbr(vl)
@@ -99,15 +103,16 @@ def montar_pivot_dtcomp_por_rubrica(
         fill_value=0.0,
     ).reset_index()
 
-    df_pivot["DT_COMP"] = df_pivot["DT_COMP"].apply(_norm_dt_comp_mmaaaa)
-    df_pivot["_ord"] = df_pivot["DT_COMP"].apply(_ord_dt_comp_mmaaaa)
+    # ✅ ordena cronologicamente (MMAAAA -> AAAAMM)
+    df_pivot["_ord"] = df_pivot["DT_COMP"].apply(_ord_mmAAAA)
     df_pivot = df_pivot.sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
 
+    # renomeia colunas para "COD - DESCRIÇÃO"
     new_cols = ["DT_COMP"]
     for c in df_pivot.columns[1:]:
         cod = str(c)
         desc = (desc_map.get(cod, "") or "").strip()
-        new_cols.append(f"{cod} - {desc}"[:250] if desc else cod)
+        new_cols.append((f"{cod} - {desc}" if desc else cod)[:250])
     df_pivot.columns = new_cols
 
     return df_pivot

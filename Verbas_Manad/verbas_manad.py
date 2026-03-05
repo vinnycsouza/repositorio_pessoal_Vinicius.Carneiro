@@ -154,19 +154,24 @@ if processar:
                     status_slot=status,
                 )
 
-            # normaliza resposta
-            if isinstance(out, tuple) and len(out) >= 1:
-                done = bool(out[0])
-                info = out[1] if len(out) > 1 else {}
-            elif isinstance(out, dict):
-                info = out
-                done = bool(info.get("done") or info.get("finalizado") or info.get("finished") or info.get("is_done"))
-            elif isinstance(out, bool):
-                done = out
-                info = {}
-            else:
-                done = False
-                info = {}
+           # depois do out = spool_step(...)
+
+        # ✅ NORMALIZA: se spool_step devolver None, não quebra
+        if out is None:
+           done = False
+           info = {}
+        elif isinstance(out, tuple) and len(out) >= 1:
+            done = bool(out[0])
+            info = out[1] if len(out) > 1 and isinstance(out[1], dict) else {}
+        elif isinstance(out, dict):
+            info = out
+            done = bool(info.get("done") or info.get("finalizado") or info.get("finished") or info.get("is_done"))
+        elif isinstance(out, bool):
+            done = out
+            info = {}
+        else:
+            done = False
+            info = {}
 
             # se o spool mantém estado, guarda
             if isinstance(info, dict) and "state" in info:
@@ -212,7 +217,7 @@ if processar:
                     st.session_state.df_rubricas = pd.DataFrame(columns=["COD_RUBRICA", "DESC_RUBRICA"])
 
                 st.session_state.manad_processado = True
-                break
+                st.rerun()
 
         prog.empty()
         if st.session_state.manad_processado:

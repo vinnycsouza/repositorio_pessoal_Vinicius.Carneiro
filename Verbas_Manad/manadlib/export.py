@@ -185,6 +185,8 @@ def gerar_excel_interno(
         allowed_ind_rubr=allowed_ind_rubr,
         allowed_ind_base_ps=allowed_ind_base_ps,
         desc_map=desc_map,
+        aplicar_regra_terco_ferias=bool(aplicar_regra_terco_ferias),
+        rubricas_terco_ferias=set(rubricas_terco_ferias or set()),
     )
 
     # ✅ aplica regra do 1/3 também no resumo (filtra linhas > 09/2020 só para rubricas_terco_ferias)
