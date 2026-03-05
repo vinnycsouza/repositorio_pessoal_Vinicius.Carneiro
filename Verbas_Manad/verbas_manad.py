@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from manadlib.spool import spool_por_evento  # ou spool_step/spool_init_state se seu spool for incremental
+from manadlib.spool import spool_step, spool_init_state  # ou spool_step/spool_init_state se seu spool for incremental
 from manadlib.preview import (
     gerar_previa_k300,
     ler_catalogo_k150,
