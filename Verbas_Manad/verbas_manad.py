@@ -1,197 +1,139 @@
 # verbas_manad.py
-# ✅ MANAD — Levantamento de Verbas Indenizatórias (K150/K300) + K050
-# ✅ Regra jurídica opcional: 1/3 férias só até 09/2020
-# ✅ Prévia e Excel só rodam em botão
-# ✅ Compatível com spool incremental (spool_init_state/spool_step) OU spool_por_evento (se existir)
+# ✅ Mantém spool incremental (spool_init_state/spool_step) como você já usa
+# ✅ Adiciona modulação do 1/3 férias até 09/2020
+# ✅ Prévia e Excel só rodam nos botões (não trava na busca)
+# ✅ Passa parâmetros novos para preview/export
+# ✅ Sem mudar padrão de DT_COMP (MMAAAA) — apenas ordena no manadlib
 
 import sys
 import tempfile
 from pathlib import Path
-import streamlit as st
+import inspect
+
 import pandas as pd
+import streamlit as st
 
 # =========================
-# Imports (robustos)
+# Imports do projeto (garante path)
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-# manadlib.preview/export (você já atualizou)
-from manadlib.preview import (
-    gerar_previa_k300,
-    ler_catalogo_k150,
-    alertas_descricoes_repetidas,
-)
+from manadlib.spool import spool_step, spool_init_state
+from manadlib.preview import gerar_previa_k300, ler_catalogo_k150, alertas_descricoes_repetidas
 from manadlib.export import gerar_excel_interno
 
-# manadlib.spool (pode ser incremental OU legado)
-try:
-    from manadlib.spool import spool_init_state, spool_step  # incremental
-except Exception:
-    spool_init_state = None
-    spool_step = None
-
-try:
-    from manadlib.spool import spool_por_evento  # legado
-except Exception:
-    spool_por_evento = None
-
 
 # =========================
-# Helpers: chamar spool incremental sem depender do "formato exato"
+# Helpers: chama spool incremental SEM depender de nomes fixos
 # =========================
-def _call_spool_init(uploaded_file, tmp_dir: Path, eventos_alvo: set[str]):
+def _spool_init_safe(uploaded_file, tmp_dir: Path, eventos_alvo: set[str]):
     """
-    Tenta inicializar spool incremental, independente de nomes de parâmetros.
+    Chama spool_init_state passando somente kwargs aceitos pela assinatura real.
+    (resolve 'unexpected keyword argument' sem você ter que mexer no spool.py)
     """
-    if spool_init_state is None:
-        raise RuntimeError("spool_init_state não disponível")
+    sig = inspect.signature(spool_init_state)
+    accepted = set(sig.parameters.keys())
 
-    # tentativas com nomes mais comuns
-    tries = [
-        dict(uploaded_file=uploaded_file, tmp_dir=tmp_dir, eventos_alvo=eventos_alvo),
-        dict(uploaded_file=uploaded_file, tmp_dir=tmp_dir, eventos_target=eventos_alvo),
-        dict(uploaded_file=uploaded_file, tmp_dir=tmp_dir, eventos=eventos_alvo),
-        dict(file=uploaded_file, tmp_dir=tmp_dir, eventos_alvo=eventos_alvo),
-        dict(file=uploaded_file, tmp_dir=tmp_dir, eventos=eventos_alvo),
-    ]
-    last_err = None
-    for kwargs in tries:
-        try:
-            return spool_init_state(**kwargs)
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"Falha ao inicializar spool incremental: {last_err}")
+    # candidatos de nomes que podem existir no seu spool.py
+    candidates = {
+        "uploaded_file": uploaded_file,
+        "arquivo": uploaded_file,
+        "tmp_dir": tmp_dir,
+        "temp_dir": tmp_dir,
+        "eventos_alvo": eventos_alvo,
+        "eventos": eventos_alvo,
+    }
+
+    kwargs = {k: v for k, v in candidates.items() if k in accepted}
+
+    # fallback: tenta preencher por posição se não pegou algum essencial
+    # (sem inventar 'file=')
+    params = list(sig.parameters.keys())
+
+    # garante que algum parâmetro receba o arquivo
+    if not any(k in kwargs for k in ("uploaded_file", "arquivo")) and params:
+        kwargs[params[0]] = uploaded_file
+
+    # tenta preencher tmp_dir se existir algum parâmetro que pareça diretório
+    if not any(k in kwargs for k in ("tmp_dir", "temp_dir")):
+        for name in params:
+            if "tmp" in name.lower() or "dir" in name.lower():
+                kwargs[name] = tmp_dir
+                break
+
+    # tenta preencher eventos se existir algum parâmetro que pareça lista/conjunto de evento
+    if not any(k in kwargs for k in ("eventos_alvo", "eventos")):
+        for name in params:
+            if "evento" in name.lower():
+                kwargs[name] = eventos_alvo
+                break
+
+    return spool_init_state(**kwargs)
 
 
-def _call_spool_step(state, progress_bar=None, status_slot=None):
+def _spool_step_safe(state, progress_bar=None, status_slot=None):
     """
-    Tenta executar um step do spool incremental.
+    Chama spool_step passando somente kwargs aceitos.
     Retorna (done: bool, info: dict|None)
     """
-    if spool_step is None:
-        raise RuntimeError("spool_step não disponível")
+    sig = inspect.signature(spool_step)
+    accepted = set(sig.parameters.keys())
 
-    tries = [
-        dict(state=state, progress_bar=progress_bar, status_slot=status_slot),
-        dict(spool_state=state, progress_bar=progress_bar, status_slot=status_slot),
-        dict(state=state, progress=progress_bar, status=status_slot),
-        dict(spool_state=state, progress=progress_bar, status=status_slot),
-        dict(state=state),
-        dict(spool_state=state),
-    ]
-    last_err = None
-    for kwargs in tries:
-        try:
-            out = spool_step(**kwargs)
+    candidates = {
+        "state": state,
+        "spool_state": state,
+        "progress_bar": progress_bar,
+        "progress": progress_bar,
+        "status_slot": status_slot,
+        "status": status_slot,
+    }
 
-            # formatos comuns:
-            # 1) (done, info)
-            if isinstance(out, tuple) and len(out) >= 1:
-                done = bool(out[0])
-                info = out[1] if len(out) > 1 else None
-                return done, info
+    kwargs = {k: v for k, v in candidates.items() if k in accepted}
 
-            # 2) dict com done
-            if isinstance(out, dict):
-                done = bool(out.get("done") or out.get("finalizado") or out.get("finished") or out.get("is_done"))
-                return done, out
+    out = spool_step(**kwargs)
 
-            # 3) boolean
-            if isinstance(out, bool):
-                return out, None
+    # formatos comuns
+    if isinstance(out, tuple) and len(out) >= 1:
+        done = bool(out[0])
+        info = out[1] if len(out) > 1 else None
+        return done, info
+    if isinstance(out, dict):
+        done = bool(out.get("done") or out.get("finalizado") or out.get("finished") or out.get("is_done"))
+        return done, out
+    if isinstance(out, bool):
+        return out, None
 
-            # fallback: se não reconheceu, considera que não terminou
-            return False, None
-
-        except Exception as e:
-            last_err = e
-            continue
-
-    raise RuntimeError(f"Falha ao executar spool_step: {last_err}")
+    return False, None
 
 
-def _extract_spool_results(state) -> tuple[dict[str, Path], dict[str, int], list[str]]:
+def _extract_spool_results(spool_state: dict):
     """
-    Extrai arquivos_evento e contagem_linhas de um estado incremental, tentando chaves comuns.
+    Extrai arquivos_evento e contagem_linhas do estado incremental.
+    Ajusta aqui se seu spool_state usar chaves diferentes.
     """
-    if not isinstance(state, dict):
-        raise RuntimeError("spool_state não é dict; não dá para extrair resultados automaticamente.")
+    # chaves mais prováveis (mantendo compatibilidade)
+    if "arquivos_evento" in spool_state:
+        arquivos_evento = spool_state["arquivos_evento"]
+    elif "event_files" in spool_state:
+        arquivos_evento = spool_state["event_files"]
+    else:
+        raise RuntimeError(f"Não encontrei arquivos_evento no spool_state. Chaves: {list(spool_state.keys())}")
 
-    # arquivos_evento: tentativas de chave
-    files_keys = ["arquivos_evento", "files_by_event", "event_files", "paths_by_event", "arquivo_evento"]
-    cnt_keys = ["contagem_linhas", "line_counts", "counts_by_event", "qtd_linhas", "linhas_por_evento"]
-
-    arquivos_evento = None
-    contagem_linhas = None
-
-    for k in files_keys:
-        if k in state and isinstance(state[k], dict):
-            arquivos_evento = state[k]
-            break
-
-    for k in cnt_keys:
-        if k in state and isinstance(state[k], dict):
-            contagem_linhas = state[k]
-            break
-
-    if arquivos_evento is None:
-        raise RuntimeError(f"Não encontrei 'arquivos_evento' no spool_state. Chaves disponíveis: {list(state.keys())}")
-
-    if contagem_linhas is None:
-        # se não existir, cria contagem vazia (não quebra o app)
+    if "contagem_linhas" in spool_state:
+        contagem_linhas = spool_state["contagem_linhas"]
+    elif "line_counts" in spool_state:
+        contagem_linhas = spool_state["line_counts"]
+    else:
         contagem_linhas = {}
 
-    # normaliza Paths
-    arquivos_evento_norm: dict[str, Path] = {}
-    for ev, p in arquivos_evento.items():
-        try:
-            arquivos_evento_norm[str(ev)] = Path(p)
-        except Exception:
-            continue
+    # normaliza
+    arquivos_evento = {str(k): Path(v) for k, v in dict(arquivos_evento).items()}
+    contagem_linhas = {str(k): int(v) for k, v in dict(contagem_linhas).items()}
 
-    contagem_norm: dict[str, int] = {}
-    for ev, v in contagem_linhas.items():
-        try:
-            contagem_norm[str(ev)] = int(v)
-        except Exception:
-            contagem_norm[str(ev)] = 0
-
-    eventos = sorted(arquivos_evento_norm.keys())
-    return arquivos_evento_norm, contagem_norm, eventos
-
-
-def spool_processar(uploaded_file, tmp_dir: Path, eventos_alvo: set[str], prog=None, status=None):
-    """
-    Wrapper: usa incremental se existir; senão usa spool_por_evento legado.
-    Retorna (arquivos_evento, contagem_linhas, eventos)
-    """
-    if spool_init_state and spool_step:
-        st_state = _call_spool_init(uploaded_file, tmp_dir, eventos_alvo)
-        # roda até acabar
-        safe_guard = 0
-        while True:
-            safe_guard += 1
-            done, _info = _call_spool_step(st_state, progress_bar=prog, status_slot=status)
-            if done:
-                break
-            # evita loop infinito se implementação mudar
-            if safe_guard > 5_000_000:
-                raise RuntimeError("Spool incremental parece não finalizar (loop).")
-        return _extract_spool_results(st_state)
-
-    if spool_por_evento:
-        return spool_por_evento(
-            uploaded_file=uploaded_file,
-            tmp_dir=tmp_dir,
-            eventos_alvo=eventos_alvo,
-            progress_bar=prog,
-            status_slot=status,
-        )
-
-    raise RuntimeError("Nenhuma função de spool disponível (incremental ou legado).")
+    eventos = sorted(arquivos_evento.keys())
+    return arquivos_evento, contagem_linhas, eventos
 
 
 # =========================
@@ -214,27 +156,27 @@ def ss_init():
     st.session_state.setdefault("manad_processado", False)
 
     st.session_state.setdefault("tmp_dir", None)
-    st.session_state.setdefault("arquivos_evento", {})      # codigo -> str(path)
-    st.session_state.setdefault("contagem_linhas", {})      # codigo -> int
-    st.session_state.setdefault("eventos_encontrados", [])  # list[str]
+    st.session_state.setdefault("arquivos_evento", {})
+    st.session_state.setdefault("contagem_linhas", {})
+    st.session_state.setdefault("eventos_encontrados", [])
 
-    st.session_state.setdefault("df_rubricas", None)        # catálogo K150
-    st.session_state.setdefault("selected_codigos", set())  # set[str]
+    st.session_state.setdefault("df_rubricas", None)
+    st.session_state.setdefault("selected_codigos", set())
 
     # filtros
-    st.session_state.setdefault("filtro_ind_rubr", {"P"})          # P=provento (default)
-    st.session_state.setdefault("filtro_ind_base_ps", {"1", "2"})  # default 1 e 2
-
-    # ✅ regra jurídica 1/3 férias
-    st.session_state.setdefault("aplicar_regra_terco_ferias", False)
-    st.session_state.setdefault("rubricas_terco_ferias", set())
+    st.session_state.setdefault("filtro_ind_rubr", {"P"})
+    st.session_state.setdefault("filtro_ind_base_ps", {"1", "2"})
 
     # outputs
     st.session_state.setdefault("preview_result", None)
     st.session_state.setdefault("excel_bytes", None)
 
-    # spool incremental (se existir no seu projeto)
+    # spool incremental
     st.session_state.setdefault("spool_state", None)
+
+    # ✅ regra jurídica 1/3 férias
+    st.session_state.setdefault("aplicar_regra_terco_ferias", False)
+    st.session_state.setdefault("rubricas_terco_ferias", set())
 
 ss_init()
 
@@ -251,18 +193,18 @@ def reset_for_new_upload(new_fp: str):
     st.session_state.df_rubricas = None
     st.session_state.selected_codigos = set()
 
-    # ✅ reset regra 1/3 férias
-    st.session_state.aplicar_regra_terco_ferias = False
-    st.session_state.rubricas_terco_ferias = set()
-
     st.session_state.preview_result = None
     st.session_state.excel_bytes = None
 
     st.session_state.spool_state = None
 
+    # ✅ reseta a regra do 1/3 férias quando troca o arquivo
+    st.session_state.aplicar_regra_terco_ferias = False
+    st.session_state.rubricas_terco_ferias = set()
+
 
 # =========================
-# Etapa 0: Upload
+# Etapa 0: Upload (não processa pesado aqui)
 # =========================
 if not uploaded_file:
     st.info("Envie um arquivo MANAD para começar.")
@@ -274,10 +216,12 @@ if st.session_state.uploaded_fingerprint != fp:
 
 st.success("Arquivo carregado! ✅")
 st.caption("Você controla o processamento pelo botão (evita travar enquanto busca rubricas).")
+
 st.divider()
 
+
 # =========================
-# Etapa 1: Processar MANAD
+# Etapa 1: Processar MANAD (spool incremental)
 # =========================
 col1, col2 = st.columns([1, 2])
 with col1:
@@ -297,19 +241,31 @@ if processar:
     try:
         status.info("Separando o arquivo por evento (K150/K300/K050)...")
 
-        arquivos_evento, contagem_linhas, eventos = spool_processar(
+        # ✅ init incremental sem depender de kwargs exatos
+        st.session_state.spool_state = _spool_init_safe(
             uploaded_file=uploaded_file,
             tmp_dir=tmp_dir,
             eventos_alvo=eventos_alvo,
-            prog=prog,
-            status=status,
         )
+
+        # ✅ executa steps até finalizar
+        while True:
+            done, _info = _spool_step_safe(
+                st.session_state.spool_state,
+                progress_bar=prog,
+                status_slot=status,
+            )
+            if done:
+                break
+
+        # ✅ extrai resultados do estado
+        arquivos_evento, contagem_linhas, eventos = _extract_spool_results(st.session_state.spool_state)
 
         st.session_state.arquivos_evento = {k: str(v) for k, v in arquivos_evento.items()}
         st.session_state.contagem_linhas = {k: int(v) for k, v in contagem_linhas.items()}
         st.session_state.eventos_encontrados = list(eventos)
 
-        # carrega catálogo K150
+        # carrega catálogo K150 (se houver)
         p_k150 = st.session_state.arquivos_evento.get("K150")
         if p_k150 and Path(p_k150).exists():
             st.session_state.df_rubricas = ler_catalogo_k150(Path(p_k150))
@@ -330,8 +286,9 @@ if not st.session_state.manad_processado:
     st.info("Clique em **Processar MANAD** para liberar checklist, filtros, prévia e exportação.")
     st.stop()
 
+
 # =========================
-# Diagnóstico
+# Diagnóstico rápido
 # =========================
 cA, cB, cC = st.columns(3)
 with cA:
@@ -347,6 +304,7 @@ if not p_k300 or not Path(p_k300).exists():
     st.stop()
 
 st.divider()
+
 
 # =========================
 # Etapa 2: Seleção de Rubricas (Checklist + busca)
@@ -401,8 +359,9 @@ else:
 st.caption(f"✅ Rubricas selecionadas: {len(st.session_state.selected_codigos)}")
 st.divider()
 
+
 # =========================
-# Etapa 3: Filtros do K300
+# Etapa 3: Filtros do K300 (leve)
 # =========================
 st.subheader("3) Filtros do K300")
 
@@ -429,6 +388,7 @@ with colf2:
 
 st.divider()
 
+
 # =========================
 # Etapa 3.1: Regra jurídica 1/3 férias
 # =========================
@@ -446,9 +406,7 @@ if df_rubricas is not None and not df_rubricas.empty:
     tmp = df_rubricas.copy()
     tmp["COD_RUBRICA"] = tmp["COD_RUBRICA"].astype(str)
     tmp["DESC_RUBRICA"] = tmp["DESC_RUBRICA"].astype(str)
-    mask = tmp["DESC_RUBRICA"].str.upper().str.contains("1/3", na=False) & tmp["DESC_RUBRICA"].str.upper().str.contains(
-        "FER", na=False
-    )
+    mask = tmp["DESC_RUBRICA"].str.upper().str.contains("1/3", na=False) & tmp["DESC_RUBRICA"].str.upper().str.contains("FER", na=False)
     auto_terco = set(tmp.loc[mask, "COD_RUBRICA"].tolist())
 
 rubricas_terco_default = sorted(st.session_state.rubricas_terco_ferias or auto_terco)
@@ -463,8 +421,9 @@ st.session_state.rubricas_terco_ferias = set(map(str, rubricas_terco_sel))
 
 st.divider()
 
+
 # =========================
-# Etapa 4: Prévia
+# Etapa 4: Prévia (pesado) — botão
 # =========================
 st.subheader("4) Prévia (antes de gerar o Excel)")
 
@@ -528,8 +487,9 @@ else:
 
 st.divider()
 
+
 # =========================
-# Etapa 5: Gerar Excel
+# Etapa 5: Gerar Excel (pesado) — botão
 # =========================
 st.subheader("5) Gerar Excel interno")
 
