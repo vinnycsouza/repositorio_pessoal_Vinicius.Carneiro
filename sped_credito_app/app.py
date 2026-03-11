@@ -3,7 +3,7 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 
-from sped_parser import (
+from sped_credito_app.excel_parser import (
     ler_linhas_sped,
     separar_registros,
     df_registro,
