@@ -255,7 +255,7 @@ st.divider()
 st.subheader("2.1) Regra jurídica — 1/3 de férias")
 
 st.session_state.aplicar_regra_terco_ferias = st.checkbox(
-    "Aplicar regra: 1/3 de férias só pode ser recuperado até 09/2020 (inclusive)",
+    "Aplicar regra: 1/3 de férias só pode ser recuperado até 08/2020 (inclusive)",
     value=bool(st.session_state.aplicar_regra_terco_ferias),
     key="chk_terco_ferias",
 )
@@ -272,7 +272,7 @@ if df_rubricas is not None and not df_rubricas.empty:
 default_terco = sorted(st.session_state.rubricas_terco_ferias or auto_terco)
 
 rub_terco = st.multiselect(
-    "Quais rubricas são 1/3 de férias? (essas serão limitadas até 09/2020)",
+    "Quais rubricas são 1/3 de férias? (essas serão limitadas até 08/2020)",
     options=sorted(df_rubricas["COD_RUBRICA"].astype(str).tolist()) if df_rubricas is not None and not df_rubricas.empty else [],
     default=default_terco,
     key="ms_terco_ferias",
