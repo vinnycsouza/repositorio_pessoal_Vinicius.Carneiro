@@ -116,7 +116,7 @@ def gerar_previa_k300(
     allowed_ind_base_ps = set(map(str, allowed_ind_base_ps))
 
     rubricas_terco_ferias = set(map(str, rubricas_terco_ferias or set()))
-    LIMITE_TERCO = 202009  # AAAAMM
+    LIMITE_TERCO = 202008  # AAAAMM
 
     # mapa código -> descrição
     desc_map = {}

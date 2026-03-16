@@ -49,7 +49,7 @@ def _write_k300_filtrado_ordenado_com_colunas(
     allowed_ind_rubr = set(map(str, allowed_ind_rubr))
     allowed_ind_base_ps = set(map(str, allowed_ind_base_ps))
     rubricas_terco_ferias = set(map(str, rubricas_terco_ferias or set()))
-    LIMITE_TERCO = 202009  # AAAAMM
+    LIMITE_TERCO = 202008  # AAAAMM
 
     # Header: original + extras (em ordem por código)
     cods_ordenados = sorted(colnames_extra_por_cod.keys(), key=lambda c: (pd.to_numeric(c, errors="coerce"), c))

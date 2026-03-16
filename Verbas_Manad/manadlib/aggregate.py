@@ -52,7 +52,7 @@ def montar_pivot_dtcomp_por_rubrica(
     allowed_ind_base_ps = set(map(str, allowed_ind_base_ps))
 
     rubricas_terco_ferias = set(map(str, rubricas_terco_ferias or set()))
-    LIMITE_TERCO = 202009  # AAAAMM (09/2020)
+    LIMITE_TERCO = 202008  # AAAAMM (09/2020)
 
     acc: Dict[Tuple[str, str], Decimal] = {}
 
