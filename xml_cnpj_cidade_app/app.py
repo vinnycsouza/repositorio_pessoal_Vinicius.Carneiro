@@ -580,14 +580,14 @@ with st.sidebar:
         if carregado:
             st.session_state["estado_app"] = carregado
             st.success("Estado temporário recarregado.")
-            st.experimental_rerun()
+            
         else:
             st.info("Nenhum estado salvo encontrado.")
 
     if st.button("🧹 Resetar aplicação"):
         resetar_app()
         st.success("Aplicação resetada com sucesso.")
-        st.experimental_rerun()
+        
 
     st.markdown("---")
     st.write("**Arquivo de persistência temporária:**")
