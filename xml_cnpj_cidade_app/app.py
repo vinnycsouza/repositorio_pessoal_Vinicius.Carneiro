@@ -4,7 +4,6 @@ import zipfile
 import tempfile
 import hashlib
 from pathlib import Path
-from collections import Counter
 import xml.etree.ElementTree as ET
 
 import pandas as pd
@@ -15,11 +14,11 @@ import streamlit as st
 # CONFIGURAÇÃO GERAL
 # =========================================================
 st.set_page_config(
-    page_title="Relatório XML por CNPJ/Cidade/Tipo",
+    page_title="Relatório XML por Emitente e Destinatário",
     layout="wide"
 )
 
-st.title("📦 Relatório XML por CNPJ, Cidade e Tipo de Nota")
+st.title("📦 Relatório XML por Emitente, Destinatário, Cidade e Tipo de Nota")
 st.caption(
     "Processa pastas com ZIP/XML, acumula os dados entre processamentos "
     "e gera um relatório consolidado final."
@@ -29,7 +28,7 @@ st.caption(
 # =========================================================
 # ARQUIVO TEMPORÁRIO DE PERSISTÊNCIA
 # =========================================================
-APP_TEMP_DIR = Path(tempfile.gettempdir()) / "streamlit_xml_cnpj_cidade"
+APP_TEMP_DIR = Path(tempfile.gettempdir()) / "streamlit_xml_emit_dest"
 APP_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 STATE_FILE = APP_TEMP_DIR / "estado_xml_relatorio.json"
@@ -40,7 +39,7 @@ STATE_FILE = APP_TEMP_DIR / "estado_xml_relatorio.json"
 # =========================================================
 def estado_padrao():
     return {
-        "acumulado": {},  # dict serializável: chave_str -> quantidade
+        "acumulado": {},
         "pastas_processadas": [],
         "arquivos_processados": [],
         "total_xml_validos": 0,
@@ -87,7 +86,7 @@ def apagar_estado_disco():
 
 
 # =========================================================
-# FUNÇÕES AUXILIARES DE XML
+# XML
 # =========================================================
 NAMESPACE = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
 
@@ -99,11 +98,13 @@ def texto_tag(parent, tag, ns=NAMESPACE):
     return node.text.strip() if node is not None and node.text else ""
 
 
-def documento_emitente(emit, ns=NAMESPACE):
-    cnpj = texto_tag(emit, "CNPJ", ns)
+def obter_documento(pai, ns=NAMESPACE):
+    if pai is None:
+        return ""
+    cnpj = texto_tag(pai, "CNPJ", ns)
     if cnpj:
         return cnpj
-    cpf = texto_tag(emit, "CPF", ns)
+    cpf = texto_tag(pai, "CPF", ns)
     return cpf
 
 
@@ -116,9 +117,6 @@ def identificar_tipo_nota(root, ns=NAMESPACE):
     mod = texto_tag(ide, "mod", ns)
     tp_nf = texto_tag(ide, "tpNF", ns)
 
-    # 55 = NF-e
-    # 65 = NFC-e
-    # tpNF: 0 = Entrada | 1 = Saída
     if mod == "65":
         return "NFC-e", mod
 
@@ -132,55 +130,120 @@ def identificar_tipo_nota(root, ns=NAMESPACE):
     return "Não identificado", mod
 
 
+def extrair_emitente(root, ns=NAMESPACE):
+    emit = root.find(".//nfe:emit", ns)
+    ender_emit = emit.find("nfe:enderEmit", ns) if emit is not None else None
+
+    return {
+        "documento_emitente": obter_documento(emit, ns),
+        "nome_emitente": texto_tag(emit, "xNome", ns),
+        "cidade_emitente": texto_tag(ender_emit, "xMun", ns),
+        "uf_emitente": texto_tag(ender_emit, "UF", ns),
+    }
+
+
+def extrair_destinatario(root, ns=NAMESPACE):
+    dest = root.find(".//nfe:dest", ns)
+
+    if dest is None:
+        return {
+            "documento_destinatario": "",
+            "nome_destinatario": "",
+            "cidade_destinatario": "",
+            "uf_destinatario": "",
+        }
+
+    ender_dest = dest.find("nfe:enderDest", ns) if dest is not None else None
+
+    return {
+        "documento_destinatario": obter_documento(dest, ns),
+        "nome_destinatario": texto_tag(dest, "xNome", ns),
+        "cidade_destinatario": texto_tag(ender_dest, "xMun", ns),
+        "uf_destinatario": texto_tag(ender_dest, "UF", ns),
+    }
+
+
+def extrair_chave_nota(root, ns=NAMESPACE):
+    inf_nfe = root.find(".//nfe:infNFe", ns)
+    if inf_nfe is not None:
+        chave = inf_nfe.attrib.get("Id", "")
+        return chave.replace("NFe", "").strip()
+    return ""
+
+
 def extrair_dados_principais(xml_bytes):
     try:
         root = ET.fromstring(xml_bytes)
 
-        emit = root.find(".//nfe:emit", NAMESPACE)
-        ender_emit = emit.find("nfe:enderEmit", NAMESPACE) if emit is not None else None
-
-        doc_emitente = documento_emitente(emit, NAMESPACE)
-        cidade = texto_tag(ender_emit, "xMun", NAMESPACE)
-        uf = texto_tag(ender_emit, "UF", NAMESPACE)
         tipo_nota, modelo = identificar_tipo_nota(root, NAMESPACE)
+        emit = extrair_emitente(root, NAMESPACE)
+        dest = extrair_destinatario(root, NAMESPACE)
+        chave_nota = extrair_chave_nota(root, NAMESPACE)
 
         return {
             "tipo_nota": tipo_nota,
             "modelo": modelo,
-            "documento_emitente": doc_emitente,
-            "cidade_emitente": cidade,
-            "uf_emitente": uf,
+            "chave_nota": chave_nota,
+            "documento_emitente": emit["documento_emitente"],
+            "nome_emitente": emit["nome_emitente"],
+            "cidade_emitente": emit["cidade_emitente"],
+            "uf_emitente": emit["uf_emitente"],
+            "documento_destinatario": dest["documento_destinatario"],
+            "nome_destinatario": dest["nome_destinatario"],
+            "cidade_destinatario": dest["cidade_destinatario"],
+            "uf_destinatario": dest["uf_destinatario"],
             "erro": False,
         }
     except Exception:
         return {
             "tipo_nota": "",
             "modelo": "",
+            "chave_nota": "",
             "documento_emitente": "",
+            "nome_emitente": "",
             "cidade_emitente": "",
             "uf_emitente": "",
+            "documento_destinatario": "",
+            "nome_destinatario": "",
+            "cidade_destinatario": "",
+            "uf_destinatario": "",
             "erro": True,
         }
 
 
 # =========================================================
-# FUNÇÕES DE CONTROLE / CHAVES
+# CHAVES E LOG
 # =========================================================
-def chave_acumulado(tipo_nota, modelo, documento_emitente, cidade, uf):
-    return f"{tipo_nota}|||{modelo}|||{documento_emitente}|||{cidade}|||{uf}"
+def chave_acumulado(
+    tipo_nota,
+    modelo,
+    documento_emitente,
+    cidade_emitente,
+    uf_emitente,
+    documento_destinatario,
+    cidade_destinatario,
+    uf_destinatario,
+):
+    return "|||".join([
+        tipo_nota,
+        modelo,
+        documento_emitente,
+        cidade_emitente,
+        uf_emitente,
+        documento_destinatario,
+        cidade_destinatario,
+        uf_destinatario,
+    ])
 
 
 def split_chave_acumulado(chave):
     partes = chave.split("|||")
-    while len(partes) < 5:
+    while len(partes) < 8:
         partes.append("")
-    return partes[0], partes[1], partes[2], partes[3], partes[4]
+    return partes
 
 
 def fingerprint_arquivo(path_obj):
-    """
-    Cria uma identificação simples do arquivo para evitar reprocessamento.
-    """
     stat = path_obj.stat()
     base = f"{path_obj.resolve()}|{stat.st_size}|{int(stat.st_mtime)}"
     return hashlib.md5(base.encode("utf-8")).hexdigest()
@@ -188,8 +251,8 @@ def fingerprint_arquivo(path_obj):
 
 def adicionar_log(msg):
     st.session_state["estado_app"]["log"].append(msg)
-    if len(st.session_state["estado_app"]["log"]) > 200:
-        st.session_state["estado_app"]["log"] = st.session_state["estado_app"]["log"][-200:]
+    if len(st.session_state["estado_app"]["log"]) > 300:
+        st.session_state["estado_app"]["log"] = st.session_state["estado_app"]["log"][-300:]
 
 
 # =========================================================
@@ -202,9 +265,9 @@ def processar_xml_bytes(xml_bytes):
         return None
 
     if (
-        dados["documento_emitente"]
+        dados["tipo_nota"]
+        and dados["documento_emitente"]
         and dados["cidade_emitente"]
-        and dados["tipo_nota"]
     ):
         return dados
 
@@ -218,6 +281,9 @@ def atualizar_acumulado(dados):
         dados["documento_emitente"],
         dados["cidade_emitente"],
         dados["uf_emitente"],
+        dados["documento_destinatario"],
+        dados["cidade_destinatario"],
+        dados["uf_destinatario"],
     )
 
     acumulado = st.session_state["estado_app"]["acumulado"]
@@ -254,7 +320,6 @@ def processar_pasta(caminho_pasta):
         raise ValueError("Nenhum arquivo ZIP ou XML foi encontrado na pasta.")
 
     progresso = st.progress(0, text="Iniciando processamento...")
-    status = st.empty()
 
     xml_validos = 0
     erros = 0
@@ -265,9 +330,6 @@ def processar_pasta(caminho_pasta):
 
     indice = 0
 
-    # -------------------------
-    # XMLs soltos
-    # -------------------------
     for xml_file in arquivos_xml:
         indice += 1
         progresso.progress(
@@ -297,9 +359,6 @@ def processar_pasta(caminho_pasta):
             erros += 1
             adicionar_log(f"Erro XML solto {xml_file}: {e}")
 
-    # -------------------------
-    # ZIPs
-    # -------------------------
     for zip_file in arquivos_zip:
         indice += 1
         progresso.progress(
@@ -339,7 +398,6 @@ def processar_pasta(caminho_pasta):
             adicionar_log(f"Erro ZIP {zip_file}: {e}")
 
     progresso.progress(1.0, text="Processamento concluído.")
-    status.success("Pasta concluída com sucesso.")
 
     estado["pastas_processadas"].append(str(pasta.resolve()))
     estado["arquivos_processados"] = list(arquivos_processados_set)
@@ -365,20 +423,33 @@ def processar_pasta(caminho_pasta):
 
 
 # =========================================================
-# DATAFRAMES E RELATÓRIO
+# DATAFRAMES E EXCEL
 # =========================================================
 def gerar_dataframe_consolidado():
     acumulado = st.session_state["estado_app"]["acumulado"]
 
     linhas = []
     for chave, quantidade in acumulado.items():
-        tipo_nota, modelo, documento, cidade, uf = split_chave_acumulado(chave)
+        (
+            tipo_nota,
+            modelo,
+            documento_emitente,
+            cidade_emitente,
+            uf_emitente,
+            documento_destinatario,
+            cidade_destinatario,
+            uf_destinatario,
+        ) = split_chave_acumulado(chave)
+
         linhas.append({
             "Tipo de Nota": tipo_nota,
             "Modelo": modelo,
-            "Documento Emitente": documento,
-            "Cidade": cidade,
-            "UF": uf,
+            "Documento Emitente": documento_emitente,
+            "Cidade Emitente": cidade_emitente,
+            "UF Emitente": uf_emitente,
+            "Documento Destinatário": documento_destinatario,
+            "Cidade Destinatário": cidade_destinatario,
+            "UF Destinatário": uf_destinatario,
             "Quantidade XML": quantidade,
         })
 
@@ -388,8 +459,14 @@ def gerar_dataframe_consolidado():
         return df
 
     df = df.sort_values(
-        by=["Tipo de Nota", "Documento Emitente", "Cidade", "UF"],
-        ascending=[True, True, True, True]
+        by=[
+            "Tipo de Nota",
+            "Documento Emitente",
+            "Cidade Emitente",
+            "Documento Destinatário",
+            "Cidade Destinatário",
+        ],
+        ascending=[True, True, True, True, True]
     ).reset_index(drop=True)
 
     return df
@@ -399,8 +476,10 @@ def gerar_resumos(df):
     if df.empty:
         return {
             "resumo_tipo": pd.DataFrame(),
-            "resumo_documento": pd.DataFrame(),
-            "resumo_cidade": pd.DataFrame(),
+            "resumo_emitente": pd.DataFrame(),
+            "resumo_destinatario": pd.DataFrame(),
+            "resumo_cidade_emitente": pd.DataFrame(),
+            "resumo_cidade_destinatario": pd.DataFrame(),
             "estatisticas": pd.DataFrame(),
         }
 
@@ -410,14 +489,26 @@ def gerar_resumos(df):
         .sort_values("Quantidade XML", ascending=False)
     )
 
-    resumo_documento = (
+    resumo_emitente = (
         df.groupby(["Tipo de Nota", "Documento Emitente"], as_index=False)["Quantidade XML"]
         .sum()
         .sort_values(["Tipo de Nota", "Quantidade XML"], ascending=[True, False])
     )
 
-    resumo_cidade = (
-        df.groupby(["Tipo de Nota", "Cidade", "UF"], as_index=False)["Quantidade XML"]
+    resumo_destinatario = (
+        df.groupby(["Tipo de Nota", "Documento Destinatário"], as_index=False)["Quantidade XML"]
+        .sum()
+        .sort_values(["Tipo de Nota", "Quantidade XML"], ascending=[True, False])
+    )
+
+    resumo_cidade_emitente = (
+        df.groupby(["Tipo de Nota", "Cidade Emitente", "UF Emitente"], as_index=False)["Quantidade XML"]
+        .sum()
+        .sort_values(["Tipo de Nota", "Quantidade XML"], ascending=[True, False])
+    )
+
+    resumo_cidade_destinatario = (
+        df.groupby(["Tipo de Nota", "Cidade Destinatário", "UF Destinatário"], as_index=False)["Quantidade XML"]
         .sum()
         .sort_values(["Tipo de Nota", "Quantidade XML"], ascending=[True, False])
     )
@@ -430,14 +521,18 @@ def gerar_resumos(df):
         {"Indicador": "Total de erros", "Valor": int(estado["total_erros"])},
         {"Indicador": "Total de ZIPs lidos", "Valor": int(estado["total_arquivos_zip"])},
         {"Indicador": "Total de XML soltos lidos", "Valor": int(estado["total_arquivos_xml_soltos"])},
-        {"Indicador": "Total de documentos emitentes distintos", "Valor": int(df["Documento Emitente"].nunique())},
-        {"Indicador": "Total de cidades distintas", "Valor": int(df["Cidade"].nunique())},
+        {"Indicador": "Total de emitentes distintos", "Valor": int(df["Documento Emitente"].replace("", pd.NA).dropna().nunique())},
+        {"Indicador": "Total de destinatários distintos", "Valor": int(df["Documento Destinatário"].replace("", pd.NA).dropna().nunique())},
+        {"Indicador": "Total de cidades de emitente distintas", "Valor": int(df["Cidade Emitente"].replace("", pd.NA).dropna().nunique())},
+        {"Indicador": "Total de cidades de destinatário distintas", "Valor": int(df["Cidade Destinatário"].replace("", pd.NA).dropna().nunique())},
     ])
 
     return {
         "resumo_tipo": resumo_tipo,
-        "resumo_documento": resumo_documento,
-        "resumo_cidade": resumo_cidade,
+        "resumo_emitente": resumo_emitente,
+        "resumo_destinatario": resumo_destinatario,
+        "resumo_cidade_emitente": resumo_cidade_emitente,
+        "resumo_cidade_destinatario": resumo_cidade_destinatario,
         "estatisticas": estatisticas,
     }
 
@@ -449,8 +544,10 @@ def gerar_excel_relatorio(df):
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Consolidado")
         resumos["resumo_tipo"].to_excel(writer, index=False, sheet_name="Resumo por Tipo")
-        resumos["resumo_documento"].to_excel(writer, index=False, sheet_name="Resumo por Documento")
-        resumos["resumo_cidade"].to_excel(writer, index=False, sheet_name="Resumo por Cidade")
+        resumos["resumo_emitente"].to_excel(writer, index=False, sheet_name="Resumo Emitente")
+        resumos["resumo_destinatario"].to_excel(writer, index=False, sheet_name="Resumo Destinatário")
+        resumos["resumo_cidade_emitente"].to_excel(writer, index=False, sheet_name="Cidade Emitente")
+        resumos["resumo_cidade_destinatario"].to_excel(writer, index=False, sheet_name="Cidade Destinatário")
         resumos["estatisticas"].to_excel(writer, index=False, sheet_name="Estatísticas")
 
     output.seek(0)
@@ -483,14 +580,14 @@ with st.sidebar:
         if carregado:
             st.session_state["estado_app"] = carregado
             st.success("Estado temporário recarregado.")
-            st.rerun()
+            st.experimental_rerun()
         else:
             st.info("Nenhum estado salvo encontrado.")
 
     if st.button("🧹 Resetar aplicação"):
         resetar_app()
         st.success("Aplicação resetada com sucesso.")
-        st.rerun()
+        st.experimental_rerun()
 
     st.markdown("---")
     st.write("**Arquivo de persistência temporária:**")
@@ -498,7 +595,7 @@ with st.sidebar:
 
 
 # =========================================================
-# FORMULÁRIO DE PROCESSAMENTO
+# PROCESSAR PASTA
 # =========================================================
 st.subheader("1) Processar uma pasta")
 
@@ -529,7 +626,7 @@ if enviar:
 
 
 # =========================================================
-# PAINEL DE INDICADORES
+# PAINEL
 # =========================================================
 st.subheader("2) Painel resumido")
 
@@ -541,7 +638,7 @@ col4.metric("Pastas processadas", len(estado["pastas_processadas"]))
 
 
 # =========================================================
-# TABELAS DE RESUMO
+# TABELAS
 # =========================================================
 df_consolidado = gerar_dataframe_consolidado()
 resumos = gerar_resumos(df_consolidado)
@@ -560,7 +657,7 @@ else:
 
 
 # =========================================================
-# PASTAS PROCESSADAS
+# EXPANDERS
 # =========================================================
 with st.expander("Ver pastas processadas"):
     if estado["pastas_processadas"]:
@@ -569,10 +666,6 @@ with st.expander("Ver pastas processadas"):
     else:
         st.write("Nenhuma pasta processada ainda.")
 
-
-# =========================================================
-# LOG
-# =========================================================
 with st.expander("Ver log da sessão"):
     if estado["log"]:
         for linha in estado["log"][-100:]:
@@ -593,7 +686,7 @@ else:
     st.download_button(
         label="📥 Baixar relatório Excel",
         data=excel_buffer,
-        file_name="relatorio_xml_cnpj_cidade_tipo.xlsx",
+        file_name="relatorio_xml_emitente_destinatario.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
