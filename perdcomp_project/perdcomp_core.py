@@ -7,8 +7,37 @@ import pdfplumber
 
 
 # =========================
-# Utilitários de texto
+# Utilitários
 # =========================
+
+MESES_MAP = {
+    "janeiro": 1,
+    "jan": 1,
+    "fevereiro": 2,
+    "fev": 2,
+    "março": 3,
+    "marco": 3,
+    "mar": 3,
+    "abril": 4,
+    "abr": 4,
+    "maio": 5,
+    "mai": 5,
+    "junho": 6,
+    "jun": 6,
+    "julho": 7,
+    "jul": 7,
+    "agosto": 8,
+    "ago": 8,
+    "setembro": 9,
+    "set": 9,
+    "outubro": 10,
+    "out": 10,
+    "novembro": 11,
+    "nov": 11,
+    "dezembro": 12,
+    "dez": 12,
+}
+
 
 def normalize_text(text: str) -> str:
     if not text:
@@ -18,35 +47,33 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
-    text_parts: List[str] = []
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            text_parts.append(page_text)
-    return normalize_text("\n".join(text_parts))
+def parse_brl_number(value) -> Optional[float]:
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    text = text.replace("R$", "").strip()
+    text = text.replace(".", "").replace(",", ".")
+    text = re.sub(r"[^0-9.\-]", "", text)
+
+    if not text:
+        return None
+
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def extract_first(pattern: str, text: str, flags: int = re.IGNORECASE) -> Optional[str]:
     match = re.search(pattern, text, flags)
     return match.group(1).strip() if match else None
-
-
-def parse_brl_number(value: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-
-    cleaned = value.strip()
-    cleaned = cleaned.replace(".", "").replace(",", ".")
-    cleaned = re.sub(r"[^0-9.\-]", "", cleaned)
-
-    if not cleaned:
-        return None
-
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
 
 
 def quarter_sort_key(q: Optional[str]) -> int:
@@ -80,39 +107,10 @@ def month_to_quarter(month_value) -> str:
         month_num = int(month_value)
     else:
         raw = str(month_value).strip().lower()
-
-        month_map = {
-            "janeiro": 1,
-            "jan": 1,
-            "fevereiro": 2,
-            "fev": 2,
-            "março": 3,
-            "marco": 3,
-            "mar": 3,
-            "abril": 4,
-            "abr": 4,
-            "maio": 5,
-            "mai": 5,
-            "junho": 6,
-            "jun": 6,
-            "julho": 7,
-            "jul": 7,
-            "agosto": 8,
-            "ago": 8,
-            "setembro": 9,
-            "set": 9,
-            "outubro": 10,
-            "out": 10,
-            "novembro": 11,
-            "nov": 11,
-            "dezembro": 12,
-            "dez": 12,
-        }
-
         if raw.isdigit():
             month_num = int(raw)
-        elif raw in month_map:
-            month_num = month_map[raw]
+        elif raw in MESES_MAP:
+            month_num = MESES_MAP[raw]
         else:
             raise ValueError(f"Mês inválido no levantamento: {month_value}")
 
@@ -128,9 +126,32 @@ def month_to_quarter(month_value) -> str:
     raise ValueError(f"Mês inválido no levantamento: {month_value}")
 
 
+def is_year_value(value) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return bool(re.fullmatch(r"\d{4}", text))
+
+
+def is_month_value(value) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    return text in MESES_MAP
+
+
 # =========================
-# Extração PER/DCOMP
+# PDF / PERDCOMP
 # =========================
+
+def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
+    text_parts: List[str] = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text() or ""
+            text_parts.append(page_text)
+    return normalize_text("\n".join(text_parts))
+
 
 def identify_credit_type(text: str) -> str:
     upper = text.upper()
@@ -240,10 +261,6 @@ def process_phase1_pdfs(uploaded_pdfs) -> pd.DataFrame:
     return df
 
 
-# =========================
-# Exportação Fase 1
-# =========================
-
 def export_phase1_excel(df: pd.DataFrame) -> io.BytesIO:
     output = io.BytesIO()
 
@@ -255,54 +272,107 @@ def export_phase1_excel(df: pd.DataFrame) -> io.BytesIO:
 
 
 # =========================
-# Leitura do levantamento
+# LEVANTAMENTO - leitura da aba Crédito
 # =========================
+
+def find_credit_sheet(excel_file) -> str:
+    xls = pd.ExcelFile(excel_file)
+    for sheet_name in xls.sheet_names:
+        if str(sheet_name).strip().lower() == "credito":
+            return sheet_name
+    raise ValueError("Não foi encontrada a aba 'Credito' no arquivo de levantamento.")
+
 
 def read_levantamento_excel(uploaded_excel) -> pd.DataFrame:
-    df = pd.read_excel(uploaded_excel)
+    """
+    Lê a aba 'Credito' no padrão:
+    Coluna 1: Ano ou Mês
+    Coluna 2: Exclusão ICMS ST
+    Coluna 3: Credito - PIS
+    Coluna 4: Credito - Cofins
+    """
+    sheet_name = find_credit_sheet(uploaded_excel)
+    uploaded_excel.seek(0)
 
-    # Padronização leve de nomes
-    rename_map = {}
-    for col in df.columns:
-        lower = str(col).strip().lower()
+    raw = pd.read_excel(uploaded_excel, sheet_name=sheet_name, header=0)
 
-        if lower == "ano":
-            rename_map[col] = "Ano"
-        elif lower in ("mês", "mes"):
-            rename_map[col] = "Mês"
-        elif lower in ("crédito pis", "credito pis", "pis"):
-            rename_map[col] = "Crédito PIS"
-        elif lower in ("crédito cofins", "credito cofins", "cofins"):
-            rename_map[col] = "Crédito COFINS"
-
-    df = df.rename(columns=rename_map)
-
-    required = ["Ano", "Mês", "Crédito PIS", "Crédito COFINS"]
-    missing = [c for c in required if c not in df.columns]
-
-    if missing:
+    if raw.shape[1] < 4:
         raise ValueError(
-            f"O levantamento deve conter as colunas: {required}. Ausentes: {missing}"
+            "A aba 'Credito' precisa ter pelo menos 4 colunas: "
+            "coluna de Ano/Mês, Exclusão ICMS ST, Credito - PIS e Credito - Cofins."
         )
 
-    return df.copy()
+    raw = raw.iloc[:, :4].copy()
+    raw.columns = ["AnoMes", "Exclusão ICMS ST", "Crédito PIS", "Crédito COFINS"]
+
+    registros = []
+    ano_atual = None
+
+    for _, row in raw.iterrows():
+        valor_anomes = row["AnoMes"]
+
+        if pd.isna(valor_anomes):
+            continue
+
+        texto = str(valor_anomes).strip()
+
+        if not texto:
+            continue
+
+        texto_lower = texto.lower()
+
+        if texto_lower in ("valor credito", "valor crédito", "total", "totais"):
+            continue
+
+        if is_year_value(texto):
+            ano_atual = int(texto)
+            continue
+
+        if is_month_value(texto):
+            if ano_atual is None:
+                raise ValueError(
+                    f"Foi encontrado o mês '{texto}' antes de um ano válido na aba Crédito."
+                )
+
+            registros.append(
+                {
+                    "Ano": ano_atual,
+                    "Mês": texto.title(),
+                    "Exclusão ICMS ST": parse_brl_number(row["Exclusão ICMS ST"]) or 0.0,
+                    "Crédito PIS": parse_brl_number(row["Crédito PIS"]) or 0.0,
+                    "Crédito COFINS": parse_brl_number(row["Crédito COFINS"]) or 0.0,
+                }
+            )
+
+    df = pd.DataFrame(registros)
+
+    if df.empty:
+        raise ValueError(
+            "Nenhum registro mensal foi identificado na aba 'Credito'. "
+            "Verifique se o layout segue o padrão esperado."
+        )
+
+    return df
 
 
 # =========================
-# Fase 2
+# FASE 2
 # =========================
 
 def normalize_levantamento(df_levantamento: pd.DataFrame) -> pd.DataFrame:
     df = df_levantamento.copy()
 
     df["Ano"] = pd.to_numeric(df["Ano"], errors="coerce").astype("Int64")
+    df["Exclusão ICMS ST"] = pd.to_numeric(df["Exclusão ICMS ST"], errors="coerce").fillna(0.0)
     df["Crédito PIS"] = pd.to_numeric(df["Crédito PIS"], errors="coerce").fillna(0.0)
     df["Crédito COFINS"] = pd.to_numeric(df["Crédito COFINS"], errors="coerce").fillna(0.0)
 
     df["Trimestre"] = df["Mês"].apply(month_to_quarter)
 
     grouped = (
-        df.groupby(["Ano", "Trimestre"], as_index=False)[["Crédito PIS", "Crédito COFINS"]]
+        df.groupby(["Ano", "Trimestre"], as_index=False)[
+            ["Exclusão ICMS ST", "Crédito PIS", "Crédito COFINS"]
+        ]
         .sum()
     )
 
@@ -405,6 +475,7 @@ def build_phase2_outputs(
     )
 
     numeric_cols = [
+        "Exclusão ICMS ST",
         "Crédito PIS",
         "Crédito COFINS",
         "Crédito Total Levantado",
@@ -435,13 +506,8 @@ def build_phase2_outputs(
     ).reset_index(drop=True)
 
     df_final = df_final.drop(columns=["QuarterOrder"])
-
     return df_levant_trim, df_final
 
-
-# =========================
-# Exportação Fase 2
-# =========================
 
 def export_phase2_excel(
     df_levantamento_trim: pd.DataFrame,
