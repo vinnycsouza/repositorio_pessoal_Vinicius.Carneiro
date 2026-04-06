@@ -1,81 +1,125 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
 
 
-HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
-HEADER_FONT = Font(color="FFFFFF", bold=True)
-THIN = Side(style="thin", color="D9E1F2")
-BORDER = Border(bottom=THIN)
-ALERT_FILL = PatternFill("solid", fgColor="FCE4D6")
-REVIEW_FILL = PatternFill("solid", fgColor="FFF2CC")
-OK_FILL = PatternFill("solid", fgColor="E2F0D9")
+def _safe_autofit(writer: pd.ExcelWriter, df: pd.DataFrame, sheet_name: str) -> None:
+    ws = writer.sheets[sheet_name]
+    for idx, col in enumerate(df.columns, start=1):
+        max_len = len(str(col))
+        if not df.empty:
+            series_as_str = df[col].astype(str).fillna("")
+            max_len = max(max_len, series_as_str.map(len).max())
+        ws.column_dimensions[chr(64 + idx) if idx <= 26 else "A"].width = min(max_len + 2, 40)
 
 
+def _set_column_widths_openpyxl(writer: pd.ExcelWriter, df: pd.DataFrame, sheet_name: str) -> None:
+    ws = writer.sheets[sheet_name]
+    from openpyxl.utils import get_column_letter
 
-def autosize(ws):
-    widths = {}
-    for row in ws.iter_rows():
-        for cell in row:
-            val = "" if cell.value is None else str(cell.value)
-            widths[cell.column] = min(max(widths.get(cell.column, 0), len(val) + 2), 40)
-    for col_idx, width in widths.items():
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
-
-
-
-def write_df(ws, df: pd.DataFrame, start_row: int = 1):
-    for col_idx, name in enumerate(df.columns, start=1):
-        cell = ws.cell(row=start_row, column=col_idx, value=name)
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = BORDER
-    for row_idx, row in enumerate(df.itertuples(index=False), start=start_row + 1):
-        for col_idx, value in enumerate(row, start=1):
-            ws.cell(row=row_idx, column=col_idx, value=value)
+    for i, col in enumerate(df.columns, start=1):
+        max_len = len(str(col))
+        if not df.empty:
+            values = df[col].astype(str).fillna("")
+            max_len = max(max_len, values.map(len).max())
+        ws.column_dimensions[get_column_letter(i)].width = min(max_len + 2, 40)
 
 
+def _build_resumo_df(report: pd.DataFrame, resumo: dict[str, Any]) -> pd.DataFrame:
+    linhas = [
+        ["Itens analisados", resumo.get("itens_analisados", len(report))],
+        ["Potencial alto", resumo.get("itens_potencial_alto", 0)],
+        ["Potencial moderado", resumo.get("itens_potencial_moderado", 0)],
+        ["Revisão manual", resumo.get("itens_revisao_manual", 0)],
+        ["Sem match", resumo.get("itens_sem_match", 0)],
+        ["Crédito total estimado", resumo.get("credito_total_estimado", 0.0)],
+    ]
 
-def export_report(report: pd.DataFrame, resumo: dict, output_path: Path) -> Path:
-    wb = Workbook()
-    ws_resumo = wb.active
-    ws_resumo.title = "Resumo"
+    if "Valor de ICMS Final" in report.columns:
+        linhas.append(["Linhas com Valor de ICMS Final", int((pd.to_numeric(report["Valor de ICMS Final"], errors="coerce").fillna(0) != 0).sum())])
 
-    ws_resumo["A1"] = "Levantamento de possível exclusão indevida do ICMS da base de PIS/COFINS"
-    ws_resumo["A1"].font = Font(bold=True, size=12)
-    ws_resumo["A3"] = "Itens analisados"
-    ws_resumo["B3"] = resumo["itens_analisados"]
-    ws_resumo["A4"] = "Potencial alto"
-    ws_resumo["B4"] = resumo["itens_potencial_alto"]
-    ws_resumo["A5"] = "Revisão manual"
-    ws_resumo["B5"] = resumo["itens_revisao_manual"]
-    ws_resumo["A6"] = "Sem cruzamento com ICMS/IPI"
-    ws_resumo["B6"] = resumo["itens_sem_match"]
-    ws_resumo["A7"] = "Crédito total estimado"
-    ws_resumo["B7"] = resumo["credito_total_estimado"]
-    ws_resumo["B7"].number_format = 'R$ #,##0.00'
+    if "Base de ICMS Final" in report.columns:
+        linhas.append(["Linhas com Base de ICMS Final", int((pd.to_numeric(report["Base de ICMS Final"], errors="coerce").fillna(0) != 0).sum())])
 
-    ws_resumo["A9"] = "Observação"
-    ws_resumo["B9"] = (
-        "O relatório é indiciário e deve ser validado com a tese aplicada ao caso, natureza das operações, "
-        "CSTs, CFOPs, documentos de entrada/saída e tratamento de ICMS-ST."
-    )
-    ws_resumo["B9"].alignment = Alignment(wrap_text=True)
-    ws_resumo.column_dimensions["A"].width = 28
-    ws_resumo.column_dimensions["B"].width = 95
+    if "Cruzou com ICMS/IPI" in report.columns:
+        linhas.append(["Join Sim", int((report["Cruzou com ICMS/IPI"].astype(str) == "Sim").sum())])
+        linhas.append(["Join Não", int((report["Cruzou com ICMS/IPI"].astype(str) == "Não").sum())])
 
-    ws_main = wb.create_sheet("Oportunidades")
-    write_df(ws_main, report)
+    return pd.DataFrame(linhas, columns=["Indicador", "Valor"])
 
-    currency_cols = {
+
+def _prepare_oportunidades(report: pd.DataFrame) -> pd.DataFrame:
+    if "Nível de Oportunidade" not in report.columns:
+        return report.copy()
+
+    oportunidades = report[
+        report["Nível de Oportunidade"].isin(["Potencial alto", "Potencial moderado"])
+    ].copy()
+
+    colunas_prioridade = [
+        "Empresa",
+        "CNPJ",
+        "Mês",
+        "Ano",
+        "Chave",
+        "Número da Nota",
+        "Série",
+        "Item",
+        "Código do Produto",
+        "Descrição",
+        "CFOP",
+        "Operação",
         "Valor do Item",
-        "Valor de ICMS",
+        "Base de ICMS no PIS",
+        "Valor de ICMS no PIS",
+        "Base de ICMS no ICMS/IPI",
+        "Valor de ICMS no ICMS/IPI",
+        "Base de ICMS Final",
+        "Valor de ICMS Final",
+        "Base de ICMS ST",
+        "Valor de ICMS ST",
+        "Origem da Base de ICMS",
+        "Origem do Valor de ICMS",
+        "Base de PIS Informada",
+        "Base de COFINS Informada",
+        "Base Esperada sem ICMS",
+        "Diferença Base PIS",
+        "Diferença Base COFINS",
+        "Crédito PIS Estimado",
+        "Crédito COFINS Estimado",
+        "Crédito Total Estimado",
+        "Nível de Oportunidade",
+        "Motivo",
+        "Possui ST",
+        "Cruzou com ICMS/IPI",
+        "Documento de Entrada",
+    ]
+
+    colunas_existentes = [c for c in colunas_prioridade if c in oportunidades.columns]
+    outras = [c for c in oportunidades.columns if c not in colunas_existentes]
+    return oportunidades[colunas_existentes + outras]
+
+
+def export_report(report: pd.DataFrame, resumo: dict[str, Any], output_path: str | Path) -> Path:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Garante que estamos exportando exatamente o dataframe que está na tela
+    report_export = report.copy()
+
+    # Tenta converter colunas numéricas sem destruir texto
+    colunas_numericas_preferenciais = [
+        "Valor do Item",
+        "Base de ICMS no PIS",
+        "Valor de ICMS no PIS",
+        "Base de ICMS no ICMS/IPI",
+        "Valor de ICMS no ICMS/IPI",
+        "Base de ICMS Final",
+        "Valor de ICMS Final",
+        "Base de ICMS ST",
         "Valor de ICMS ST",
         "Base de PIS Informada",
         "Base de COFINS Informada",
@@ -85,34 +129,22 @@ def export_report(report: pd.DataFrame, resumo: dict, output_path: Path) -> Path
         "Crédito PIS Estimado",
         "Crédito COFINS Estimado",
         "Crédito Total Estimado",
-    }
-    header_positions = {cell.value: cell.column for cell in ws_main[1]}
-    for name, idx in header_positions.items():
-        if name in currency_cols:
-            for r in range(2, ws_main.max_row + 1):
-                ws_main.cell(r, idx).number_format = 'R$ #,##0.00'
+    ]
 
-    if "Nível de Oportunidade" in header_positions:
-        idx = header_positions["Nível de Oportunidade"]
-        for r in range(2, ws_main.max_row + 1):
-            value = ws_main.cell(r, idx).value
-            row_fill = OK_FILL if value == "Sem oportunidade" else REVIEW_FILL
-            if value == "Potencial alto":
-                row_fill = ALERT_FILL
-            for c in range(1, ws_main.max_column + 1):
-                ws_main.cell(r, c).fill = row_fill
+    for col in colunas_numericas_preferenciais:
+        if col in report_export.columns:
+            report_export[col] = pd.to_numeric(report_export[col], errors="coerce")
 
-    autosize(ws_main)
+    resumo_df = _build_resumo_df(report_export, resumo)
+    oportunidades_df = _prepare_oportunidades(report_export)
 
-    ws_revisao = wb.create_sheet("Revisão Manual")
-    revisao = report[report["Nível de Oportunidade"] == "Revisão manual"].copy()
-    write_df(ws_revisao, revisao if not revisao.empty else pd.DataFrame({"Mensagem": ["Nenhum item em revisão manual."]}))
-    autosize(ws_revisao)
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        resumo_df.to_excel(writer, sheet_name="Resumo", index=False)
+        report_export.to_excel(writer, sheet_name="Relatorio Completo", index=False)
+        oportunidades_df.to_excel(writer, sheet_name="Oportunidades", index=False)
 
-    ws_div = wb.create_sheet("Sem Cruzamento")
-    sem_cruzamento = report[report["Cruzou com ICMS/IPI"] == "Não"].copy()
-    write_df(ws_div, sem_cruzamento if not sem_cruzamento.empty else pd.DataFrame({"Mensagem": ["Todos os itens localizaram correspondência."]}))
-    autosize(ws_div)
+        _set_column_widths_openpyxl(writer, resumo_df, "Resumo")
+        _set_column_widths_openpyxl(writer, report_export, "Relatorio Completo")
+        _set_column_widths_openpyxl(writer, oportunidades_df, "Oportunidades")
 
-    wb.save(output_path)
     return output_path
