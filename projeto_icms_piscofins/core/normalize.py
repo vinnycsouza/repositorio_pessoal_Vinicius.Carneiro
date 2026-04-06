@@ -2,111 +2,117 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .utils import IND_OPER_MAP, coerce_number, normalize_cnpj, normalize_key
+from .utils import IND_OPER_MAP, coerce_number, normalize_cnpj, normalize_key, normalize_text
 
 
-ICMS_ITEM_MAP = {
-    "Mês": "mes",
-    "Ano": "ano",
-    "CNPJ": "cnpj_matriz",
-    "Empresa": "empresa",
-    "Participante(C100)": "participante",
-    "Número da Nota(C100)": "numero_nota",
-    "Modelo(C100)": "modelo",
-    "Série(C100)": "serie",
-    "Chave de Acesso(C100)": "chave",
-    "Indicador de Operação(C100)": "ind_oper",
-    "C170 - Fixo": "reg_c170",
-    "Numeração Sequencial": "item",
-    "Código do Produto": "cod_produto",
-    "Descrição Complementar": "descricao",
-    "Quantidade": "quantidade",
-    "Valor Total do Produto": "valor_item",
-    "Valor de Desconto": "valor_desconto",
-    "CST de ICMS": "cst_icms",
-    "CFOP": "cfop",
-    "Base de Icms": "bc_icms",
-    "Valor de Icms": "vl_icms",
-    "Base de Icms ST": "bc_icms_st",
-    "Valor de Icms ST": "vl_icms_st",
-    "CST de Pis": "cst_pis",
-    "Base de Pis": "bc_pis_icms",
-    "Valor de Pis": "vl_pis_icms",
-    "CST de Cofins": "cst_cofins",
-    "Base de Cofins": "bc_cofins_icms",
-    "Valor de Cofins": "vl_cofins_icms",
-}
-
-PISCOFINS_ITEM_MAP = {
-    "Mês": "mes",
-    "Ano": "ano",
-    "CNPJ": "cnpj_matriz",
-    "Empresa": "empresa",
-    "CNPJ Estabelecimento(C010)": "cnpj_estabelecimento",
-    "Participante(C100)": "participante",
-    "Número da Nota(C100)": "numero_nota",
-    "Modelo(C100)": "modelo",
-    "Série(C100)": "serie",
-    "Chave(C100)": "chave",
-    "Indicador de Operação(C100)": "ind_oper",
-    "Situação(C100)": "situacao",
-    "Valor(C100)": "valor_nota",
-    "C170 - Fixo": "reg_c170",
-    "Numeração Sequencial": "item",
-    "Código do Produto": "cod_produto",
-    "Descrição Complementar": "descricao",
-    "QTD": "quantidade",
-    "Valor Total do Produto": "valor_item",
-    "Valor de Desconto": "valor_desconto",
-    "CST de ICMS": "cst_icms",
-    "CFOP": "cfop",
-    "Base de Icms": "bc_icms",
-    "Valor de Icms": "vl_icms",
-    "Base de Icms ST": "bc_icms_st",
-    "Valor de Icms ST": "vl_icms_st",
-    "CST de Pis": "cst_pis",
-    "Base de Pis": "bc_pis",
-    "Valor de Pis": "vl_pis",
-    "CST de Cofins": "cst_cofins",
-    "Base de Cofins": "bc_cofins",
-    "Valor de Cofins": "vl_cofins",
+# Mapeamento flexível por aliases normalizados.
+# Assim aceitamos variantes comuns de cabeçalho geradas pelo SysConv.
+COMMON_ALIASES = {
+    "mes": ["mes"],
+    "ano": ["ano"],
+    "cnpj_matriz": ["cnpj"],
+    "empresa": ["empresa"],
+    "cnpj_estabelecimento": ["cnpj estabelecimento(c010)", "cnpj estabelecimento", "cnpj estabelecimento c010"],
+    "participante": ["participante(c100)", "participante"],
+    "numero_nota": ["numero da nota(c100)", "número da nota(c100)", "numero da nota", "número da nota"],
+    "modelo": ["modelo(c100)", "modelo"],
+    "serie": ["serie(c100)", "série(c100)", "serie", "série"],
+    "chave": ["chave(c100)", "chave de acesso(c100)", "chave de acesso", "chave"],
+    "ind_oper": ["indicador de operacao(c100)", "indicador de operação(c100)", "indicador de operacao", "indicador de operação"],
+    "ind_emissao": ["indicador de emissao(c100)", "indicador de emissão(c100)"],
+    "situacao": ["situacao(c100)", "situação(c100)", "situacao", "situação"],
+    "valor_nota": ["valor(c100)", "valor da nota(c100)", "valor da nota", "valor"],
+    "reg_c170": ["c170 - fixo", "c170"],
+    "item": ["numeracao sequencial", "numeração sequencial", "item"],
+    "cod_produto": ["codigo do produto", "código do produto"],
+    "descricao": ["descricao complementar", "descrição complementar", "descricao", "descrição"],
+    "quantidade": ["quantidade", "qtd"],
+    "unidade": ["unidade de medida", "unidade"],
+    "valor_item": ["valor total do produto", "valor do item", "vl item"],
+    "valor_desconto": ["valor de desconto", "desconto"],
+    "mov_fisica": ["movimentacao fisica", "movimentação física"],
+    "cst_icms": ["cst de icms", "cst icms"],
+    "cfop": ["cfop"],
+    "natureza_operacao": ["natureza de operacao", "natureza de operação"],
+    "bc_icms": ["base de icms", "base de icms ", "bc icms"],
+    "aliq_icms": ["aliquota de icms", "alíquota de icms"],
+    "vl_icms": ["valor de icms", "vl icms"],
+    "bc_icms_st": ["base de icms st", "bc icms st"],
+    "aliq_icms_st": ["aliquota de icms st", "alíquota de icms st"],
+    "vl_icms_st": ["valor de icms st", "vl icms st"],
+    "ind_apur_ipi": ["indicador de apuracao de ipi", "indicador de apuração de ipi"],
+    "cst_ipi": ["cst de ipi", "cst ipi"],
+    "cod_enq_ipi": ["codigo enquadramento ipi", "código enquadramento ipi"],
+    "bc_ipi": ["base de ipi", "bc ipi"],
+    "aliq_ipi": ["aliquota de ipi", "alíquota de ipi"],
+    "vl_ipi": ["valor de ipi", "vl ipi"],
+    "cst_pis": ["cst de pis", "cst pis"],
+    "bc_pis": ["base de pis", "bc pis"],
+    "aliq_pis": ["aliquota de pis", "alíquota de pis"],
+    "bc_pis_qtd": ["base de pis - qtde", "base de pis qtde"],
+    "aliq_pis_qtd": ["aliquota de pis qtde", "alíquota de pis qtde"],
+    "vl_pis": ["valor de pis", "vl pis"],
+    "cst_cofins": ["cst de cofins", "cst cofins"],
+    "bc_cofins": ["base de cofins", "bc cofins"],
+    "aliq_cofins": ["aliquota de cofins", "alíquota de cofins"],
+    "bc_cofins_qtd": ["base de cofins - qtde", "base de cofins qtde"],
+    "aliq_cofins_qtd": ["aliquota de cofins qtde", "alíquota de cofins qtde"],
+    "vl_cofins": ["valor de cofins", "vl cofins"],
+    "conta_contabil": ["conta contabil", "conta contábil"],
+    "vl_abat_nao_trib": [
+        "valor do abatimento nao tributado (cabecalho c170 icms-ipi)",
+        "valor do abatimento não tributado (cabeçalho c170 icms-ipi)",
+        "valor do abatimento nao tributado",
+        "valor do abatimento não tributado",
+    ],
 }
 
 
 NUMERIC_COLS = [
     "ano",
     "numero_nota",
-    "serie",
     "item",
     "quantidade",
     "valor_item",
     "valor_nota",
     "valor_desconto",
     "bc_icms",
+    "aliq_icms",
     "vl_icms",
     "bc_icms_st",
+    "aliq_icms_st",
     "vl_icms_st",
     "bc_pis",
+    "aliq_pis",
     "vl_pis",
     "bc_cofins",
+    "aliq_cofins",
     "vl_cofins",
-    "bc_pis_icms",
-    "vl_pis_icms",
-    "bc_cofins_icms",
-    "vl_cofins_icms",
 ]
-
 
 STATUS_VALIDOS = {"00", "01", "1", "0", 0, 1}
 
 
+def _build_rename_map(df: pd.DataFrame) -> dict[str, str]:
+    rename_map: dict[str, str] = {}
+    normalized_lookup = {normalize_text(col): col for col in df.columns}
 
-def _rename(df: pd.DataFrame, col_map: dict[str, str]) -> pd.DataFrame:
-    available = {k: v for k, v in col_map.items() if k in df.columns}
-    out = df.rename(columns=available).copy()
-    for col in set(col_map.values()) - set(out.columns):
-        out[col] = None
-    return out
+    for canonical, aliases in COMMON_ALIASES.items():
+        for alias in aliases:
+            alias_norm = normalize_text(alias)
+            if alias_norm in normalized_lookup:
+                rename_map[normalized_lookup[alias_norm]] = canonical
+                break
+
+    return rename_map
+
+
+
+def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    for col in columns:
+        if col not in df.columns:
+            df[col] = None
+    return df
 
 
 
@@ -137,26 +143,24 @@ def _post_process(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["situacao_ok"] = True
 
-    for col in ["bc_icms", "vl_icms", "bc_icms_st", "vl_icms_st", "bc_pis", "bc_cofins", "valor_item"]:
-        if col not in df.columns:
-            df[col] = 0.0
-
     return df
 
 
 
-def normalize_icms_items(df: pd.DataFrame) -> pd.DataFrame:
-    out = _rename(df, ICMS_ITEM_MAP)
+def _normalize_generic_items(df: pd.DataFrame, fonte: str) -> pd.DataFrame:
+    rename_map = _build_rename_map(df)
+    out = df.rename(columns=rename_map).copy()
+    out = _ensure_columns(out, list(COMMON_ALIASES.keys()))
     out = _post_process(out)
-    if "valor_nota" not in out.columns:
-        out["valor_nota"] = 0.0
-    out["fonte"] = "ICMS/IPI"
+    out["fonte"] = fonte
     return out
+
+
+
+def normalize_icms_items(df: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_generic_items(df, "ICMS/IPI")
 
 
 
 def normalize_piscofins_items(df: pd.DataFrame) -> pd.DataFrame:
-    out = _rename(df, PISCOFINS_ITEM_MAP)
-    out = _post_process(out)
-    out["fonte"] = "PIS/COFINS"
-    return out
+    return _normalize_generic_items(df, "PIS/COFINS")

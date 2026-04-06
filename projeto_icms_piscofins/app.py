@@ -95,11 +95,12 @@ if "report" in st.session_state:
     report = st.session_state["report"]
     resumo = st.session_state["resumo"]
 
-    a, b, c, d = st.columns(4)
+    a, b, c, d, e = st.columns(5)
     a.metric("Itens analisados", f"{resumo['itens_analisados']:,}".replace(",", "."))
     b.metric("Potencial alto", f"{resumo['itens_potencial_alto']:,}".replace(",", "."))
-    c.metric("Revisão manual", f"{resumo['itens_revisao_manual']:,}".replace(",", "."))
-    d.metric("Crédito estimado", f"R$ {resumo['credito_total_estimado']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    c.metric("Potencial moderado", f"{resumo['itens_potencial_moderado']:,}".replace(",", "."))
+    d.metric("Revisão manual", f"{resumo['itens_revisao_manual']:,}".replace(",", "."))
+    e.metric("Crédito estimado", f"R$ {resumo['credito_total_estimado']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
     st.subheader("Itens com maior potencial")
     potencial = report[report["Nível de Oportunidade"].isin(["Potencial alto", "Potencial moderado"])].copy()
@@ -134,12 +135,13 @@ else:
 ### Escopo desta versão
 - Leitura local por caminho de arquivos Excel convertidos do SPED.
 - Cruzamento prioritário em nível de item pela chave da NF-e; na falta dela, usa fallback com CNPJ + nota + série + item + competência.
-- Classificação em **Potencial alto**, **Revisão manual** e **Sem oportunidade**.
+- Classificação em **Potencial alto**, **Potencial moderado**, **Revisão manual** e **Sem oportunidade**.
 - Separação de casos com **ICMS-ST** e itens sem correspondência no arquivo ICMS/IPI.
+- Tratamento flexível de colunas para variantes de cabeçalhos geradas pelo SysConv.
 
 ### Observações técnicas
 - O relatório é **indiciário**, não conclusivo.
 - A tese jurídica aplicada, o período, o regime da empresa e o tratamento de entradas/saídas precisam ser validados antes de qualquer aproveitamento.
-- Se o seu conversor mudar o nome das abas ou colunas, ajuste os mapeamentos em `core/normalize.py`.
+- Se o seu conversor mudar o nome das abas ou colunas, ajuste os aliases em `core/normalize.py` e `core/utils.py`.
         """
     )

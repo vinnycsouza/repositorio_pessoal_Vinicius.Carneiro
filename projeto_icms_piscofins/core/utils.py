@@ -9,8 +9,18 @@ import pandas as pd
 
 
 SHEET_ALIASES = {
-    "c100": ["C100 - Nota Fiscal", "C100"],
-    "c170": ["C170 - Itens da Nota", "C170"],
+    "c100": [
+        "C100 - Nota Fiscal",
+        "C100",
+        "C100 - Nota Fiscal - Itens",
+    ],
+    "c170": [
+        "C170 - Itens da Nota",
+        "C170",
+        "Itens da Nota",
+        "Itens",
+        "C170 - Itens",
+    ],
     "c190": ["C190 - Analítico", "C190 - Analitico", "C190"],
 }
 
@@ -71,6 +81,8 @@ def choose_sheet(sheet_names: Iterable[str], logical_name: str) -> str | None:
             return name
     for name in names:
         norm_name = normalize_text(name)
+        if logical_name.lower() in norm_name:
+            return name
         if any(alias in norm_name for alias in alias_norm):
             return name
     return None
