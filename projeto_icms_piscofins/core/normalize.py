@@ -4,9 +4,6 @@ import pandas as pd
 
 from .utils import IND_OPER_MAP, coerce_number, normalize_cnpj, normalize_key, normalize_text
 
-
-# Mapeamento flexível por aliases normalizados.
-# Assim aceitamos variantes comuns de cabeçalho geradas pelo SysConv.
 COMMON_ALIASES = {
     "mes": ["mes"],
     "ano": ["ano"],
@@ -59,14 +56,7 @@ COMMON_ALIASES = {
     "aliq_cofins_qtd": ["aliquota de cofins qtde", "alíquota de cofins qtde"],
     "vl_cofins": ["valor de cofins", "vl cofins"],
     "conta_contabil": ["conta contabil", "conta contábil"],
-    "vl_abat_nao_trib": [
-        "valor do abatimento nao tributado (cabecalho c170 icms-ipi)",
-        "valor do abatimento não tributado (cabeçalho c170 icms-ipi)",
-        "valor do abatimento nao tributado",
-        "valor do abatimento não tributado",
-    ],
 }
-
 
 NUMERIC_COLS = [
     "ano",
@@ -96,16 +86,13 @@ STATUS_VALIDOS = {"00", "01", "1", "0", 0, 1}
 def _build_rename_map(df: pd.DataFrame) -> dict[str, str]:
     rename_map: dict[str, str] = {}
     normalized_lookup = {normalize_text(col): col for col in df.columns}
-
     for canonical, aliases in COMMON_ALIASES.items():
         for alias in aliases:
             alias_norm = normalize_text(alias)
             if alias_norm in normalized_lookup:
                 rename_map[normalized_lookup[alias_norm]] = canonical
                 break
-
     return rename_map
-
 
 
 def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -113,7 +100,6 @@ def _ensure_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = None
     return df
-
 
 
 def _post_process(df: pd.DataFrame) -> pd.DataFrame:
@@ -142,9 +128,7 @@ def _post_process(df: pd.DataFrame) -> pd.DataFrame:
         df["situacao_ok"] = df["situacao"].astype(str).str.strip().isin({str(v) for v in STATUS_VALIDOS})
     else:
         df["situacao_ok"] = True
-
     return df
-
 
 
 def _normalize_generic_items(df: pd.DataFrame, fonte: str) -> pd.DataFrame:
@@ -156,10 +140,8 @@ def _normalize_generic_items(df: pd.DataFrame, fonte: str) -> pd.DataFrame:
     return out
 
 
-
 def normalize_icms_items(df: pd.DataFrame) -> pd.DataFrame:
     return _normalize_generic_items(df, "ICMS/IPI")
-
 
 
 def normalize_piscofins_items(df: pd.DataFrame) -> pd.DataFrame:

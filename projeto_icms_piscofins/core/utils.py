@@ -20,6 +20,8 @@ SHEET_ALIASES = {
         "Itens da Nota",
         "Itens",
         "C170 - Itens",
+        "C170 (ICMS-IPI)",
+        "C170 (Pis-cofins)",
     ],
     "c190": ["C190 - Analítico", "C190 - Analitico", "C190"],
 }
@@ -61,13 +63,23 @@ def coerce_number(series: pd.Series) -> pd.Series:
         return pd.Series(dtype="float64")
     if pd.api.types.is_numeric_dtype(series):
         return series.astype(float)
-    cleaned = (
-        series.astype(str)
-        .str.replace(".", "", regex=False)
-        .str.replace(",", ".", regex=False)
-        .str.replace(" ", "", regex=False)
-        .replace({"nan": None, "None": None, "": None})
-    )
+
+    cleaned = series.astype(str).str.strip()
+    cleaned = cleaned.replace({"nan": None, "None": None, "": None, "-": None})
+    # remove moeda e espaços extras
+    cleaned = cleaned.str.replace("R$", "", regex=False).str.replace(" ", "", regex=False)
+
+    def _normalize_num(s: str | None):
+        if s is None or pd.isna(s):
+            return None
+        s = str(s)
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        elif "," in s:
+            s = s.replace(",", ".")
+        return s
+
+    cleaned = cleaned.map(_normalize_num)
     return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
 
 
@@ -76,9 +88,11 @@ def choose_sheet(sheet_names: Iterable[str], logical_name: str) -> str | None:
     names = list(sheet_names)
     aliases = SHEET_ALIASES.get(logical_name, [])
     alias_norm = [normalize_text(a) for a in aliases]
+
     for name in names:
         if normalize_text(name) in alias_norm:
             return name
+
     for name in names:
         norm_name = normalize_text(name)
         if logical_name.lower() in norm_name:
