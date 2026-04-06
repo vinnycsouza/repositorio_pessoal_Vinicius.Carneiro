@@ -98,7 +98,10 @@ if "report" in st.session_state:
     a, b, c, d, e = st.columns(5)
     a.metric("Itens analisados", f"{resumo['itens_analisados']:,}".replace(",", "."))
     b.metric("Potencial alto", f"{resumo['itens_potencial_alto']:,}".replace(",", "."))
-    c.metric("Potencial moderado", f"{resumo['itens_potencial_moderado']:,}".replace(",", "."))
+    c.metric(
+    "Potencial moderado",
+    f"{resumo.get('itens_potencial_moderado', 0):,}".replace(",", ".")
+    )
     d.metric("Revisão manual", f"{resumo['itens_revisao_manual']:,}".replace(",", "."))
     e.metric("Crédito estimado", f"R$ {resumo['credito_total_estimado']:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
