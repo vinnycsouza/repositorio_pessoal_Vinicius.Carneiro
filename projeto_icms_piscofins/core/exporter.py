@@ -8,14 +8,28 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
+def _sheet_safe_name(name: str) -> str:
+    invalid = ['\\', '/', '*', '?', ':', '[', ']']
+    for ch in invalid:
+        name = name.replace(ch, "-")
+    return name[:31]
+
+
 def ajustar_largura(writer: pd.ExcelWriter, df: pd.DataFrame, sheet_name: str) -> None:
     ws = writer.sheets[sheet_name]
+
+    if df.empty and len(df.columns) == 0:
+        ws.column_dimensions["A"].width = 20
+        return
 
     for i, col in enumerate(df.columns, 1):
         tamanho = len(str(col))
         if not df.empty:
             serie = df[col].astype(str).fillna("")
-            tamanho = max(tamanho, serie.map(len).max())
+            try:
+                tamanho = max(tamanho, int(serie.map(len).max()))
+            except Exception:
+                pass
         ws.column_dimensions[get_column_letter(i)].width = min(tamanho + 2, 40)
 
 
@@ -34,7 +48,7 @@ def estilizar_cabecalho(writer: pd.ExcelWriter, sheet_name: str) -> None:
 
 
 def aplicar_cor_status(writer: pd.ExcelWriter, df: pd.DataFrame, sheet_name: str) -> None:
-    if "Status da Análise" not in df.columns:
+    if df.empty or "Status da Análise" not in df.columns:
         return
 
     ws = writer.sheets[sheet_name]
@@ -75,7 +89,7 @@ def criar_resumo(report: pd.DataFrame, resumo: dict[str, Any]) -> pd.DataFrame:
     base_icms = int(
         resumo.get(
             "itens_com_base_icms_final",
-            (pd.to_numeric(report.get("Base de ICMS Final", 0), errors="coerce").fillna(0) != 0).sum()
+            int((pd.to_numeric(report.get("Base de ICMS Final", 0), errors="coerce").fillna(0) != 0).sum())
             if "Base de ICMS Final" in report.columns
             else 0,
         )
@@ -83,7 +97,7 @@ def criar_resumo(report: pd.DataFrame, resumo: dict[str, Any]) -> pd.DataFrame:
     valor_icms = int(
         resumo.get(
             "itens_com_valor_icms_final",
-            (pd.to_numeric(report.get("Valor de ICMS Final", 0), errors="coerce").fillna(0) != 0).sum()
+            int((pd.to_numeric(report.get("Valor de ICMS Final", 0), errors="coerce").fillna(0) != 0).sum())
             if "Valor de ICMS Final" in report.columns
             else 0,
         )
@@ -119,6 +133,34 @@ def criar_resumo(report: pd.DataFrame, resumo: dict[str, Any]) -> pd.DataFrame:
 
 
 def simplificar(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "Empresa",
+            "CNPJ",
+            "Mês",
+            "Ano",
+            "Número da Nota",
+            "Série",
+            "Item",
+            "Código do Produto",
+            "Descrição",
+            "CFOP",
+            "Operação",
+            "Base de ICMS Final",
+            "Valor de ICMS Final",
+            "Base de PIS Informada",
+            "Base de COFINS Informada",
+            "Diferença ICMS x PIS",
+            "Diferença ICMS x COFINS",
+            "Diferença bate com ICMS? PIS",
+            "Diferença bate com ICMS? COFINS",
+            "Status da Análise",
+            "Motivo",
+            "Crédito PIS Estimado",
+            "Crédito COFINS Estimado",
+            "Crédito Total Estimado",
+        ])
+
     colunas = [
         "Empresa",
         "CNPJ",
@@ -145,7 +187,6 @@ def simplificar(df: pd.DataFrame) -> pd.DataFrame:
         "Crédito COFINS Estimado",
         "Crédito Total Estimado",
     ]
-
     colunas_existentes = [c for c in colunas if c in df.columns]
     return df[colunas_existentes].copy()
 
@@ -212,10 +253,24 @@ def preparar_relatorio_completo(df: pd.DataFrame) -> pd.DataFrame:
             sort_cols.append("Número da Nota")
         if "Item" in out.columns:
             sort_cols.append("Item")
-
         out = out.sort_values(sort_cols, kind="stable").drop(columns="_ordem_status")
 
     return out
+
+
+def _write_sheet(writer: pd.ExcelWriter, df: pd.DataFrame, sheet_name: str) -> str:
+    safe_name = _sheet_safe_name(sheet_name)
+
+    if df is None or (df.empty and len(df.columns) == 0):
+        df = pd.DataFrame({"Mensagem": ["Nenhum registro encontrado para esta aba."]})
+    elif df.empty:
+        df = df.copy()
+
+    df.to_excel(writer, sheet_name=safe_name, index=False)
+    ajustar_largura(writer, df, safe_name)
+    estilizar_cabecalho(writer, safe_name)
+    aplicar_cor_status(writer, df, safe_name)
+    return safe_name
 
 
 def export_report_to_bytes(report: pd.DataFrame, resumo: dict[str, Any]) -> bytes:
@@ -246,46 +301,38 @@ def export_report_to_bytes(report: pd.DataFrame, resumo: dict[str, Any]) -> byte
 
     resumo_df = criar_resumo(report_export, resumo)
 
-    exclusao_df = simplificar(report_export[report_export["Status da Análise"] == "Exclusão identificada"].copy()) \
-        if "Status da Análise" in report_export.columns else pd.DataFrame()
+    if "Status da Análise" in report_export.columns:
+        exclusao_df = simplificar(report_export[report_export["Status da Análise"] == "Exclusão identificada"].copy())
+        sem_indicio_df = simplificar(report_export[report_export["Status da Análise"] == "Sem indício de exclusão"].copy())
+        divergente_df = simplificar(report_export[report_export["Status da Análise"] == "Divergente / Revisar"].copy())
+        sem_dados_df = simplificar(report_export[report_export["Status da Análise"] == "Sem dados suficientes"].copy())
+    else:
+        exclusao_df = simplificar(pd.DataFrame())
+        sem_indicio_df = simplificar(pd.DataFrame())
+        divergente_df = simplificar(pd.DataFrame())
+        sem_dados_df = simplificar(pd.DataFrame())
 
-    sem_indicio_df = simplificar(report_export[report_export["Status da Análise"] == "Sem indício de exclusão"].copy()) \
-        if "Status da Análise" in report_export.columns else pd.DataFrame()
+    sem_match_df = simplificar(
+        report_export[report_export["Cruzou com ICMS/IPI"] == "Não"].copy()
+    ) if "Cruzou com ICMS/IPI" in report_export.columns else simplificar(pd.DataFrame())
 
-    divergente_df = simplificar(report_export[report_export["Status da Análise"] == "Divergente / Revisar"].copy()) \
-        if "Status da Análise" in report_export.columns else pd.DataFrame()
-
-    sem_dados_df = simplificar(report_export[report_export["Status da Análise"] == "Sem dados suficientes"].copy()) \
-        if "Status da Análise" in report_export.columns else pd.DataFrame()
+    st_df = simplificar(
+        report_export[report_export["Possui ST"] == "Sim"].copy()
+    ) if "Possui ST" in report_export.columns else simplificar(pd.DataFrame())
 
     completo_df = preparar_relatorio_completo(report_export)
 
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        resumo_df.to_excel(writer, sheet_name="Resumo Executivo", index=False)
-        exclusao_df.to_excel(writer, sheet_name="Exclusão Identificada", index=False)
-        sem_indicio_df.to_excel(writer, sheet_name="Sem Indício", index=False)
-        divergente_df.to_excel(writer, sheet_name="Divergente", index=False)
-        sem_dados_df.to_excel(writer, sheet_name="Sem Dados", index=False)
-        completo_df.to_excel(writer, sheet_name="Relatorio Completo", index=False)
-
-        for nome_aba, df in [
-            ("Resumo Executivo", resumo_df),
-            ("Exclusão Identificada", exclusao_df),
-            ("Sem Indício", sem_indicio_df),
-            ("Divergente", divergente_df),
-            ("Sem Dados", sem_dados_df),
-            ("Relatorio Completo", completo_df),
-        ]:
-            ajustar_largura(writer, df, nome_aba)
-            estilizar_cabecalho(writer, nome_aba)
-
-        aplicar_cor_status(writer, exclusao_df, "Exclusão Identificada")
-        aplicar_cor_status(writer, sem_indicio_df, "Sem Indício")
-        aplicar_cor_status(writer, divergente_df, "Divergente")
-        aplicar_cor_status(writer, sem_dados_df, "Sem Dados")
-        aplicar_cor_status(writer, completo_df, "Relatorio Completo")
+        _write_sheet(writer, resumo_df, "Resumo Executivo")
+        _write_sheet(writer, exclusao_df, "Exclusao Identificada")
+        _write_sheet(writer, sem_indicio_df, "Sem Indicio")
+        _write_sheet(writer, divergente_df, "Divergente Revisar")
+        _write_sheet(writer, sem_dados_df, "Sem Dados")
+        _write_sheet(writer, sem_match_df, "Sem Cruzamento")
+        _write_sheet(writer, st_df, "Itens com ST")
+        _write_sheet(writer, completo_df, "Relatorio Completo")
 
     output.seek(0)
     return output.getvalue()
