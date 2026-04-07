@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime
-from pathlib import Path
+import io
 
 import pandas as pd
 import streamlit as st
 
 from core.analysis import run_analysis
-from core.exporter import export_report
+from core.exporter import export_report_to_bytes
 from core.io_excel import WorkbookReader
 from core.normalize import normalize_icms_items, normalize_piscofins_items
 from core.utils import validate_excel_path
@@ -41,13 +40,6 @@ def fmt_int(value) -> str:
         return "0"
 
 
-def fmt_money(value) -> str:
-    try:
-        return f"R$ {float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "R$ 0,00"
-
-
 def contar_preenchidos(df: pd.DataFrame, col: str) -> int:
     if col not in df.columns:
         return 0
@@ -60,8 +52,8 @@ def encontrar_coluna_status(df: pd.DataFrame) -> str | None:
         "Status da Análise",
         "Status da Analise",
         "status_analise",
-        "status da analise",
         "status da análise",
+        "status da analise",
     ]
     for c in candidatos:
         if c in df.columns:
@@ -159,10 +151,6 @@ if st.button("Processar arquivos", type="primary", use_container_width=True):
             st.session_state["report"] = report
             st.session_state["resumo"] = resumo
             st.session_state["diagnostico"] = montar_diagnostico_relatorio(report)
-            st.session_state["origens"] = {
-                "icms": caminho_icms,
-                "pis": caminho_pis,
-            }
 
         st.success("Processamento concluído.")
     except Exception as exc:
@@ -218,29 +206,23 @@ if "report" in st.session_state:
     with st.expander("Ver relatório completo"):
         st.dataframe(report, use_container_width=True, height=520)
 
-    out_dir = Path("outputs")
-    out_dir.mkdir(exist_ok=True)
-    file_name = f"relatorio_recuperacao_icms_piscofins_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    out_path = out_dir / file_name
+    st.subheader("Baixar relatório")
+    nome_arquivo = "relatorio_recuperacao_icms_piscofins.xlsx"
 
-    if st.button("Gerar Excel do relatório", use_container_width=True):
-        try:
-            export_report(report, resumo, out_path)
+    try:
+        excel_bytes = export_report_to_bytes(report, resumo)
 
-            with open(out_path, "rb") as f:
-                file_bytes = f.read()
+        st.download_button(
+            label="Baixar Excel do relatório",
+            data=excel_bytes,
+            file_name=nome_arquivo,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
-            st.download_button(
-                label="Baixar Excel gerado",
-                data=file_bytes,
-                file_name=out_path.name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
-            st.info(f"Arquivo salvo também em: {out_path.resolve()}")
-        except Exception as exc:
-            st.exception(exc)
+        st.info("O arquivo é gerado apenas para download. Nada é salvo na pasta do projeto.")
+    except Exception as exc:
+        st.exception(exc)
 
 else:
     st.info("Informe os caminhos dos dois arquivos e clique em Processar arquivos.")
