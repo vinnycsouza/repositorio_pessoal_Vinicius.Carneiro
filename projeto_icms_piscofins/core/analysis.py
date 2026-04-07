@@ -79,8 +79,16 @@ def classify_row(row: pd.Series, tolerancia: float) -> pd.Series:
     dif_icms_pis = base_icms - base_pis
     dif_icms_cofins = base_icms - base_cofins
 
-    pis_excluido = abs(dif_icms_pis - valor_icms) <= tolerancia if base_icms > 0 and base_pis > 0 and valor_icms > 0 else False
-    cofins_excluido = abs(dif_icms_cofins - valor_icms) <= tolerancia if base_icms > 0 and base_cofins > 0 and valor_icms > 0 else False
+    pis_excluido = (
+        abs(dif_icms_pis - valor_icms) <= tolerancia
+        if base_icms > 0 and base_pis > 0 and valor_icms > 0
+        else False
+    )
+    cofins_excluido = (
+        abs(dif_icms_cofins - valor_icms) <= tolerancia
+        if base_icms > 0 and base_cofins > 0 and valor_icms > 0
+        else False
+    )
 
     bases_iguais_pis = abs(base_icms - base_pis) <= tolerancia if base_icms > 0 and base_pis > 0 else False
     bases_iguais_cofins = abs(base_icms - base_cofins) <= tolerancia if base_icms > 0 and base_cofins > 0 else False
@@ -136,10 +144,42 @@ def classify_row(row: pd.Series, tolerancia: float) -> pd.Series:
     )
 
 
+def calculate_credit_row(row: pd.Series, aliq_pis: float, aliq_cofins: float) -> pd.Series:
+    """
+    Crédito só é calculado quando NÃO houver indício de exclusão.
+    """
+    status = str(row.get("status_analise", "") or "").strip()
+
+    if status != "Sem indício de exclusão":
+        return pd.Series(
+            {
+                "credito_pis_estimado": 0.0,
+                "credito_cofins_estimado": 0.0,
+                "credito_total_estimado": 0.0,
+            }
+        )
+
+    dif_pis = max(float(row.get("dif_icms_pis", 0) or 0), 0.0)
+    dif_cofins = max(float(row.get("dif_icms_cofins", 0) or 0), 0.0)
+
+    credito_pis = dif_pis * (aliq_pis / 100.0)
+    credito_cofins = dif_cofins * (aliq_cofins / 100.0)
+
+    return pd.Series(
+        {
+            "credito_pis_estimado": credito_pis,
+            "credito_cofins_estimado": credito_cofins,
+            "credito_total_estimado": credito_pis + credito_cofins,
+        }
+    )
+
+
 def run_analysis(
     icms_df: pd.DataFrame,
     pis_df: pd.DataFrame,
     tolerancia: float = 0.01,
+    aliq_pis: float = 1.65,
+    aliq_cofins: float = 7.60,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Executa a análise principal e devolve:
@@ -148,9 +188,7 @@ def run_analysis(
     """
     merged = prepare_join(icms_df, pis_df)
 
-    # =========================
-    # Campos numéricos originais
-    # =========================
+    # Campos numéricos
     merged["valor_item_pis"] = ensure_numeric(merged, "valor_item_pis")
 
     merged["bc_icms_pis_orig"] = ensure_numeric(merged, "bc_icms_pis")
@@ -166,9 +204,7 @@ def run_analysis(
     merged["bc_pis_pis"] = ensure_numeric(merged, "bc_pis_pis")
     merged["bc_cofins_pis"] = ensure_numeric(merged, "bc_cofins_pis")
 
-    # =========================
     # Fallback: prioriza ICMS/IPI
-    # =========================
     merged["bc_icms_final"] = merged["bc_icms_icms_orig"].where(
         merged["bc_icms_icms_orig"] != 0,
         merged["bc_icms_pis_orig"],
@@ -189,9 +225,7 @@ def run_analysis(
         merged["vl_icms_st_pis_orig"],
     )
 
-    # =========================
     # Origem dos valores finais
-    # =========================
     merged["origem_icms_base"] = "Sem valor"
     merged.loc[merged["bc_icms_pis_orig"] != 0, "origem_icms_base"] = "PIS/COFINS"
     merged.loc[merged["bc_icms_icms_orig"] != 0, "origem_icms_base"] = "ICMS/IPI"
@@ -200,9 +234,7 @@ def run_analysis(
     merged.loc[merged["vl_icms_pis_orig"] != 0, "origem_icms_valor"] = "PIS/COFINS"
     merged.loc[merged["vl_icms_icms_orig"] != 0, "origem_icms_valor"] = "ICMS/IPI"
 
-    # =========================
     # Campos textuais
-    # =========================
     merged["empresa_pis"] = ensure_text(merged, "empresa_pis")
     merged["cnpj_matriz_pis"] = ensure_text(merged, "cnpj_matriz_pis")
     merged["mes_pis"] = ensure_text(merged, "mes_pis")
@@ -217,15 +249,15 @@ def run_analysis(
     merged["cfop"] = ensure_text(merged, "cfop_pis")
     merged.loc[merged["cfop"] == "", "cfop"] = ensure_text(merged, "cfop_icms")
 
-    # =========================
     # Classificação
-    # =========================
     calc = merged.apply(classify_row, axis=1, tolerancia=tolerancia)
     result = pd.concat([merged, calc], axis=1)
 
-    # =========================
+    # Crédito condicionado ao status
+    creditos = result.apply(calculate_credit_row, axis=1, aliq_pis=aliq_pis, aliq_cofins=aliq_cofins)
+    result = pd.concat([result, creditos], axis=1)
+
     # Relatório final
-    # =========================
     report = result[
         [
             "empresa_pis",
@@ -262,6 +294,9 @@ def run_analysis(
             "possui_st",
             "join_ok",
             "documento_entrada",
+            "credito_pis_estimado",
+            "credito_cofins_estimado",
+            "credito_total_estimado",
         ]
     ].copy()
 
@@ -300,11 +335,11 @@ def run_analysis(
         "Possui ST",
         "Cruzou com ICMS/IPI",
         "Documento de Entrada",
+        "Crédito PIS Estimado",
+        "Crédito COFINS Estimado",
+        "Crédito Total Estimado",
     ]
 
-    # =========================
-    # Resumo
-    # =========================
     resumo = {
         "itens_analisados": int(len(report)),
         "itens_exclusao_identificada": int((report["Status da Análise"] == "Exclusão identificada").sum()),
@@ -316,6 +351,7 @@ def run_analysis(
         "itens_com_base_pis": int((pd.to_numeric(report["Base de PIS Informada"], errors="coerce").fillna(0) != 0).sum()),
         "itens_com_base_cofins": int((pd.to_numeric(report["Base de COFINS Informada"], errors="coerce").fillna(0) != 0).sum()),
         "itens_sem_match": int((report["Cruzou com ICMS/IPI"] == "Não").sum()),
+        "credito_total_estimado": float(pd.to_numeric(report["Crédito Total Estimado"], errors="coerce").fillna(0).sum()),
     }
 
     return report, resumo

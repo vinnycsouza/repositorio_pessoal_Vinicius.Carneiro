@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import io
-
 import pandas as pd
 import streamlit as st
 
@@ -17,7 +15,7 @@ st.title("Auditor local — comparação entre base de ICMS e bases de PIS/COFIN
 st.caption("Projeto local para leitura por caminho de arquivos Excel convertidos do SPED.")
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def carregar_itens_icms(path_str: str) -> pd.DataFrame:
     path = validate_excel_path(path_str)
     reader = WorkbookReader(path)
@@ -25,7 +23,7 @@ def carregar_itens_icms(path_str: str) -> pd.DataFrame:
     return normalize_icms_items(df)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def carregar_itens_piscofins(path_str: str) -> pd.DataFrame:
     path = validate_excel_path(path_str)
     reader = WorkbookReader(path)
@@ -105,6 +103,8 @@ with st.sidebar:
         value=True,
     )
 
+    st.caption("Dica: na primeira leitura arquivos grandes podem demorar alguns segundos. Nas próximas execuções, o cache ajuda a acelerar.")
+
 
 st.subheader("Arquivos de entrada")
 col1, col2 = st.columns(2)
@@ -126,22 +126,42 @@ with col2:
 
 if st.button("Processar arquivos", type="primary", use_container_width=True):
     try:
-        with st.spinner("Lendo arquivos e cruzando itens..."):
+        progress = st.progress(0, text="Iniciando processamento...")
+        status_box = st.empty()
+
+        with st.spinner("Processando arquivos... Isso pode levar alguns segundos dependendo do tamanho."):
+            status_box.info("Validando caminhos dos arquivos...")
+            progress.progress(10, text="Validando caminhos...")
+
+            validate_excel_path(caminho_icms)
+            validate_excel_path(caminho_pis)
+
+            status_box.info("Lendo SPED ICMS/IPI...")
+            progress.progress(30, text="Lendo SPED ICMS/IPI...")
             df_icms = carregar_itens_icms(caminho_icms)
+
+            status_box.info("Lendo SPED PIS/COFINS...")
+            progress.progress(55, text="Lendo SPED PIS/COFINS...")
             df_pis = carregar_itens_piscofins(caminho_pis)
 
             st.session_state["df_icms_bruto"] = df_icms.copy()
             st.session_state["df_pis_bruto"] = df_pis.copy()
 
             if operacoes:
+                status_box.info("Aplicando filtros de operação...")
+                progress.progress(70, text="Aplicando filtros...")
+
                 if "ind_oper_desc" in df_icms.columns:
                     df_icms = df_icms[df_icms["ind_oper_desc"].isin(operacoes)].copy()
+
                 if "ind_oper_desc" in df_pis.columns:
                     df_pis = df_pis[df_pis["ind_oper_desc"].isin(operacoes)].copy()
 
             if somente_regulares and "situacao_ok" in df_pis.columns:
                 df_pis = df_pis[df_pis["situacao_ok"]].copy()
 
+            status_box.info("Cruzando dados e executando análise...")
+            progress.progress(85, text="Cruzando dados e analisando...")
             report, resumo = run_analysis(
                 icms_df=df_icms,
                 pis_df=df_pis,
@@ -152,7 +172,10 @@ if st.button("Processar arquivos", type="primary", use_container_width=True):
             st.session_state["resumo"] = resumo
             st.session_state["diagnostico"] = montar_diagnostico_relatorio(report)
 
-        st.success("Processamento concluído.")
+            progress.progress(100, text="Finalizado.")
+            status_box.success("Processamento concluído com sucesso.")
+
+        st.success("Arquivos processados.")
     except Exception as exc:
         st.exception(exc)
 
@@ -207,7 +230,6 @@ if "report" in st.session_state:
         st.dataframe(report, use_container_width=True, height=520)
 
     st.subheader("Baixar relatório")
-    nome_arquivo = "relatorio_recuperacao_icms_piscofins.xlsx"
 
     try:
         excel_bytes = export_report_to_bytes(report, resumo)
@@ -215,7 +237,7 @@ if "report" in st.session_state:
         st.download_button(
             label="Baixar Excel do relatório",
             data=excel_bytes,
-            file_name=nome_arquivo,
+            file_name="relatorio_recuperacao_icms_piscofins.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
