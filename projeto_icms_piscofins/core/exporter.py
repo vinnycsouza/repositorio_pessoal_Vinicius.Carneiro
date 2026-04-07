@@ -1,71 +1,56 @@
 from __future__ import annotations
 
 import io
-from typing import Any
-
 import pandas as pd
 from openpyxl.utils import get_column_letter
 
 
-def _set_column_widths_openpyxl(writer: pd.ExcelWriter, df: pd.DataFrame, sheet_name: str) -> None:
-    ws = writer.sheets[sheet_name]
+def ajustar_largura(writer, df, sheet):
+    ws = writer.sheets[sheet]
 
-    for i, col in enumerate(df.columns, start=1):
-        max_len = len(str(col))
+    for i, col in enumerate(df.columns, 1):
+        tamanho = len(str(col))
         if not df.empty:
-            values = df[col].astype(str).fillna("")
-            max_len = max(max_len, values.map(len).max())
-        ws.column_dimensions[get_column_letter(i)].width = min(max_len + 2, 40)
+            tamanho = max(tamanho, df[col].astype(str).map(len).max())
+        ws.column_dimensions[get_column_letter(i)].width = min(tamanho + 2, 40)
 
 
-def _build_resumo_df(report: pd.DataFrame, resumo: dict[str, Any]) -> pd.DataFrame:
-    linhas = [
-        ["Itens analisados", resumo.get("itens_analisados", len(report))],
-        ["Exclusão identificada", resumo.get("itens_exclusao_identificada", 0)],
-        ["Sem indício de exclusão", resumo.get("itens_sem_indicio", 0)],
-        ["Divergente / Revisar", resumo.get("itens_divergente_revisar", 0)],
-        ["Sem dados suficientes", resumo.get("itens_sem_dados", 0)],
-        ["Linhas com Base de ICMS Final", int((pd.to_numeric(report.get("Base de ICMS Final", 0), errors="coerce").fillna(0) != 0).sum()) if "Base de ICMS Final" in report.columns else 0],
-        ["Linhas com Valor de ICMS Final", int((pd.to_numeric(report.get("Valor de ICMS Final", 0), errors="coerce").fillna(0) != 0).sum()) if "Valor de ICMS Final" in report.columns else 0],
-    ]
+def criar_resumo(report: pd.DataFrame) -> pd.DataFrame:
+    total = len(report)
 
-    if "Cruzou com ICMS/IPI" in report.columns:
-        linhas.append(["Join Sim", int((report["Cruzou com ICMS/IPI"].astype(str) == "Sim").sum())])
-        linhas.append(["Join Não", int((report["Cruzou com ICMS/IPI"].astype(str) == "Não").sum())])
+    exclusao = (report["Status da Análise"] == "Exclusão identificada").sum()
+    sem_indicio = (report["Status da Análise"] == "Sem indício de exclusão").sum()
+    divergente = (report["Status da Análise"] == "Divergente / Revisar").sum()
+    sem_dados = (report["Status da Análise"] == "Sem dados suficientes").sum()
 
-    return pd.DataFrame(linhas, columns=["Indicador", "Valor"])
+    sem_match = (report["Cruzou com ICMS/IPI"] == "Não").sum()
+    st = (report["Possui ST"] == "Sim").sum()
+
+    return pd.DataFrame(
+        [
+            ["Total de itens analisados", total],
+            ["Exclusão identificada", exclusao],
+            ["Sem indício de exclusão", sem_indicio],
+            ["Divergente / Revisar", divergente],
+            ["Sem dados suficientes", sem_dados],
+            ["% com exclusão", exclusao / total if total else 0],
+            ["% sem exclusão", sem_indicio / total if total else 0],
+            ["Itens sem cruzamento", sem_match],
+            ["Itens com ICMS-ST", st],
+        ],
+        columns=["Indicador", "Valor"],
+    )
 
 
-def _prepare_destaque_df(report: pd.DataFrame) -> pd.DataFrame:
-    if "Status da Análise" not in report.columns:
-        return report.copy()
-
-    destaque = report[report["Status da Análise"] == "Exclusão identificada"].copy()
-
-    colunas_prioridade = [
+def simplificar(df: pd.DataFrame) -> pd.DataFrame:
+    colunas = [
         "Empresa",
         "CNPJ",
         "Mês",
-        "Ano",
-        "Chave",
         "Número da Nota",
-        "Série",
         "Item",
-        "Código do Produto",
-        "Descrição",
-        "CFOP",
-        "Operação",
-        "Valor do Item",
-        "Base de ICMS no PIS",
-        "Valor de ICMS no PIS",
-        "Base de ICMS no ICMS/IPI",
-        "Valor de ICMS no ICMS/IPI",
         "Base de ICMS Final",
         "Valor de ICMS Final",
-        "Base de ICMS ST",
-        "Valor de ICMS ST",
-        "Origem da Base de ICMS",
-        "Origem do Valor de ICMS",
         "Base de PIS Informada",
         "Base de COFINS Informada",
         "Diferença ICMS x PIS",
@@ -74,52 +59,38 @@ def _prepare_destaque_df(report: pd.DataFrame) -> pd.DataFrame:
         "Diferença bate com ICMS? COFINS",
         "Status da Análise",
         "Motivo",
-        "Possui ST",
-        "Cruzou com ICMS/IPI",
-        "Documento de Entrada",
     ]
 
-    colunas_existentes = [c for c in colunas_prioridade if c in destaque.columns]
-    outras = [c for c in destaque.columns if c not in colunas_existentes]
-    return destaque[colunas_existentes + outras]
+    colunas_existentes = [c for c in colunas if c in df.columns]
+    return df[colunas_existentes].copy()
 
 
-def export_report_to_bytes(report: pd.DataFrame, resumo: dict[str, Any]) -> bytes:
-    report_export = report.copy()
+def export_report_to_bytes(report: pd.DataFrame, resumo: dict) -> bytes:
 
-    colunas_numericas = [
-        "Valor do Item",
-        "Base de ICMS no PIS",
-        "Valor de ICMS no PIS",
-        "Base de ICMS no ICMS/IPI",
-        "Valor de ICMS no ICMS/IPI",
-        "Base de ICMS Final",
-        "Valor de ICMS Final",
-        "Base de ICMS ST",
-        "Valor de ICMS ST",
-        "Base de PIS Informada",
-        "Base de COFINS Informada",
-        "Diferença ICMS x PIS",
-        "Diferença ICMS x COFINS",
-    ]
+    resumo_df = criar_resumo(report)
 
-    for col in colunas_numericas:
-        if col in report_export.columns:
-            report_export[col] = pd.to_numeric(report_export[col], errors="coerce")
-
-    resumo_df = _build_resumo_df(report_export, resumo)
-    destaque_df = _prepare_destaque_df(report_export)
+    exclusao = simplificar(report[report["Status da Análise"] == "Exclusão identificada"])
+    sem_indicio = simplificar(report[report["Status da Análise"] == "Sem indício de exclusão"])
+    divergente = simplificar(report[report["Status da Análise"] == "Divergente / Revisar"])
+    sem_dados = simplificar(report[report["Status da Análise"] == "Sem dados suficientes"])
 
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        resumo_df.to_excel(writer, sheet_name="Resumo", index=False)
-        report_export.to_excel(writer, sheet_name="Relatorio Completo", index=False)
-        destaque_df.to_excel(writer, sheet_name="Exclusao Identificada", index=False)
 
-        _set_column_widths_openpyxl(writer, resumo_df, "Resumo")
-        _set_column_widths_openpyxl(writer, report_export, "Relatorio Completo")
-        _set_column_widths_openpyxl(writer, destaque_df, "Exclusao Identificada")
+        resumo_df.to_excel(writer, sheet_name="Resumo Executivo", index=False)
+        exclusao.to_excel(writer, sheet_name="Exclusão Identificada", index=False)
+        sem_indicio.to_excel(writer, sheet_name="Sem Indício", index=False)
+        divergente.to_excel(writer, sheet_name="Divergente", index=False)
+        sem_dados.to_excel(writer, sheet_name="Sem Dados", index=False)
+        report.to_excel(writer, sheet_name="Relatorio Completo", index=False)
+
+        ajustar_largura(writer, resumo_df, "Resumo Executivo")
+        ajustar_largura(writer, exclusao, "Exclusão Identificada")
+        ajustar_largura(writer, sem_indicio, "Sem Indício")
+        ajustar_largura(writer, divergente, "Divergente")
+        ajustar_largura(writer, sem_dados, "Sem Dados")
+        ajustar_largura(writer, report, "Relatorio Completo")
 
     output.seek(0)
     return output.getvalue()
