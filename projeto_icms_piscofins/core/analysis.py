@@ -1,13 +1,10 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 
 def make_item_key(df: pd.DataFrame) -> pd.Series:
-    """
-    Monta chave de cruzamento em nível de item.
-    Prioriza a chave da NF-e; se não houver, usa fallback.
-    """
     chave = df.get("chave", pd.Series(index=df.index, dtype="object")).fillna("").astype(str).str.strip()
     has_key = chave.str.len() >= 20
 
@@ -23,9 +20,6 @@ def make_item_key(df: pd.DataFrame) -> pd.Series:
 
 
 def prepare_join(icms_df: pd.DataFrame, pis_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Cruza itens do SPED ICMS/IPI com itens do SPED PIS/COFINS.
-    """
     icms = icms_df.copy()
     pis = pis_df.copy()
 
@@ -57,123 +51,6 @@ def ensure_text(df: pd.DataFrame, col: str) -> pd.Series:
     return df[col].fillna("").astype(str).str.strip()
 
 
-def classify_row(row: pd.Series, tolerancia: float) -> pd.Series:
-    """
-    Classificação principal:
-    - Exclusão identificada
-    - Sem indício de exclusão
-    - Divergente / Revisar
-    - Sem dados suficientes
-    """
-    base_icms = float(row.get("bc_icms_final", 0) or 0)
-    valor_icms = float(row.get("vl_icms_final", 0) or 0)
-    base_pis = float(row.get("bc_pis_pis", 0) or 0)
-    base_cofins = float(row.get("bc_cofins_pis", 0) or 0)
-    valor_icms_st = float(row.get("vl_icms_st_final", 0) or 0)
-
-    ind_oper = str(row.get("ind_oper_pis", row.get("ind_oper_icms", "")) or "").strip()
-    ind_oper_desc = str(row.get("ind_oper_desc_pis", "") or "").strip().lower()
-    situacao_ok = bool(row.get("situacao_ok_pis", True))
-    join_ok_bool = row.get("_merge") == "both"
-
-    dif_icms_pis = base_icms - base_pis
-    dif_icms_cofins = base_icms - base_cofins
-
-    pis_excluido = (
-        abs(dif_icms_pis - valor_icms) <= tolerancia
-        if base_icms > 0 and base_pis > 0 and valor_icms > 0
-        else False
-    )
-    cofins_excluido = (
-        abs(dif_icms_cofins - valor_icms) <= tolerancia
-        if base_icms > 0 and base_cofins > 0 and valor_icms > 0
-        else False
-    )
-
-    bases_iguais_pis = abs(base_icms - base_pis) <= tolerancia if base_icms > 0 and base_pis > 0 else False
-    bases_iguais_cofins = abs(base_icms - base_cofins) <= tolerancia if base_icms > 0 and base_cofins > 0 else False
-
-    possui_st = valor_icms_st > tolerancia
-    documento_entrada = ind_oper == "0" or ind_oper_desc == "entrada"
-
-    motivos = []
-
-    if not situacao_ok:
-        motivos.append("Situação do documento não é regular")
-
-    if possui_st:
-        motivos.append("Possui ICMS-ST")
-
-    if documento_entrada:
-        motivos.append("Documento de entrada")
-
-    if not join_ok_bool:
-        motivos.append("Item não localizado no arquivo ICMS/IPI")
-
-    if base_icms <= 0 or valor_icms <= 0 or (base_pis <= 0 and base_cofins <= 0):
-        status = "Sem dados suficientes"
-        if not motivos:
-            motivos.append("Campos essenciais ausentes para comparação")
-    elif pis_excluido and cofins_excluido:
-        status = "Exclusão identificada"
-        if not motivos:
-            motivos.append("A diferença entre Base ICMS e Bases PIS/COFINS equivale ao Valor de ICMS")
-    elif bases_iguais_pis and bases_iguais_cofins:
-        status = "Sem indício de exclusão"
-        if not motivos:
-            motivos.append("Bases de ICMS, PIS e COFINS estão equivalentes")
-    else:
-        status = "Divergente / Revisar"
-        if not motivos:
-            motivos.append("Diferenças entre as bases não equivalem ao Valor de ICMS")
-
-    return pd.Series(
-        {
-            "dif_icms_pis": dif_icms_pis,
-            "dif_icms_cofins": dif_icms_cofins,
-            "pis_excluido": pis_excluido,
-            "cofins_excluido": cofins_excluido,
-            "pis_excluido_txt": "Sim" if pis_excluido else "Não",
-            "cofins_excluido_txt": "Sim" if cofins_excluido else "Não",
-            "status_analise": status,
-            "motivo": " | ".join(dict.fromkeys([m for m in motivos if m])),
-            "possui_st": "Sim" if possui_st else "Não",
-            "join_ok": "Sim" if join_ok_bool else "Não",
-            "documento_entrada": "Sim" if documento_entrada else "Não",
-        }
-    )
-
-
-def calculate_credit_row(row: pd.Series, aliq_pis: float, aliq_cofins: float) -> pd.Series:
-    """
-    Crédito só é calculado quando NÃO houver indício de exclusão.
-    """
-    status = str(row.get("status_analise", "") or "").strip()
-
-    if status != "Sem indício de exclusão":
-        return pd.Series(
-            {
-                "credito_pis_estimado": 0.0,
-                "credito_cofins_estimado": 0.0,
-                "credito_total_estimado": 0.0,
-            }
-        )
-
-    dif_pis = max(float(row.get("dif_icms_pis", 0) or 0), 0.0)
-    dif_cofins = max(float(row.get("dif_icms_cofins", 0) or 0), 0.0)
-
-    credito_pis = dif_pis * (aliq_pis / 100.0)
-    credito_cofins = dif_cofins * (aliq_cofins / 100.0)
-
-    return pd.Series(
-        {
-            "credito_pis_estimado": credito_pis,
-            "credito_cofins_estimado": credito_cofins,
-            "credito_total_estimado": credito_pis + credito_cofins,
-        }
-    )
-
-
 def run_analysis(
     icms_df: pd.DataFrame,
     pis_df: pd.DataFrame,
@@ -181,14 +58,9 @@ def run_analysis(
     aliq_pis: float = 1.65,
     aliq_cofins: float = 7.60,
 ) -> tuple[pd.DataFrame, dict]:
-    """
-    Executa a análise principal e devolve:
-    - report: dataframe final para tela/exportação
-    - resumo: indicadores gerais
-    """
     merged = prepare_join(icms_df, pis_df)
 
-    # Campos numéricos
+    # Numéricos
     merged["valor_item_pis"] = ensure_numeric(merged, "valor_item_pis")
 
     merged["bc_icms_pis_orig"] = ensure_numeric(merged, "bc_icms_pis")
@@ -205,36 +77,44 @@ def run_analysis(
     merged["bc_cofins_pis"] = ensure_numeric(merged, "bc_cofins_pis")
 
     # Fallback: prioriza ICMS/IPI
-    merged["bc_icms_final"] = merged["bc_icms_icms_orig"].where(
+    merged["bc_icms_final"] = np.where(
         merged["bc_icms_icms_orig"] != 0,
+        merged["bc_icms_icms_orig"],
         merged["bc_icms_pis_orig"],
     )
 
-    merged["vl_icms_final"] = merged["vl_icms_icms_orig"].where(
+    merged["vl_icms_final"] = np.where(
         merged["vl_icms_icms_orig"] != 0,
+        merged["vl_icms_icms_orig"],
         merged["vl_icms_pis_orig"],
     )
 
-    merged["bc_icms_st_final"] = merged["bc_icms_st_icms_orig"].where(
+    merged["bc_icms_st_final"] = np.where(
         merged["bc_icms_st_icms_orig"] != 0,
+        merged["bc_icms_st_icms_orig"],
         merged["bc_icms_st_pis_orig"],
     )
 
-    merged["vl_icms_st_final"] = merged["vl_icms_st_icms_orig"].where(
+    merged["vl_icms_st_final"] = np.where(
         merged["vl_icms_st_icms_orig"] != 0,
+        merged["vl_icms_st_icms_orig"],
         merged["vl_icms_st_pis_orig"],
     )
 
-    # Origem dos valores finais
-    merged["origem_icms_base"] = "Sem valor"
-    merged.loc[merged["bc_icms_pis_orig"] != 0, "origem_icms_base"] = "PIS/COFINS"
-    merged.loc[merged["bc_icms_icms_orig"] != 0, "origem_icms_base"] = "ICMS/IPI"
+    # Origem
+    merged["origem_icms_base"] = np.where(
+        merged["bc_icms_icms_orig"] != 0,
+        "ICMS/IPI",
+        np.where(merged["bc_icms_pis_orig"] != 0, "PIS/COFINS", "Sem valor"),
+    )
 
-    merged["origem_icms_valor"] = "Sem valor"
-    merged.loc[merged["vl_icms_pis_orig"] != 0, "origem_icms_valor"] = "PIS/COFINS"
-    merged.loc[merged["vl_icms_icms_orig"] != 0, "origem_icms_valor"] = "ICMS/IPI"
+    merged["origem_icms_valor"] = np.where(
+        merged["vl_icms_icms_orig"] != 0,
+        "ICMS/IPI",
+        np.where(merged["vl_icms_pis_orig"] != 0, "PIS/COFINS", "Sem valor"),
+    )
 
-    # Campos textuais
+    # Textuais
     merged["empresa_pis"] = ensure_text(merged, "empresa_pis")
     merged["cnpj_matriz_pis"] = ensure_text(merged, "cnpj_matriz_pis")
     merged["mes_pis"] = ensure_text(merged, "mes_pis")
@@ -246,19 +126,95 @@ def run_analysis(
     merged["cod_produto_pis"] = ensure_text(merged, "cod_produto_pis")
     merged["descricao_pis"] = ensure_text(merged, "descricao_pis")
     merged["ind_oper_desc_pis"] = ensure_text(merged, "ind_oper_desc_pis")
+    merged["ind_oper_pis_txt"] = ensure_text(merged, "ind_oper_pis")
+    merged["ind_oper_icms_txt"] = ensure_text(merged, "ind_oper_icms")
+
     merged["cfop"] = ensure_text(merged, "cfop_pis")
     merged.loc[merged["cfop"] == "", "cfop"] = ensure_text(merged, "cfop_icms")
 
-    # Classificação
-    calc = merged.apply(classify_row, axis=1, tolerancia=tolerancia)
-    result = pd.concat([merged, calc], axis=1)
+    # Flags e diferenças
+    merged["dif_icms_pis"] = merged["bc_icms_final"] - merged["bc_pis_pis"]
+    merged["dif_icms_cofins"] = merged["bc_icms_final"] - merged["bc_cofins_pis"]
 
-    # Crédito condicionado ao status
-    creditos = result.apply(calculate_credit_row, axis=1, aliq_pis=aliq_pis, aliq_cofins=aliq_cofins)
-    result = pd.concat([result, creditos], axis=1)
+    cond_pis_campos = (merged["bc_icms_final"] > 0) & (merged["bc_pis_pis"] > 0) & (merged["vl_icms_final"] > 0)
+    cond_cofins_campos = (merged["bc_icms_final"] > 0) & (merged["bc_cofins_pis"] > 0) & (merged["vl_icms_final"] > 0)
 
-    # Relatório final
-    report = result[
+    merged["pis_excluido"] = cond_pis_campos & ((merged["dif_icms_pis"] - merged["vl_icms_final"]).abs() <= tolerancia)
+    merged["cofins_excluido"] = cond_cofins_campos & ((merged["dif_icms_cofins"] - merged["vl_icms_final"]).abs() <= tolerancia)
+
+    merged["pis_excluido_txt"] = np.where(merged["pis_excluido"], "Sim", "Não")
+    merged["cofins_excluido_txt"] = np.where(merged["cofins_excluido"], "Sim", "Não")
+
+    bases_iguais_pis = (merged["bc_icms_final"] > 0) & (merged["bc_pis_pis"] > 0) & ((merged["bc_icms_final"] - merged["bc_pis_pis"]).abs() <= tolerancia)
+    bases_iguais_cofins = (merged["bc_icms_final"] > 0) & (merged["bc_cofins_pis"] > 0) & ((merged["bc_icms_final"] - merged["bc_cofins_pis"]).abs() <= tolerancia)
+
+    merged["possui_st"] = np.where(merged["vl_icms_st_final"] > tolerancia, "Sim", "Não")
+    merged["join_ok"] = np.where(merged["_merge"] == "both", "Sim", "Não")
+
+    documento_entrada_bool = (
+        (merged["ind_oper_pis_txt"] == "0")
+        | (merged["ind_oper_icms_txt"] == "0")
+        | (merged["ind_oper_desc_pis"].str.lower() == "entrada")
+    )
+    merged["documento_entrada"] = np.where(documento_entrada_bool, "Sim", "Não")
+
+    situacao_ok = merged["situacao_ok_pis"] if "situacao_ok_pis" in merged.columns else pd.Series(True, index=merged.index)
+
+    sem_dados = (merged["bc_icms_final"] <= 0) | (merged["vl_icms_final"] <= 0) | ((merged["bc_pis_pis"] <= 0) & (merged["bc_cofins_pis"] <= 0))
+    exclusao = merged["pis_excluido"] & merged["cofins_excluido"]
+    sem_indicio = bases_iguais_pis & bases_iguais_cofins & (~sem_dados) & (~exclusao)
+
+    merged["status_analise"] = np.select(
+        [
+            sem_dados,
+            exclusao,
+            sem_indicio,
+        ],
+        [
+            "Sem dados suficientes",
+            "Exclusão identificada",
+            "Sem indício de exclusão",
+        ],
+        default="Divergente / Revisar",
+    )
+
+    # Motivo
+    motivos = []
+
+    for idx in merged.index:
+        m = []
+        if not bool(situacao_ok.loc[idx]):
+            m.append("Situação do documento não é regular")
+        if merged.at[idx, "possui_st"] == "Sim":
+            m.append("Possui ICMS-ST")
+        if merged.at[idx, "documento_entrada"] == "Sim":
+            m.append("Documento de entrada")
+        if merged.at[idx, "join_ok"] == "Não":
+            m.append("Item não localizado no arquivo ICMS/IPI")
+
+        status = merged.at[idx, "status_analise"]
+        if status == "Sem dados suficientes" and not m:
+            m.append("Campos essenciais ausentes para comparação")
+        elif status == "Exclusão identificada" and not m:
+            m.append("A diferença entre Base ICMS e Bases PIS/COFINS equivale ao Valor de ICMS")
+        elif status == "Sem indício de exclusão" and not m:
+            m.append("Bases de ICMS, PIS e COFINS estão equivalentes")
+        elif status == "Divergente / Revisar" and not m:
+            m.append("Diferenças entre as bases não equivalem ao Valor de ICMS")
+
+        motivos.append(" | ".join(dict.fromkeys([x for x in m if x])))
+
+    merged["motivo"] = motivos
+
+    # Crédito: só quando NÃO houver indício de exclusão
+    base_credito_pis = np.where(merged["status_analise"] == "Sem indício de exclusão", np.maximum(merged["dif_icms_pis"], 0), 0)
+    base_credito_cofins = np.where(merged["status_analise"] == "Sem indício de exclusão", np.maximum(merged["dif_icms_cofins"], 0), 0)
+
+    merged["credito_pis_estimado"] = base_credito_pis * (aliq_pis / 100.0)
+    merged["credito_cofins_estimado"] = base_credito_cofins * (aliq_cofins / 100.0)
+    merged["credito_total_estimado"] = merged["credito_pis_estimado"] + merged["credito_cofins_estimado"]
+
+    report = merged[
         [
             "empresa_pis",
             "cnpj_matriz_pis",
