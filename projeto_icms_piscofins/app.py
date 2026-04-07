@@ -11,8 +11,11 @@ from core.utils import validate_excel_path
 
 
 st.set_page_config(page_title="Auditor ICMS x PIS/COFINS", layout="wide")
-st.title("Auditor local — comparação entre base de ICMS e bases de PIS/COFINS")
-st.caption("Projeto local para leitura por caminho de arquivos Excel convertidos do SPED.")
+st.title("Auditor local — exclusão de PIS/COFINS da base de cálculo do ICMS")
+st.caption(
+    "Leitura local por caminho dos arquivos Excel convertidos do SPED. "
+    "O relatório é gerado apenas para download, sem salvar arquivos na pasta do projeto."
+)
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -36,6 +39,13 @@ def fmt_int(value) -> str:
         return f"{int(value):,}".replace(",", ".")
     except Exception:
         return "0"
+
+
+def fmt_money(value) -> str:
+    try:
+        return f"R$ {float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "R$ 0,00"
 
 
 def contar_preenchidos(df: pd.DataFrame, col: str) -> int:
@@ -66,15 +76,28 @@ def montar_diagnostico_relatorio(report: pd.DataFrame) -> dict:
         "valor_icms_final_preenchido": contar_preenchidos(report, "Valor de ICMS Final"),
         "base_pis_preenchida": contar_preenchidos(report, "Base de PIS Informada"),
         "base_cofins_preenchida": contar_preenchidos(report, "Base de COFINS Informada"),
+        "credito_total_estimado": 0.0,
         "join_sim": 0,
         "join_nao": 0,
     }
+
+    if "Crédito Total Estimado" in report.columns:
+        diagnostico["credito_total_estimado"] = float(
+            pd.to_numeric(report["Crédito Total Estimado"], errors="coerce").fillna(0).sum()
+        )
 
     if "Cruzou com ICMS/IPI" in report.columns:
         diagnostico["join_sim"] = int((report["Cruzou com ICMS/IPI"].astype(str) == "Sim").sum())
         diagnostico["join_nao"] = int((report["Cruzou com ICMS/IPI"].astype(str) == "Não").sum())
 
     return diagnostico
+
+
+def filtrar_por_status(report: pd.DataFrame, status: str) -> pd.DataFrame:
+    coluna_status = encontrar_coluna_status(report)
+    if not coluna_status:
+        return report.copy()
+    return report[report[coluna_status] == status].copy()
 
 
 with st.sidebar:
@@ -85,12 +108,30 @@ with st.sidebar:
         min_value=0.0,
         value=0.01,
         step=0.01,
+        help="Diferença máxima aceita para considerar que a diferença entre as bases equivale ao valor do ICMS.",
+    )
+
+    aliq_pis = st.number_input(
+        "Alíquota estimada de PIS (%)",
+        min_value=0.0,
+        value=1.65,
+        step=0.01,
+        help="Usada apenas nos itens classificados como 'Sem indício de exclusão'.",
+    )
+
+    aliq_cofins = st.number_input(
+        "Alíquota estimada de COFINS (%)",
+        min_value=0.0,
+        value=7.60,
+        step=0.01,
+        help="Usada apenas nos itens classificados como 'Sem indício de exclusão'.",
     )
 
     operacoes = st.multiselect(
         "Operações para análise",
         options=["Entrada", "Saída"],
         default=["Saída"],
+        help="Por padrão, a análise vem focada em saídas. Marque entrada apenas se quiser revisar esse grupo.",
     )
 
     somente_regulares = st.checkbox(
@@ -103,7 +144,10 @@ with st.sidebar:
         value=True,
     )
 
-    st.caption("Dica: na primeira leitura arquivos grandes podem demorar alguns segundos. Nas próximas execuções, o cache ajuda a acelerar.")
+    st.caption(
+        "Dica: na primeira leitura, arquivos grandes podem demorar alguns segundos. "
+        "Nas próximas execuções, o cache ajuda a acelerar."
+    )
 
 
 st.subheader("Arquivos de entrada")
@@ -132,7 +176,6 @@ if st.button("Processar arquivos", type="primary", use_container_width=True):
         with st.spinner("Processando arquivos... Isso pode levar alguns segundos dependendo do tamanho."):
             status_box.info("Validando caminhos dos arquivos...")
             progress.progress(10, text="Validando caminhos...")
-
             validate_excel_path(caminho_icms)
             validate_excel_path(caminho_pis)
 
@@ -166,6 +209,8 @@ if st.button("Processar arquivos", type="primary", use_container_width=True):
                 icms_df=df_icms,
                 pis_df=df_pis,
                 tolerancia=tolerancia,
+                aliq_pis=aliq_pis,
+                aliq_cofins=aliq_cofins,
             )
 
             st.session_state["report"] = report
@@ -195,6 +240,12 @@ if "report" in st.session_state:
     d.metric("Divergente / Revisar", fmt_int(resumo.get("itens_divergente_revisar", 0)))
     e.metric("Sem dados suficientes", fmt_int(resumo.get("itens_sem_dados", 0)))
 
+    st.subheader("Crédito estimado")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Crédito PIS estimado", fmt_money(pd.to_numeric(report.get("Crédito PIS Estimado", 0), errors="coerce").fillna(0).sum() if "Crédito PIS Estimado" in report.columns else 0))
+    c2.metric("Crédito COFINS estimado", fmt_money(pd.to_numeric(report.get("Crédito COFINS Estimado", 0), errors="coerce").fillna(0).sum() if "Crédito COFINS Estimado" in report.columns else 0))
+    c3.metric("Crédito total estimado", fmt_money(diagnostico.get("credito_total_estimado", 0.0)))
+
     if mostrar_diagnostico:
         st.subheader("Diagnóstico técnico")
         d1, d2, d3, d4, d5, d6 = st.columns(6)
@@ -217,20 +268,48 @@ if "report" in st.session_state:
                 st.markdown("**PIS/COFINS normalizado**")
                 st.dataframe(st.session_state["df_pis_bruto"].head(10), use_container_width=True)
 
-    st.subheader("Itens com exclusão identificada")
-    if coluna_status:
-        identificadas = report[report[coluna_status] == "Exclusão identificada"].copy()
-    else:
-        st.warning("A coluna de status da análise não foi encontrada no relatório. Mostrando o relatório completo.")
-        identificadas = report.copy()
+    tab1, tab2, tab3, tab4 = st.tabs(
+        [
+            "Exclusão Identificada",
+            "Sem Indício",
+            "Divergente / Revisar",
+            "Relatório Completo",
+        ]
+    )
 
-    st.dataframe(identificadas, use_container_width=True, height=420)
+    with tab1:
+        st.dataframe(
+            filtrar_por_status(report, "Exclusão identificada"),
+            use_container_width=True,
+            height=420,
+        )
 
-    with st.expander("Ver relatório completo"):
+    with tab2:
+        st.dataframe(
+            filtrar_por_status(report, "Sem indício de exclusão"),
+            use_container_width=True,
+            height=420,
+        )
+
+    with tab3:
+        divergente = pd.concat(
+            [
+                filtrar_por_status(report, "Divergente / Revisar"),
+                filtrar_por_status(report, "Sem dados suficientes"),
+            ],
+            ignore_index=True,
+        ).drop_duplicates()
+
+        st.dataframe(
+            divergente,
+            use_container_width=True,
+            height=420,
+        )
+
+    with tab4:
         st.dataframe(report, use_container_width=True, height=520)
 
     st.subheader("Baixar relatório")
-
     try:
         excel_bytes = export_report_to_bytes(report, resumo)
 
@@ -248,3 +327,21 @@ if "report" in st.session_state:
 
 else:
     st.info("Informe os caminhos dos dois arquivos e clique em Processar arquivos.")
+
+    with st.expander("Escopo desta versão"):
+        st.markdown(
+            """
+- Leitura local por caminho de arquivos Excel convertidos do SPED.
+- Cruzamento prioritário em nível de item pela chave da NF-e; na falta dela, usa fallback com CNPJ + nota + série + item + competência.
+- Validação da lógica:
+  - **Base de ICMS - Base de PIS ≈ Valor de ICMS**
+  - **Base de ICMS - Base de COFINS ≈ Valor de ICMS**
+- Classificação em:
+  - **Exclusão identificada**
+  - **Sem indício de exclusão**
+  - **Divergente / Revisar**
+  - **Sem dados suficientes**
+- Crédito estimado apenas nos itens classificados como **Sem indício de exclusão**.
+- Geração do Excel em memória, apenas para download.
+            """
+        )
