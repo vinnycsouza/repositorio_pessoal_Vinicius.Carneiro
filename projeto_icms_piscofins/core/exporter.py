@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import io
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 from openpyxl import Workbook
+
+
+ProgressCallback = Callable[[int, int, str], None]
 
 
 def criar_resumo(report: pd.DataFrame, resumo: dict[str, Any]) -> pd.DataFrame:
@@ -100,7 +103,11 @@ def _append_dataframe(ws, df: pd.DataFrame) -> None:
         ws.append(list(row))
 
 
-def export_report_to_bytes(report: pd.DataFrame, resumo: dict[str, Any]) -> bytes:
+def export_report_to_bytes(
+    report: pd.DataFrame,
+    resumo: dict[str, Any],
+    progress_callback: ProgressCallback | None = None,
+) -> bytes:
     report_export = report.copy()
 
     colunas_numericas = [
@@ -151,9 +158,16 @@ def export_report_to_bytes(report: pd.DataFrame, resumo: dict[str, Any]) -> byte
         ("Relatorio Completo", completo_df),
     ]
 
-    for nome, df in sheets:
+    total_sheets = len(sheets)
+
+    for idx, (nome, df) in enumerate(sheets, start=1):
+        if progress_callback:
+            progress_callback(idx - 1, total_sheets, f"Montando aba: {nome}")
         ws = wb.create_sheet(title=nome[:31])
         _append_dataframe(ws, df)
+
+    if progress_callback:
+        progress_callback(total_sheets, total_sheets, "Finalizando arquivo Excel...")
 
     output = io.BytesIO()
     wb.save(output)

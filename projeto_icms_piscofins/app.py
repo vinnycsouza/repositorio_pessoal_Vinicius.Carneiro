@@ -17,7 +17,21 @@ st.caption(
     "A tela mostra apenas amostras; o detalhamento completo vai no Excel."
 )
 
+# =========================
+# Reset da aplicação
+# =========================
+col_reset_1, col_reset_2 = st.columns([1, 4])
+with col_reset_1:
+    if st.button("🔄 Resetar aplicação", use_container_width=True):
+        st.cache_data.clear()
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
 
+
+# =========================
+# Cache de leitura/análise
+# =========================
 @st.cache_data(show_spinner=False, ttl=3600)
 def carregar_itens_icms(path_str: str) -> pd.DataFrame:
     path = validate_excel_path(path_str)
@@ -49,6 +63,9 @@ def analisar_dados(
     )
 
 
+# =========================
+# Utilidades
+# =========================
 def fmt_int(value) -> str:
     try:
         return f"{int(value):,}".replace(",", ".")
@@ -123,6 +140,9 @@ def mostrar_amostra(df: pd.DataFrame, limite: int, mensagem: str, height: int = 
         st.info(mensagem)
 
 
+# =========================
+# Sidebar
+# =========================
 with st.sidebar:
     st.header("Parâmetros")
 
@@ -134,9 +154,15 @@ with st.sidebar:
     somente_regulares = st.checkbox("Considerar apenas documentos regulares", value=True)
     mostrar_diagnostico = st.checkbox("Mostrar diagnóstico técnico", value=False)
 
-    st.caption("Arquivos grandes podem demorar na primeira leitura. Nas próximas execuções, o cache ajuda a acelerar.")
+    st.caption(
+        "Arquivos grandes podem demorar na primeira leitura. "
+        "Nas próximas execuções, o cache ajuda a acelerar."
+    )
 
 
+# =========================
+# Entradas
+# =========================
 st.subheader("Arquivos de entrada")
 col1, col2 = st.columns(2)
 
@@ -155,6 +181,9 @@ with col2:
     )
 
 
+# =========================
+# Processamento
+# =========================
 if st.button("Processar arquivos", type="primary", use_container_width=True):
     try:
         progress = st.progress(0, text="Iniciando processamento...")
@@ -207,6 +236,9 @@ if st.button("Processar arquivos", type="primary", use_container_width=True):
         st.exception(exc)
 
 
+# =========================
+# Resultado
+# =========================
 if "report" in st.session_state:
     report = st.session_state["report"]
     resumo = st.session_state.get("resumo", {})
@@ -239,9 +271,25 @@ if "report" in st.session_state:
     c3.metric("Crédito total estimado", fmt_money(diagnostico.get("credito_total_estimado", 0.0)))
 
     st.subheader("Baixar relatório")
+
     if st.button("Preparar Excel para download", use_container_width=True):
+        progress_excel = st.progress(0, text="Iniciando geração do Excel...")
+        status_excel = st.empty()
+
+        def callback_excel(atual: int, total: int, mensagem: str):
+            pct = int((atual / total) * 100) if total else 0
+            progress_excel.progress(min(pct, 100), text=mensagem)
+            status_excel.info(mensagem)
+
         with st.spinner("Gerando Excel em modo otimizado..."):
-            st.session_state["excel_bytes"] = export_report_to_bytes(report, resumo)
+            st.session_state["excel_bytes"] = export_report_to_bytes(
+                report,
+                resumo,
+                progress_callback=callback_excel,
+            )
+
+        progress_excel.progress(100, text="Excel finalizado.")
+        status_excel.success("Arquivo pronto para download.")
 
     if "excel_bytes" in st.session_state:
         st.download_button(
