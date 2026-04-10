@@ -9,10 +9,115 @@ from typing import List, Optional, Tuple, Dict
 import streamlit as st
 
 
-st.set_page_config(page_title="Filtro SPED ZIP", layout="centered")
-st.title("Filtro simples de SPED por competência")
-st.caption("Envia um ZIP, o app escolhe a entrega correta por competência e devolve um novo ZIP filtrado.")
+# =========================================================
+# CONFIGURAÇÃO DA PÁGINA
+# =========================================================
 
+st.set_page_config(
+    page_title="Filtro simples de SPED por competência",
+    layout="centered",
+)
+
+st.title("Filtro simples de SPED por competência")
+st.caption(
+    "Envie um arquivo ZIP para filtrar automaticamente a entrega correta de cada competência."
+)
+
+
+# =========================================================
+# TEXTO DE ORIENTAÇÃO
+# =========================================================
+
+st.subheader("Padrão de uso")
+st.markdown("""
+**Como utilizar o programa**
+
+Este sistema foi desenvolvido para trabalhar com **arquivos SPED compactados em formato `.zip`**, realizando a filtragem automática das entregas por competência.
+
+**Regras para uso correto:**
+- O arquivo deve ser enviado **sempre em pasta zipada (`.zip`)**.
+- O conteúdo do ZIP deve corresponder a **um único ano-calendário**.
+- Recomendamos organizar os arquivos por ano antes de compactar.
+- O programa analisa os arquivos `.txt` e `.rec` existentes dentro do ZIP.
+- O sistema sempre prioriza a **entrega retificadora mais recente**, quando houver.
+- Na ausência de retificadora, será considerada a **entrega original**.
+- O arquivo `.rec` será incluído no resultado **apenas quando existir e corresponder à entrega vencedora**.
+- O arquivo `.txt` é sempre tratado como o arquivo principal da escrituração.
+
+**Importante sobre tamanho dos arquivos**
+- Para evitar falhas de processamento, envie os arquivos **separados por ano-calendário**.
+- Não é recomendável juntar vários anos no mesmo ZIP.
+- Caso a base seja muito grande, o ideal é gerar **um ZIP para cada ano**.
+
+**Exemplo de uso recomendado**
+- `SPED 2021.zip`
+- `SPED 2022.zip`
+- `SPED 2023.zip`
+
+**Resultado gerado pelo sistema**
+- O programa irá gerar um **novo arquivo ZIP filtrado**, contendo apenas os arquivos válidos de cada competência encontrada no período enviado.
+""")
+
+st.warning("""
+**Observações importantes**
+- O programa não substitui conferência fiscal.
+- O objetivo é organizar e filtrar automaticamente os arquivos da escrituração.
+- Se o ZIP não contiver arquivos SPED válidos, o processamento não será concluído.
+- Arquivos com estrutura inconsistente, corrompidos ou fora do padrão podem não ser aproveitados.
+""")
+
+
+# =========================================================
+# ESTADO / RESET
+# =========================================================
+
+if "reset_counter" not in st.session_state:
+    st.session_state.reset_counter = 0
+
+if "zip_filtrado_bytes" not in st.session_state:
+    st.session_state.zip_filtrado_bytes = None
+
+if "nome_zip_saida" not in st.session_state:
+    st.session_state.nome_zip_saida = None
+
+if "selecionados_resumo" not in st.session_state:
+    st.session_state.selecionados_resumo = []
+
+if "metricas" not in st.session_state:
+    st.session_state.metricas = None
+
+if "erro_processamento" not in st.session_state:
+    st.session_state.erro_processamento = None
+
+
+def resetar_app() -> None:
+    st.session_state.reset_counter += 1
+    st.session_state.zip_filtrado_bytes = None
+    st.session_state.nome_zip_saida = None
+    st.session_state.selecionados_resumo = []
+    st.session_state.metricas = None
+    st.session_state.erro_processamento = None
+    st.rerun()
+
+
+col_upload, col_reset = st.columns([4, 1])
+
+with col_reset:
+    st.write("")
+    st.write("")
+    if st.button("Resetar", use_container_width=True):
+        resetar_app()
+
+uploaded_file = col_upload.file_uploader(
+    "Envie o arquivo ZIP",
+    type=["zip"],
+    key=f"upload_zip_{st.session_state.reset_counter}",
+)
+
+
+# =========================================================
+# MODELO
+# =========================================================
 
 EXTENSOES_ACEITAS = {".txt", ".rec"}
 
@@ -24,17 +129,20 @@ class ArquivoSped:
     nome_base: str
     extensao: str
     cnpj: str
-    competencia: str          # YYYY-MM
-    cod_fin: str              # 0 original / 1 retificadora
+    competencia: str
+    cod_fin: str
     tipo_entrega: str
     dt_ini: str
     dt_fim: str
     modificado_em_zip: datetime
     tamanho: int
     timestamp_nome: Optional[datetime] = None
-    grupo_entrega: str = ""
     manter: bool = False
 
+
+# =========================================================
+# FUNÇÕES AUXILIARES
+# =========================================================
 
 def limpar_cnpj(valor: str) -> str:
     return re.sub(r"\D", "", valor or "")
@@ -75,6 +183,14 @@ def localizar_registro_0000(linhas: List[str]) -> Optional[List[str]]:
 
 
 def interpretar_registro_0000(partes: List[str]) -> Tuple[str, str, str, str, str, str]:
+    """
+    Estrutura esperada do EFD Contribuições:
+    [1]=0000
+    [3]=COD_FIN
+    [4]=DT_INI
+    [5]=DT_FIN
+    [7]=CNPJ
+    """
     cod_fin = partes[3].strip() if len(partes) > 3 else ""
     dt_ini = partes[4].strip() if len(partes) > 4 else ""
     dt_fim = partes[5].strip() if len(partes) > 5 else ""
@@ -97,8 +213,10 @@ def normalizar_nome_base(nome_arquivo: str) -> str:
 
 def extrair_timestamp_do_nome(nome_arquivo: str) -> Optional[datetime]:
     """
-    Procura timestamps no nome, priorizando formato YYYYMMDDHHMMSS.
-    Ex.: PISCOFINS_20210301_20210331_05240070000130_1_20231130153636.txt
+    Procura timestamps no nome, priorizando YYYYMMDDHHMMSS.
+    Exemplos:
+    - PISCOFINS_20210301_20210331_05240070000130_1_20231130153636.txt
+    - ALGUM_ARQUIVO_20210131.txt
     """
     base = Path(nome_arquivo).stem
 
@@ -121,7 +239,7 @@ def extrair_timestamp_do_nome(nome_arquivo: str) -> Optional[datetime]:
 
 def nome_base_sem_timestamp(nome_arquivo: str) -> str:
     """
-    Remove timestamps longos do nome para facilitar o vínculo txt/rec.
+    Remove timestamps para facilitar o vínculo entre .txt e .rec.
     """
     base = normalizar_nome_base(nome_arquivo)
     base = re.sub(r"(?<!\d)20\d{12}(?!\d)", "", base)
@@ -129,21 +247,6 @@ def nome_base_sem_timestamp(nome_arquivo: str) -> str:
     base = re.sub(r"__+", "_", base)
     base = base.strip("_- ")
     return base
-
-
-def score_tipo(item: ArquivoSped) -> int:
-    if item.extensao == ".txt":
-        return 2
-    if item.extensao == ".rec":
-        return 1
-    return 0
-
-
-def chave_candidata_para_txt(item: ArquivoSped) -> str:
-    """
-    Chave mais ampla da entrega, ignorando extensão.
-    """
-    return f"{item.cnpj}|{item.competencia}|{item.cod_fin}|{nome_base_sem_timestamp(item.nome_arquivo)}"
 
 
 def ler_zip_sped(upload_bytes: bytes) -> List[ArquivoSped]:
@@ -169,8 +272,8 @@ def ler_zip_sped(upload_bytes: bytes) -> List[ArquivoSped]:
                 continue
 
             cnpj, competencia, cod_fin, tipo_entrega, dt_ini, dt_fim = interpretar_registro_0000(reg_0000)
-            dt_mod = datetime(*info.date_time)
             nome_arquivo = Path(info.filename).name
+            dt_mod_zip = datetime(*info.date_time)
 
             encontrados.append(
                 ArquivoSped(
@@ -184,7 +287,7 @@ def ler_zip_sped(upload_bytes: bytes) -> List[ArquivoSped]:
                     tipo_entrega=tipo_entrega,
                     dt_ini=dt_ini,
                     dt_fim=dt_fim,
-                    modificado_em_zip=dt_mod,
+                    modificado_em_zip=dt_mod_zip,
                     tamanho=info.file_size,
                     timestamp_nome=extrair_timestamp_do_nome(nome_arquivo),
                 )
@@ -195,12 +298,12 @@ def ler_zip_sped(upload_bytes: bytes) -> List[ArquivoSped]:
 
 def escolher_txt_vencedor(itens_comp: List[ArquivoSped]) -> Optional[ArquivoSped]:
     """
-    Escolhe a entrega vencedora usando apenas os .txt como base principal.
+    Escolhe o .txt vencedor da competência.
     Prioridade:
     1) Retificadora
-    2) timestamp do nome do arquivo
-    3) timestamp do zip
-    4) nome
+    2) Timestamp do nome do arquivo
+    3) Timestamp do ZIP
+    4) Nome do arquivo
     """
     txts = [i for i in itens_comp if i.extensao == ".txt"]
     if not txts:
@@ -221,12 +324,12 @@ def escolher_txt_vencedor(itens_comp: List[ArquivoSped]) -> Optional[ArquivoSped
 
 def rec_corresponde_ao_txt(rec: ArquivoSped, txt: ArquivoSped) -> bool:
     """
-    Tenta vincular o .rec ao .txt vencedor.
-    A lógica usa:
+    Vínculo entre .rec e .txt vencedor.
+    Regras:
     - mesmo CNPJ
     - mesma competência
     - mesmo COD_FIN
-    - nome sem timestamp compatível
+    - nome compatível sem timestamp
     """
     if rec.extensao != ".rec" or txt.extensao != ".txt":
         return False
@@ -244,7 +347,6 @@ def rec_corresponde_ao_txt(rec: ArquivoSped, txt: ArquivoSped) -> bool:
     if base_rec == base_txt:
         return True
 
-    # fallback: um conter o outro
     if base_rec and base_txt and (base_rec in base_txt or base_txt in base_rec):
         return True
 
@@ -258,28 +360,29 @@ def selecionar_validos(arquivos: List[ArquivoSped]) -> List[ArquivoSped]:
         grupos_comp.setdefault((arq.cnpj, arq.competencia), []).append(arq)
 
     for (_, _), itens_comp in grupos_comp.items():
+        for item in itens_comp:
+            item.manter = False
+
         txt_vencedor = escolher_txt_vencedor(itens_comp)
 
         if txt_vencedor is None:
-            # Cenário raro: não há txt, então mantém um único arquivo mais forte
+            # Cenário raro: não existe .txt na competência.
+            # Mantém o melhor arquivo disponível.
             def peso_sem_txt(item: ArquivoSped):
                 eh_ret = 1 if item.cod_fin == "1" else 0
                 ts_nome = item.timestamp_nome or datetime.min
+                score_ext = 1 if item.extensao == ".rec" else 0
                 return (
                     eh_ret,
-                    score_tipo(item),
+                    score_ext,
                     ts_nome,
                     item.modificado_em_zip,
                     item.nome_arquivo.lower(),
                 )
 
             vencedor = sorted(itens_comp, key=peso_sem_txt, reverse=True)[0]
-            for item in itens_comp:
-                item.manter = item is vencedor
+            vencedor.manter = True
             continue
-
-        for item in itens_comp:
-            item.manter = False
 
         txt_vencedor.manter = True
 
@@ -317,53 +420,113 @@ def montar_zip_filtrado(upload_bytes: bytes, arquivos: List[ArquivoSped]) -> byt
     return saida.getvalue()
 
 
-uploaded_file = st.file_uploader("Envie o arquivo ZIP", type=["zip"])
+def resumir_selecionados(selecionados: List[ArquivoSped]) -> List[Dict[str, str]]:
+    resumo = []
+    por_comp: Dict[Tuple[str, str], List[ArquivoSped]] = {}
+
+    for item in selecionados:
+        por_comp.setdefault((item.cnpj, item.competencia), []).append(item)
+
+    for (cnpj, competencia), itens in sorted(por_comp.items()):
+        txts = sorted([i.nome_arquivo for i in itens if i.extensao == ".txt"])
+        recs = sorted([i.nome_arquivo for i in itens if i.extensao == ".rec"])
+        tipo = itens[0].tipo_entrega if itens else ""
+
+        resumo.append({
+            "cnpj": cnpj,
+            "competencia": competencia,
+            "tipo": tipo,
+            "txts": ", ".join(txts) if txts else "",
+            "recs": ", ".join(recs) if recs else "",
+        })
+
+    return resumo
+
+
+def processar_zip(upload_bytes: bytes, nome_arquivo_original: str) -> None:
+    arquivos = ler_zip_sped(upload_bytes)
+
+    if not arquivos:
+        st.session_state.erro_processamento = (
+            "Nenhum arquivo SPED válido (.txt/.rec com registro 0000) foi encontrado dentro do ZIP."
+        )
+        st.session_state.zip_filtrado_bytes = None
+        st.session_state.nome_zip_saida = None
+        st.session_state.selecionados_resumo = []
+        st.session_state.metricas = None
+        return
+
+    arquivos = selecionar_validos(arquivos)
+    selecionados = [a for a in arquivos if a.manter]
+    zip_filtrado = montar_zip_filtrado(upload_bytes, arquivos)
+
+    total_comp = len(set((a.cnpj, a.competencia) for a in arquivos))
+    total_mantidos = len(selecionados)
+
+    st.session_state.zip_filtrado_bytes = zip_filtrado
+    st.session_state.nome_zip_saida = f"{Path(nome_arquivo_original).stem}_filtrado.zip"
+    st.session_state.selecionados_resumo = resumir_selecionados(selecionados)
+    st.session_state.metricas = {
+        "arquivos_lidos": len(arquivos),
+        "competencias": total_comp,
+        "arquivos_mantidos": total_mantidos,
+    }
+    st.session_state.erro_processamento = None
+
+
+# =========================================================
+# AÇÃO PRINCIPAL
+# =========================================================
 
 if uploaded_file is not None:
     if st.button("Processar ZIP", use_container_width=True):
         with st.spinner("Lendo e filtrando os arquivos..."):
-            zip_bytes = uploaded_file.read()
-            arquivos = ler_zip_sped(zip_bytes)
+            try:
+                zip_bytes = uploaded_file.read()
+                processar_zip(zip_bytes, uploaded_file.name)
+            except zipfile.BadZipFile:
+                st.session_state.erro_processamento = "O arquivo enviado não é um ZIP válido."
+                st.session_state.zip_filtrado_bytes = None
+                st.session_state.nome_zip_saida = None
+                st.session_state.selecionados_resumo = []
+                st.session_state.metricas = None
+            except Exception as e:
+                st.session_state.erro_processamento = f"Erro ao processar o arquivo: {e}"
+                st.session_state.zip_filtrado_bytes = None
+                st.session_state.nome_zip_saida = None
+                st.session_state.selecionados_resumo = []
+                st.session_state.metricas = None
 
-            if not arquivos:
-                st.error("Nenhum arquivo SPED válido (.txt/.rec com registro 0000) foi encontrado dentro do ZIP.")
-            else:
-                arquivos = selecionar_validos(arquivos)
-                zip_filtrado = montar_zip_filtrado(zip_bytes, arquivos)
 
-                selecionados = [a for a in arquivos if a.manter]
-                total_comp = len(set((a.cnpj, a.competencia) for a in arquivos))
+# =========================================================
+# EXIBIÇÃO DOS RESULTADOS
+# =========================================================
 
-                st.success("Processamento concluído.")
+if st.session_state.erro_processamento:
+    st.error(st.session_state.erro_processamento)
 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Arquivos SPED lidos", len(arquivos))
-                c2.metric("Competências encontradas", total_comp)
-                c3.metric("Arquivos mantidos", len(selecionados))
+if st.session_state.metricas:
+    st.success("Processamento concluído.")
 
-                st.subheader("Itens mantidos")
-                por_comp = {}
-                for a in selecionados:
-                    por_comp.setdefault((a.cnpj, a.competencia), []).append(a)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Arquivos SPED lidos", st.session_state.metricas["arquivos_lidos"])
+    c2.metric("Competências encontradas", st.session_state.metricas["competencias"])
+    c3.metric("Arquivos mantidos", st.session_state.metricas["arquivos_mantidos"])
 
-                for (cnpj, comp), itens in sorted(por_comp.items()):
-                    txts = [i.nome_arquivo for i in itens if i.extensao == ".txt"]
-                    recs = [i.nome_arquivo for i in itens if i.extensao == ".rec"]
-                    tipo = itens[0].tipo_entrega if itens else ""
+    st.subheader("Itens mantidos")
 
-                    st.write(f"**{comp}** | CNPJ: {cnpj} | {tipo}")
-                    if txts:
-                        st.caption("TXT: " + ", ".join(txts))
-                    if recs:
-                        st.caption("REC: " + ", ".join(recs))
+    for item in st.session_state.selecionados_resumo:
+        st.write(f"**{item['competencia']}** | CNPJ: {item['cnpj']} | {item['tipo']}")
+        if item["txts"]:
+            st.caption("TXT: " + item["txts"])
+        if item["recs"]:
+            st.caption("REC: " + item["recs"])
 
-                nome_base = Path(uploaded_file.name).stem
-                nome_saida = f"{nome_base}_filtrado.zip"
-
-                st.download_button(
-                    "Baixar ZIP filtrado",
-                    data=zip_filtrado,
-                    file_name=nome_saida,
-                    mime="application/zip",
-                    use_container_width=True,
-                )
+    if st.session_state.zip_filtrado_bytes and st.session_state.nome_zip_saida:
+        st.download_button(
+            "Baixar ZIP filtrado",
+            data=st.session_state.zip_filtrado_bytes,
+            file_name=st.session_state.nome_zip_saida,
+            mime="application/zip",
+            use_container_width=True,
+        )
