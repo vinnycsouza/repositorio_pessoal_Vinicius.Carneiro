@@ -25,11 +25,12 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.subheader("Eventos usados neste MVP")
+    st.subheader("Eventos usados nesta versão")
     st.write("- S-1010 — rubricas")
     st.write("- S-1200 — remuneração")
-    st.write("- S-5001 — bases previdenciárias")
     st.write("- S-3000 — exclusões")
+    st.write("- S-5001 — apoio por trabalhador")
+    st.write("- S-5011 — base patronal consolidada")
 
     st.markdown("---")
     if st.button("Resetar aplicação", use_container_width=True):
@@ -54,10 +55,11 @@ if not arquivo_zip:
 - varre arquivos internos automaticamente;
 - identifica os XMLs necessários para a auditoria, sem filtro manual;
 - remove, na triagem, eventos excluídos por S-3000;
-- cruza rubricas do S-1010 com remuneração do S-1200 e base previdenciária do S-5001.
+- cruza rubricas do S-1010 com remuneração do S-1200 e base patronal do S-5011;
+- mantém o S-5001 como apoio para conferência por trabalhador.
 
 ### Observação técnica importante
-Este MVP gera uma **triagem inicial de risco**. Ele ajuda a localizar situações em que uma rubrica marcada com `codIncCP = 00` aparece em contexto de base previdenciária no mesmo CPF/matrícula/período. A prova definitiva da incidência indevida pode exigir refinamento adicional conforme o layout real da base e a estratégia da empresa.
+Esta versão gera uma **triagem inicial de risco**. Ela ajuda a localizar situações em que uma rubrica marcada com `codIncCP = 00` aparece em contexto de base patronal no mesmo período/categoria/lotação. A prova definitiva da incidência indevida pode exigir refinamento adicional conforme o layout real da base e a estratégia da empresa.
         """
     )
     st.stop()
@@ -72,23 +74,26 @@ df_inventario = resultado["inventario"]
 df_rubricas = resultado["rubricas"]
 df_exclusoes = resultado["exclusoes"]
 df_remun = resultado["remuneracoes"]
-df_bases = resultado["bases"]
+df_bases_trab = resultado["bases_trabalhador"]
+df_bases_contrib = resultado["bases_contribuicao"]
 df_erros = resultado["erros_xml"]
+df_layout = resultado["layout_check"]
 
 with st.spinner("Gerando cruzamento de auditoria..."):
-    df_auditoria = gerar_auditoria(df_rubricas, df_remun, df_bases)
+    df_auditoria = gerar_auditoria(df_rubricas, df_remun, df_bases_trab, df_bases_contrib)
 
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Arquivos inventariados", f"{len(df_inventario):,}".replace(",", "."))
 with col2:
-    qtd_rel = 0 if df_inventario.empty else int(df_inventario["tipo"].isin(["S-1010", "S-1200", "S-5001", "S-3000"]).sum())
+    qtd_rel = 0 if df_inventario.empty else int(df_inventario["tipo"].isin(["S-1010", "S-1200", "S-5001", "S-5011", "S-3000"]).sum())
     st.metric("XMLs relevantes localizados", f"{qtd_rel:,}".replace(",", "."))
 with col3:
     st.metric("Rubricas S-1010", f"{len(df_rubricas):,}".replace(",", "."))
 with col4:
-    st.metric("Sinalizações iniciais", f"{len(df_auditoria[df_auditoria['grau_risco'] == 'ALTO']) if not df_auditoria.empty else 0:,}".replace(",", "."))
+    alto = len(df_auditoria[df_auditoria["grau_risco"] == "ALTO"]) if not df_auditoria.empty else 0
+    st.metric("Sinalizações altas", f"{alto:,}".replace(",", "."))
 
 
 st.markdown("## Resumo da localização automática dos XMLs")
@@ -102,10 +107,16 @@ else:
     )
     st.dataframe(resumo_tipos, use_container_width=True, hide_index=True)
 
+st.markdown("## Checagem do layout lido")
+if df_layout.empty:
+    st.warning("Não foi possível montar a checagem de layout.")
+else:
+    st.dataframe(df_layout, use_container_width=True, hide_index=True)
+
 st.markdown("## Painel de auditoria inicial")
 if df_auditoria.empty:
     st.warning(
-        "Nenhuma sinalização foi encontrada no cruzamento inicial. Isso pode significar ausência de rubricas com codIncCP=00 no S-1200, ausência de bases S-5001 correspondentes ou necessidade de refino adicional no layout analisado."
+        "Nenhuma sinalização foi encontrada no cruzamento inicial. Isso pode significar ausência de rubricas com codIncCP=00 no S-1200, ausência de base patronal compatível no S-5011 ou necessidade de refino adicional no layout analisado."
     )
 else:
     total_sinalizado = df_auditoria["valor_sinalizado"].sum()
@@ -114,11 +125,11 @@ else:
     c1, c2, c3 = st.columns(3)
     c1.metric("Total de rubricas não incidentes", f"R$ {decimal_br(total_rubricas_nao_inc)}")
     c2.metric("Total sinalizado", f"R$ {decimal_br(total_sinalizado)}")
-    c3.metric("Linhas de alto risco", str(int((df_auditoria["grau_risco"] == "ALTO").sum())))
+    c3.metric("Linhas sinalizadas", str(int((df_auditoria["grau_risco"].isin(["ALTO", "MEDIO"]).sum()))))
 
     filtro_risco = st.selectbox(
         "Filtrar por grau de risco",
-        ["Todos", "ALTO", "BAIXO"],
+        ["Todos", "ALTO", "MEDIO", "BAIXO"],
         index=0,
     )
 
@@ -129,11 +140,12 @@ else:
     st.dataframe(df_view, use_container_width=True, hide_index=True)
 
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Inventário",
     "Rubricas S-1010",
     "Remuneração S-1200",
     "Bases S-5001",
+    "Bases S-5011",
     "Exclusões S-3000",
     "Erros XML",
 ])
@@ -148,12 +160,15 @@ with tab3:
     st.dataframe(df_remun, use_container_width=True, hide_index=True)
 
 with tab4:
-    st.dataframe(df_bases, use_container_width=True, hide_index=True)
+    st.dataframe(df_bases_trab, use_container_width=True, hide_index=True)
 
 with tab5:
-    st.dataframe(df_exclusoes, use_container_width=True, hide_index=True)
+    st.dataframe(df_bases_contrib, use_container_width=True, hide_index=True)
 
 with tab6:
+    st.dataframe(df_exclusoes, use_container_width=True, hide_index=True)
+
+with tab7:
     st.dataframe(df_erros, use_container_width=True, hide_index=True)
 
 
@@ -163,9 +178,11 @@ excel_bytes = gerar_excel_saida(
     df_rubricas=df_rubricas,
     df_exclusoes=df_exclusoes,
     df_remun=df_remun,
-    df_bases=df_bases,
+    df_bases_trabalhador=df_bases_trab,
+    df_bases_contribuicao=df_bases_contrib,
     df_auditoria=df_auditoria,
     df_erros=df_erros,
+    df_layout=df_layout,
 )
 
 st.download_button(
@@ -179,6 +196,6 @@ st.download_button(
 st.markdown(
     """
 ### Próximo passo recomendado
-A próxima evolução natural é refinar a lógica para amarrar com mais precisão a composição da base por trabalhador e, se necessário, incorporar regras jurídicas por rubrica/natureza para separar melhor verbas indenizatórias, salariais e casos híbridos.
+A próxima evolução natural é ampliar a regra jurídica por rubrica e separar um cálculo estimado da CPP potencialmente indevida por competência, estabelecimento e lotação.
     """
 )
