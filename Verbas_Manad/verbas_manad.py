@@ -231,6 +231,8 @@ else:
         st.session_state.selected_codigos -= set(df_view["COD_RUBRICA"].tolist())
     if b3.button("Limpar tudo", key="limpar_tudo"):
         st.session_state.selected_codigos = set()
+    if b4.button("Selecionar tudo (K150 inteiro)", key="sel_tudo_k150"):
+        st.session_state.selected_codigos = set(df_rubricas["COD_RUBRICA"].astype(str).tolist())
 
     edited = st.data_editor(
         df_view[["Selecionar", "COD_RUBRICA", "DESC_RUBRICA"]],
