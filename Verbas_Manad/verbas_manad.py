@@ -222,17 +222,26 @@ if busca.strip():
 if df_view.empty:
     st.info("Nenhuma rubrica encontrada com esse filtro.")
 else:
-    df_view["Selecionar"] = df_view["COD_RUBRICA"].isin(st.session_state.selected_codigos)
+    # ✅ sincroniza a coluna de seleção com o estado atual
+    df_view["Selecionar"] = df_view["COD_RUBRICA"].astype(str).isin(st.session_state.selected_codigos)
 
     b1, b2, b3, b4 = st.columns(4)
+
     if b1.button("Selecionar tudo (resultado da busca)", key="sel_tudo_busca"):
-        st.session_state.selected_codigos |= set(df_view["COD_RUBRICA"].tolist())
+        st.session_state.selected_codigos |= set(df_view["COD_RUBRICA"].astype(str).tolist())
+        st.rerun()
+
     if b2.button("Limpar seleção (resultado da busca)", key="limpar_busca"):
-        st.session_state.selected_codigos -= set(df_view["COD_RUBRICA"].tolist())
+        st.session_state.selected_codigos -= set(df_view["COD_RUBRICA"].astype(str).tolist())
+        st.rerun()
+
     if b3.button("Limpar tudo", key="limpar_tudo"):
         st.session_state.selected_codigos = set()
+        st.rerun()
+
     if b4.button("Selecionar tudo (K150 inteiro)", key="sel_tudo_k150"):
         st.session_state.selected_codigos = set(df_rubricas["COD_RUBRICA"].astype(str).tolist())
+        st.rerun()
 
     edited = st.data_editor(
         df_view[["Selecionar", "COD_RUBRICA", "DESC_RUBRICA"]],
