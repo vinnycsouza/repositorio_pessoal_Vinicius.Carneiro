@@ -55,11 +55,11 @@ def ss_init():
     # spool incremental
     st.session_state.setdefault("spool_state", None)
 
-    # ✅ NOVO: regra jurídica 1/3 férias
+    # ✅ regra jurídica 1/3 férias
     st.session_state.setdefault("aplicar_regra_terco_ferias", False)
     st.session_state.setdefault("rubricas_terco_ferias", set())
 
-    # ✅ NOVO: versão do data_editor para forçar reconstrução após seleção em massa
+    # ✅ NOVO: versão do editor para forçar reconstrução após botões em massa
     st.session_state.setdefault("editor_rubricas_version", 0)
 
 ss_init()
@@ -228,7 +228,7 @@ if busca.strip():
 if df_view.empty:
     st.info("Nenhuma rubrica encontrada com esse filtro.")
 else:
-    # sincroniza seleção com o estado atual
+    # ✅ sincroniza visualmente com o estado
     df_view["Selecionar"] = df_view["COD_RUBRICA"].astype(str).isin(st.session_state.selected_codigos)
 
     b1, b2, b3, b4 = st.columns(4)
