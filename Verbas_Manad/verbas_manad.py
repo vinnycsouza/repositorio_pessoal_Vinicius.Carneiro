@@ -59,6 +59,9 @@ def ss_init():
     st.session_state.setdefault("aplicar_regra_terco_ferias", False)
     st.session_state.setdefault("rubricas_terco_ferias", set())
 
+    # ✅ NOVO: versão do data_editor para forçar reconstrução após seleção em massa
+    st.session_state.setdefault("editor_rubricas_version", 0)
+
 ss_init()
 
 
@@ -82,6 +85,9 @@ def reset_for_new_upload(new_fp: str):
     # ✅ reset regra 1/3 férias
     st.session_state.aplicar_regra_terco_ferias = False
     st.session_state.rubricas_terco_ferias = set()
+
+    # ✅ reset versão do editor
+    st.session_state.editor_rubricas_version = 0
 
 
 # =========================
@@ -222,25 +228,29 @@ if busca.strip():
 if df_view.empty:
     st.info("Nenhuma rubrica encontrada com esse filtro.")
 else:
-    # ✅ sincroniza a coluna de seleção com o estado atual
+    # sincroniza seleção com o estado atual
     df_view["Selecionar"] = df_view["COD_RUBRICA"].astype(str).isin(st.session_state.selected_codigos)
 
     b1, b2, b3, b4 = st.columns(4)
 
     if b1.button("Selecionar tudo (resultado da busca)", key="sel_tudo_busca"):
         st.session_state.selected_codigos |= set(df_view["COD_RUBRICA"].astype(str).tolist())
+        st.session_state.editor_rubricas_version += 1
         st.rerun()
 
     if b2.button("Limpar seleção (resultado da busca)", key="limpar_busca"):
         st.session_state.selected_codigos -= set(df_view["COD_RUBRICA"].astype(str).tolist())
+        st.session_state.editor_rubricas_version += 1
         st.rerun()
 
     if b3.button("Limpar tudo", key="limpar_tudo"):
         st.session_state.selected_codigos = set()
+        st.session_state.editor_rubricas_version += 1
         st.rerun()
 
     if b4.button("Selecionar tudo (K150 inteiro)", key="sel_tudo_k150"):
         st.session_state.selected_codigos = set(df_rubricas["COD_RUBRICA"].astype(str).tolist())
+        st.session_state.editor_rubricas_version += 1
         st.rerun()
 
     edited = st.data_editor(
@@ -248,7 +258,7 @@ else:
         hide_index=True,
         use_container_width=True,
         disabled=["COD_RUBRICA", "DESC_RUBRICA"],
-        key="editor_rubricas",
+        key=f"editor_rubricas_{st.session_state.editor_rubricas_version}",
     )
 
     marcados = set(edited.loc[edited["Selecionar"], "COD_RUBRICA"].astype(str).tolist())
