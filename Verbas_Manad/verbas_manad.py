@@ -224,7 +224,7 @@ if df_view.empty:
 else:
     df_view["Selecionar"] = df_view["COD_RUBRICA"].isin(st.session_state.selected_codigos)
 
-    b1, b2, b3 = st.columns(3)
+    b1, b2, b3, b4 = st.columns(4)
     if b1.button("Selecionar tudo (resultado da busca)", key="sel_tudo_busca"):
         st.session_state.selected_codigos |= set(df_view["COD_RUBRICA"].tolist())
     if b2.button("Limpar seleção (resultado da busca)", key="limpar_busca"):
