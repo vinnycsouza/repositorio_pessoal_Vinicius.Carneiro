@@ -1,19 +1,24 @@
 import streamlit as st
-from analise_base_inss import ler_manad, ler_esocial, montar_base, aplicar_regras, gerar_confronto
+from analise_base_inss import (
+    ler_manad,
+    ler_esocial,
+    montar_base_manad,
+    analisar_composicao_base,
+)
 from util_excel import gerar_excel_saida
 
-st.set_page_config(page_title="Confronto Base INSS x eSocial", layout="wide")
+st.set_page_config(page_title="Composição Base INSS x eSocial", layout="wide")
 
-st.title("Confronto Base INSS x eSocial")
+st.title("Composição da Base do eSocial dentro da Base do MANAD")
 
-# =========================
-# Inicialização do estado
-# =========================
 if "df_resumo" not in st.session_state:
     st.session_state.df_resumo = None
 
-if "df_base" not in st.session_state:
-    st.session_state.df_base = None
+if "df_base_total" not in st.session_state:
+    st.session_state.df_base_total = None
+
+if "df_composicao" not in st.session_state:
+    st.session_state.df_composicao = None
 
 if "excel_saida" not in st.session_state:
     st.session_state.excel_saida = None
@@ -21,33 +26,26 @@ if "excel_saida" not in st.session_state:
 if "analise_gerada" not in st.session_state:
     st.session_state.analise_gerada = False
 
-# =========================
-# Uploads
-# =========================
+
 manad = st.file_uploader("Arquivo MANAD", type=["xlsx"], key="manad")
 esocial = st.file_uploader("Arquivo eSocial", type=["xlsx"], key="esocial")
 
 col1, col2 = st.columns(2)
 
 with col1:
-    gerar = st.button("Gerar Análise", use_container_width=True)
+    gerar = st.button("Gerar análise", use_container_width=True)
 
 with col2:
     limpar = st.button("Limpar análise", use_container_width=True)
 
-# =========================
-# Limpar análise
-# =========================
 if limpar:
     st.session_state.df_resumo = None
-    st.session_state.df_base = None
+    st.session_state.df_base_total = None
+    st.session_state.df_composicao = None
     st.session_state.excel_saida = None
     st.session_state.analise_gerada = False
     st.rerun()
 
-# =========================
-# Gerar análise
-# =========================
 if gerar:
     if not manad or not esocial:
         st.warning("Selecione os dois arquivos antes de gerar a análise.")
@@ -56,14 +54,19 @@ if gerar:
             df_k300, df_k150 = ler_manad(manad)
             df_esocial = ler_esocial(esocial)
 
-            df_base = montar_base(df_k300, df_k150)
-            df_base = aplicar_regras(df_base)
+            df_base_manad = montar_base_manad(df_k300, df_k150)
 
-            df_resumo = gerar_confronto(df_base, df_esocial)
-            excel_saida = gerar_excel_saida(df_resumo, df_base, df_base)
+            df_resumo, df_base_total, df_composicao = analisar_composicao_base(
+                df_base_manad,
+                df_esocial,
+                top_n=24
+            )
+
+            excel_saida = gerar_excel_saida(df_resumo, df_base_total, df_composicao)
 
             st.session_state.df_resumo = df_resumo
-            st.session_state.df_base = df_base
+            st.session_state.df_base_total = df_base_total
+            st.session_state.df_composicao = df_composicao
             st.session_state.excel_saida = excel_saida
             st.session_state.analise_gerada = True
 
@@ -71,17 +74,16 @@ if gerar:
 
         except Exception as e:
             st.session_state.df_resumo = None
-            st.session_state.df_base = None
+            st.session_state.df_base_total = None
+            st.session_state.df_composicao = None
             st.session_state.excel_saida = None
             st.session_state.analise_gerada = False
             st.error(f"Erro ao processar os arquivos: {e}")
 
-# =========================
-# Exibição dos resultados
-# =========================
 if st.session_state.analise_gerada and st.session_state.df_resumo is not None:
     df_resumo = st.session_state.df_resumo.copy()
-    df_base = st.session_state.df_base.copy()
+    df_base_total = st.session_state.df_base_total.copy()
+    df_composicao = st.session_state.df_composicao.copy()
 
     st.subheader("Resumo do confronto")
     st.dataframe(df_resumo, use_container_width=True)
@@ -97,31 +99,37 @@ if st.session_state.analise_gerada and st.session_state.df_resumo is not None:
 
         df_resumo_comp = df_resumo[df_resumo["DT_COMP"].astype(str) == str(comp)].copy()
 
-        base_esocial = float(df_resumo_comp["BASE_INSS_ESOCIAL"].fillna(0).sum()) if "BASE_INSS_ESOCIAL" in df_resumo_comp.columns else 0.0
-        base_manad = float(df_resumo_comp["BASE_MANAD"].fillna(0).sum()) if "BASE_MANAD" in df_resumo_comp.columns else 0.0
-        diferenca = float(df_resumo_comp["DIFERENCA"].fillna(0).sum()) if "DIFERENCA" in df_resumo_comp.columns else 0.0
+        base_esocial = float(df_resumo_comp["BASE_INSS_ESOCIAL"].fillna(0).sum())
+        soma_encontrada = float(df_resumo_comp["SOMA_ENCONTRADA_MANAD"].fillna(0).sum())
+        diferenca = float(df_resumo_comp["DIFERENCA"].fillna(0).sum())
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Base eSocial", f"{base_esocial:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c2.metric("Base MANAD", f"{base_manad:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c2.metric("Soma encontrada no MANAD", f"{soma_encontrada:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         c3.metric("Diferença", f"{diferenca:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-        st.subheader(f"Rubricas consideradas na base - {comp}")
+        st.subheader(f"Rubricas usadas na composição - {comp}")
+        df_usadas = df_base_total[
+            (df_base_total["DT_COMP"].astype(str) == str(comp)) &
+            (df_base_total["FOI_USADA_NA_COMPOSICAO"] == "SIM")
+        ].sort_values(["NATUREZA_ANALITICA", "VLR_RUBR"], ascending=[True, False])
 
-        df_filtrado = df_base[
-            (df_base["DT_COMP"].astype(str) == str(comp)) &
-            (df_base["ENTRA_BASE_INSS"] == 1)
-        ].sort_values("VLR_RUBR", ascending=False)
-
-        if df_filtrado.empty:
-            st.warning("Não há rubricas classificadas como base para esta competência.")
+        if df_usadas.empty:
+            st.warning("Nenhuma rubrica foi selecionada para esta competência.")
         else:
-            st.dataframe(df_filtrado, use_container_width=True)
+            st.dataframe(df_usadas, use_container_width=True)
+
+        st.subheader(f"Rubricas indenizatórias potenciais usadas - {comp}")
+        df_inden = df_usadas[df_usadas["NATUREZA_ANALITICA"] == "INDENIZATORIA_POTENCIAL"].copy()
+        if df_inden.empty:
+            st.info("Nenhuma rubrica indenizatória potencial foi usada nesta composição.")
+        else:
+            st.dataframe(df_inden, use_container_width=True)
 
         with st.expander("Ver todas as rubricas da competência"):
-            df_todas = df_base[
-                df_base["DT_COMP"].astype(str) == str(comp)
-            ].sort_values("VLR_RUBR", ascending=False)
+            df_todas = df_base_total[
+                df_base_total["DT_COMP"].astype(str) == str(comp)
+            ].sort_values(["NATUREZA_ANALITICA", "VLR_RUBR"], ascending=[True, False])
 
             if df_todas.empty:
                 st.info("Nenhuma rubrica encontrada para esta competência.")
@@ -129,11 +137,9 @@ if st.session_state.analise_gerada and st.session_state.df_resumo is not None:
                 st.dataframe(df_todas, use_container_width=True)
 
         st.download_button(
-            "Baixar Excel",
+            "Baixar Excel da análise",
             data=st.session_state.excel_saida,
-            file_name="analise_inss.xlsx",
+            file_name="analise_composicao_base_inss.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-    else:
-        st.info("Nenhuma competência encontrada para exibição.")
