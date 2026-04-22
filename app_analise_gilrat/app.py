@@ -80,10 +80,18 @@ if gerar:
             st.session_state.analise_gerada = False
             st.error(f"Erro ao processar os arquivos: {e}")
 
-if st.session_state.analise_gerada and st.session_state.df_resumo is not None:
+if (
+    st.session_state.analise_gerada
+    and st.session_state.df_resumo is not None
+    and st.session_state.df_base_total is not None
+):
     df_resumo = st.session_state.df_resumo.copy()
     df_base_total = st.session_state.df_base_total.copy()
-    df_composicao = st.session_state.df_composicao.copy()
+    df_composicao = (
+        st.session_state.df_composicao.copy()
+        if st.session_state.df_composicao is not None
+        else None
+    )
 
     st.subheader("Resumo do confronto")
     st.dataframe(df_resumo, use_container_width=True)
