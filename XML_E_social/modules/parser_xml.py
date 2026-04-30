@@ -8,7 +8,6 @@ from utils.helpers import (
     localname,
     only_digits,
     safe_float,
-    text_or_none,
 )
 
 
@@ -22,6 +21,8 @@ class RubricaInfo:
     cod_inc_fgts: str
     cod_inc_irrf: str
     origem_bloco: str
+    ini_valid: str
+    fim_valid: str
 
 
 @dataclass
@@ -49,7 +50,15 @@ class BaseTrabalhador:
     cpf: str
     matricula: str
     per_apur: str
+    per_ref: str
     cod_categ: str
+    tp_insc_estab: str
+    nr_insc_estab: str
+    cod_lotacao: str
+    ind13: str
+    tp_valor: str
+    valor: float
+    origem_valor: str
     nr_recibo_base: str
 
 
@@ -100,6 +109,17 @@ EVENTOS_MAPA = {
 }
 
 
+def children_by_localname(root: ET.Element, name: str) -> List[ET.Element]:
+    return [el for el in list(root) if localname(el.tag) == name]
+
+
+def first_child_by_localname(root: ET.Element, name: str):
+    for el in list(root):
+        if localname(el.tag) == name:
+            return el
+    return None
+
+
 def detectar_tipo_evento(root: ET.Element) -> str:
     for el in root.iter():
         nome = localname(el.tag)
@@ -108,14 +128,13 @@ def detectar_tipo_evento(root: ET.Element) -> str:
     return "DESCONHECIDO"
 
 
-
 def obter_recibo_principal(root: ET.Element) -> str:
     return (
         first_text_by_localname(root, "nrRecibo")
+        or first_text_by_localname(root, "nrRecArqBase")
         or first_text_by_localname(root, "nrProtEntr")
         or ""
     )
-
 
 
 def parse_s3000(root: ET.Element) -> Dict[str, str]:
@@ -123,7 +142,6 @@ def parse_s3000(root: ET.Element) -> Dict[str, str]:
         "nrRecEvt": first_text_by_localname(root, "nrRecEvt") or "",
         "nrRecibo": obter_recibo_principal(root),
     }
-
 
 
 def parse_s1010(root: ET.Element) -> List[RubricaInfo]:
@@ -156,6 +174,8 @@ def parse_s1010(root: ET.Element) -> List[RubricaInfo]:
         cod_inc_cp = first_text_by_localname(dados_rubrica, "codIncCP") or ""
         cod_inc_fgts = first_text_by_localname(dados_rubrica, "codIncFGTS") or ""
         cod_inc_irrf = first_text_by_localname(dados_rubrica, "codIncIRRF") or ""
+        ini_valid = first_text_by_localname(ide_rubrica, "iniValid") or first_text_by_localname(bloco, "iniValid") or ""
+        fim_valid = first_text_by_localname(ide_rubrica, "fimValid") or first_text_by_localname(bloco, "fimValid") or ""
 
         if cod_rubr:
             saida.append(
@@ -168,15 +188,15 @@ def parse_s1010(root: ET.Element) -> List[RubricaInfo]:
                     cod_inc_fgts=cod_inc_fgts,
                     cod_inc_irrf=cod_inc_irrf,
                     origem_bloco=origem,
+                    ini_valid=ini_valid,
+                    fim_valid=fim_valid,
                 )
             )
 
-    # Deduplicação por código/tabela, preservando o último bloco lido.
     dedup: Dict[Tuple[str, str], RubricaInfo] = {}
     for item in saida:
         dedup[(item.cod_rubr, item.ide_tab_rubr)] = item
     return list(dedup.values())
-
 
 
 def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInfo], arquivo: str) -> List[RubricaPagamento]:
@@ -189,13 +209,22 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInf
     for dm_dev in all_elements_by_localname(root, "dmDev"):
         cod_categ = first_text_by_localname(dm_dev, "codCateg") or ""
 
-        for info_per in all_elements_by_localname(dm_dev, "infoPerApur"):
-            for ide_estab in all_elements_by_localname(info_per, "ideEstabLot"):
+        # S-1200 pode trazer período atual (infoPerApur) e/ou períodos anteriores (infoPerAnt).
+        blocos_periodo = all_elements_by_localname(dm_dev, "infoPerApur") + all_elements_by_localname(dm_dev, "infoPerAnt")
+        if not blocos_periodo:
+            blocos_periodo = [dm_dev]
+
+        for bloco_periodo in blocos_periodo:
+            for ide_estab in all_elements_by_localname(bloco_periodo, "ideEstabLot"):
                 tp_insc_estab = first_text_by_localname(ide_estab, "tpInsc") or ""
                 nr_insc_estab = first_text_by_localname(ide_estab, "nrInsc") or ""
                 cod_lotacao = first_text_by_localname(ide_estab, "codLotacao") or ""
 
-                for remun in all_elements_by_localname(ide_estab, "remunPerApur"):
+                blocos_remun = all_elements_by_localname(ide_estab, "remunPerApur") + all_elements_by_localname(ide_estab, "remunPerAnt")
+                if not blocos_remun:
+                    blocos_remun = [ide_estab]
+
+                for remun in blocos_remun:
                     matricula = first_text_by_localname(remun, "matricula") or first_text_by_localname(dm_dev, "matricula") or ""
 
                     for item in all_elements_by_localname(remun, "itensRemun"):
@@ -232,43 +261,93 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInf
     return saida
 
 
-
 def parse_s5001(root: ET.Element, arquivo: str) -> List[BaseTrabalhador]:
+    """Extrai o detalhamento do S-5001.
+
+    A versão anterior só guardava CPF/matrícula. Para auditoria da base, o que importa é
+    o bloco infoBaseCS, onde aparecem tpValor e valor por trabalhador/categoria/lotação.
+    Também capturamos detInfoPerRef quando disponível, para explicar competências de referência.
+    """
     saida: List[BaseTrabalhador] = []
     per_apur = first_text_by_localname(root, "perApur") or ""
     nr_recibo_base = first_text_by_localname(root, "nrRecArqBase") or ""
 
-    for bloco in all_elements_by_localname(root, "ideTrabalhador"):
-        cpf = only_digits(first_text_by_localname(bloco, "cpfTrab"))
-        matricula = first_text_by_localname(bloco, "matricula") or ""
-        cod_categ = first_text_by_localname(bloco, "codCateg") or ""
-        if cpf or matricula:
-            saida.append(
-                BaseTrabalhador(
-                    arquivo=arquivo,
-                    cpf=cpf,
-                    matricula=matricula,
-                    per_apur=per_apur,
-                    cod_categ=cod_categ,
-                    nr_recibo_base=nr_recibo_base,
-                )
-            )
+    ide_trab = first_child_by_localname(next((e for e in root.iter() if localname(e.tag) == "evtBasesTrab"), root), "ideTrabalhador")
+    cpf = only_digits(first_text_by_localname(ide_trab, "cpfTrab") if ide_trab is not None else first_text_by_localname(root, "cpfTrab"))
 
-    if not saida:
-        cpf = only_digits(first_text_by_localname(root, "cpfTrab"))
-        if cpf:
-            saida.append(
-                BaseTrabalhador(
-                    arquivo=arquivo,
-                    cpf=cpf,
-                    matricula=first_text_by_localname(root, "matricula") or "",
-                    per_apur=per_apur,
-                    cod_categ=first_text_by_localname(root, "codCateg") or "",
-                    nr_recibo_base=nr_recibo_base,
+    for ide_estab in all_elements_by_localname(root, "ideEstabLot"):
+        tp_insc_estab = first_text_by_localname(ide_estab, "tpInsc") or ""
+        nr_insc_estab = first_text_by_localname(ide_estab, "nrInsc") or ""
+        cod_lotacao = first_text_by_localname(ide_estab, "codLotacao") or ""
+
+        for info_cat in all_elements_by_localname(ide_estab, "infoCategIncid"):
+            matricula = first_text_by_localname(info_cat, "matricula") or ""
+            cod_categ = first_text_by_localname(info_cat, "codCateg") or ""
+
+            # Base por trabalhador/categoria/lotação.
+            for info_base in children_by_localname(info_cat, "infoBaseCS"):
+                saida.append(
+                    BaseTrabalhador(
+                        arquivo=arquivo,
+                        cpf=cpf,
+                        matricula=matricula,
+                        per_apur=per_apur,
+                        per_ref=per_apur,
+                        cod_categ=cod_categ,
+                        tp_insc_estab=tp_insc_estab,
+                        nr_insc_estab=nr_insc_estab,
+                        cod_lotacao=cod_lotacao,
+                        ind13=first_text_by_localname(info_base, "ind13") or "",
+                        tp_valor=first_text_by_localname(info_base, "tpValor") or "",
+                        valor=safe_float(first_text_by_localname(info_base, "valor")),
+                        origem_valor="infoBaseCS",
+                        nr_recibo_base=nr_recibo_base,
+                    )
                 )
+
+            # Detalhe por competência de referência, quando existente.
+            for info_per_ref in children_by_localname(info_cat, "infoPerRef"):
+                per_ref = first_text_by_localname(info_per_ref, "perRef") or per_apur
+                for det in children_by_localname(info_per_ref, "detInfoPerRef"):
+                    saida.append(
+                        BaseTrabalhador(
+                            arquivo=arquivo,
+                            cpf=cpf,
+                            matricula=matricula,
+                            per_apur=per_apur,
+                            per_ref=per_ref,
+                            cod_categ=cod_categ,
+                            tp_insc_estab=tp_insc_estab,
+                            nr_insc_estab=nr_insc_estab,
+                            cod_lotacao=cod_lotacao,
+                            ind13=first_text_by_localname(det, "ind13") or "",
+                            tp_valor=first_text_by_localname(det, "tpValor") or "",
+                            valor=safe_float(first_text_by_localname(det, "vrPerRef")),
+                            origem_valor="detInfoPerRef",
+                            nr_recibo_base=nr_recibo_base,
+                        )
+                    )
+
+    if not saida and cpf:
+        saida.append(
+            BaseTrabalhador(
+                arquivo=arquivo,
+                cpf=cpf,
+                matricula="",
+                per_apur=per_apur,
+                per_ref=per_apur,
+                cod_categ="",
+                tp_insc_estab="",
+                nr_insc_estab="",
+                cod_lotacao="",
+                ind13="",
+                tp_valor="",
+                valor=0.0,
+                origem_valor="sem_infoBaseCS",
+                nr_recibo_base=nr_recibo_base,
             )
+        )
     return saida
-
 
 
 def parse_s5011(root: ET.Element, arquivo: str) -> List[BaseContribuicao]:
