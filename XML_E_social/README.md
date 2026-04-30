@@ -1,24 +1,42 @@
-# XML_e-social — Auditoria CPP v4
+# XML_E-social — Relatório de Incidência CP
 
-Aplicativo em Streamlit para ler um ou mais ZIPs do eSocial e fazer triagem de possível incidência indevida de CPP sobre verbas não incidentes/indenizatórias.
+Aplicativo em Streamlit para ler ZIPs originais do eSocial e gerar um relatório simplificado de composição da incidência de Contribuição Previdenciária (CP) por rubrica.
 
-## Novidades da versão 4
+## Versão 5
 
-- aceita múltiplos ZIPs no mesmo processamento;
-- permite enviar pacotes separados, por exemplo: tabelas S-1010, remunerações S-1200 e consolidado S-5001/S-5011;
-- extrai o S-5001 em detalhe por trabalhador, matrícula, lotação, categoria, `tpValor` e valor;
-- cria aba de composição teórica com base no S-1200 cruzado com o S-1010;
-- cria conciliação entre a composição teórica e a base oficial do S-5001;
-- mantém identificação de rubricas do S-1200 sem correspondência no S-1010;
-- gera Excel final `auditoria_cpp_esocial_v4.xlsx`.
+Foco do relatório:
 
-## Eventos principais
+- identificar quais rubricas do S-1200 estão com incidência de CP conforme o S-1010;
+- separar rubricas com incidência, sem incidência e sem cadastro S-1010;
+- classificar visualmente o caráter da verba: remuneratório, rescisório, férias, 13º salário, desconto, informativo/técnico ou revisar;
+- confrontar o total com incidência CP com os detalhes do S-5001 quando disponível;
+- manter abas de apoio com os dados brutos extraídos.
 
-- S-1010 — Tabela de Rubricas / incidência CP;
-- S-1200 — Remuneração e itens de folha;
-- S-5001 — Base oficial por trabalhador;
-- S-5011 — Base consolidada patronal, quando existir;
-- S-3000 — Exclusões.
+## Eventos utilizados
+
+- S-1010 — tabela de rubricas e codIncCP;
+- S-1200 — movimentos de remuneração por trabalhador;
+- S-5001 — base oficial por trabalhador, quando disponível;
+- S-5011 — base patronal consolidada, quando disponível;
+- S-3000 — exclusões.
+
+## Relatório gerado
+
+O arquivo exportado é:
+
+```text
+relatorio_incidencia_cp_esocial_v5.xlsx
+```
+
+Principais abas:
+
+- `01_resumo`
+- `02_rubricas_cp`
+- `03_movimentos_cp`
+- `04_base_trabalhador`
+- `05_sem_s1010`
+- `06_s5001_tpvalor`
+- abas de apoio: S-1010, S-1200, S-5001, S-5011, S-3000, inventário e erros.
 
 ## Como rodar
 
@@ -49,14 +67,3 @@ Para upload maior:
 ```bash
 streamlit run app.py --server.maxUploadSize=1000
 ```
-
-## Uso recomendado
-
-Envie, no mesmo processamento, todos os pacotes disponíveis para a empresa/período analisado:
-
-1. ZIP com S-1010;
-2. ZIP com S-1200;
-3. ZIP consolidado com S-5001 e, se existir, S-5011;
-4. ZIP com S-3000, caso existam exclusões.
-
-Sem S-1200, o app consegue ler a base oficial do S-5001, mas não consegue explicar a composição por rubrica. Sem S-1010, ele enxerga as rubricas do S-1200, mas não consegue classificar corretamente a incidência CP.

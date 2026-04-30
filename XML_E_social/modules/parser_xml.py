@@ -20,6 +20,7 @@ class RubricaInfo:
     cod_inc_cp: str
     cod_inc_fgts: str
     cod_inc_irrf: str
+    tp_rubr: str
     origem_bloco: str
     ini_valid: str
     fim_valid: str
@@ -41,6 +42,7 @@ class RubricaPagamento:
     nat_rubr: str
     cod_inc_cp: str
     dsc_rubr: str
+    tp_rubr: str
     nr_recibo_evento: str
 
 
@@ -174,6 +176,7 @@ def parse_s1010(root: ET.Element) -> List[RubricaInfo]:
         cod_inc_cp = first_text_by_localname(dados_rubrica, "codIncCP") or ""
         cod_inc_fgts = first_text_by_localname(dados_rubrica, "codIncFGTS") or ""
         cod_inc_irrf = first_text_by_localname(dados_rubrica, "codIncIRRF") or ""
+        tp_rubr = first_text_by_localname(dados_rubrica, "tpRubr") or ""
         ini_valid = first_text_by_localname(ide_rubrica, "iniValid") or first_text_by_localname(bloco, "iniValid") or ""
         fim_valid = first_text_by_localname(ide_rubrica, "fimValid") or first_text_by_localname(bloco, "fimValid") or ""
 
@@ -187,6 +190,7 @@ def parse_s1010(root: ET.Element) -> List[RubricaInfo]:
                     cod_inc_cp=cod_inc_cp,
                     cod_inc_fgts=cod_inc_fgts,
                     cod_inc_irrf=cod_inc_irrf,
+                    tp_rubr=tp_rubr,
                     origem_bloco=origem,
                     ini_valid=ini_valid,
                     fim_valid=fim_valid,
@@ -236,6 +240,7 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInf
                         nat_rubr = rubr.nat_rubr if rubr else ""
                         cod_inc_cp = rubr.cod_inc_cp if rubr else ""
                         dsc_rubr = rubr.dsc_rubr if rubr else ""
+                        tp_rubr = rubr.tp_rubr if rubr else ""
 
                         if cod_rubr:
                             saida.append(
@@ -254,6 +259,7 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInf
                                     nat_rubr=nat_rubr,
                                     cod_inc_cp=cod_inc_cp,
                                     dsc_rubr=dsc_rubr,
+                                    tp_rubr=tp_rubr,
                                     nr_recibo_evento=nr_recibo_evento,
                                 )
                             )
