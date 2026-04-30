@@ -326,6 +326,7 @@ def gerar_excel_saida(
     df_base_trabalhador: pd.DataFrame,
     df_sem_cadastro: pd.DataFrame,
     df_s5001_resumo: pd.DataFrame | None = None,
+    df_levantamento: pd.DataFrame | None = None,
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -335,6 +336,7 @@ def gerar_excel_saida(
         df_base_trabalhador.to_excel(writer, sheet_name="04_base_trabalhador", index=False)
         df_sem_cadastro.to_excel(writer, sheet_name="05_sem_s1010", index=False)
         (df_s5001_resumo if df_s5001_resumo is not None else pd.DataFrame()).to_excel(writer, sheet_name="06_s5001_tpvalor", index=False)
+        (df_levantamento if df_levantamento is not None else pd.DataFrame()).to_excel(writer, sheet_name="07_levantamento", index=False)
         df_rubricas.to_excel(writer, sheet_name="apoio_s1010", index=False)
         df_remun.to_excel(writer, sheet_name="apoio_s1200", index=False)
         df_bases_trabalhador.to_excel(writer, sheet_name="apoio_s5001", index=False)

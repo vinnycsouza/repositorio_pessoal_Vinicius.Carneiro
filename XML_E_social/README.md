@@ -1,44 +1,22 @@
-# XML_E-social — Relatório de Incidência CP
+# XML_E_social
 
-Aplicativo em Streamlit para ler ZIPs originais do eSocial e gerar um relatório simplificado de composição da incidência de Contribuição Previdenciária (CP) por rubrica.
+Aplicativo em Streamlit para ler ZIPs do eSocial e gerar relatório de composição da incidência de CP por rubrica, com apoio para levantamento interativo de verbas.
 
-## Versão 5
+## Versão 6
 
-Foco do relatório:
+Principais recursos:
 
-- identificar quais rubricas do S-1200 estão com incidência de CP conforme o S-1010;
-- separar rubricas com incidência, sem incidência e sem cadastro S-1010;
-- classificar visualmente o caráter da verba: remuneratório, rescisório, férias, 13º salário, desconto, informativo/técnico ou revisar;
-- confrontar o total com incidência CP com os detalhes do S-5001 quando disponível;
-- manter abas de apoio com os dados brutos extraídos.
-
-## Eventos utilizados
-
-- S-1010 — tabela de rubricas e codIncCP;
-- S-1200 — movimentos de remuneração por trabalhador;
-- S-5001 — base oficial por trabalhador, quando disponível;
-- S-5011 — base patronal consolidada, quando disponível;
-- S-3000 — exclusões.
-
-## Relatório gerado
-
-O arquivo exportado é:
-
-```text
-relatorio_incidencia_cp_esocial_v5.xlsx
-```
-
-Principais abas:
-
-- `01_resumo`
-- `02_rubricas_cp`
-- `03_movimentos_cp`
-- `04_base_trabalhador`
-- `05_sem_s1010`
-- `06_s5001_tpvalor`
-- abas de apoio: S-1010, S-1200, S-5001, S-5011, S-3000, inventário e erros.
+- leitura automática de um ou mais ZIPs do eSocial, inclusive ZIP dentro de ZIP;
+- cruzamento entre S-1010, S-1200, S-5001, S-5011 e S-3000;
+- relatório de rubricas com e sem incidência de CP;
+- classificação visual da verba: remuneratória, rescisória, férias, 13º salário, desconto, informativa/técnica ou revisar;
+- área de **Levantamento de verbas**, com filtros, busca por rubrica, seleção múltipla e cálculo estimado de CPP;
+- base por trabalhador para conferência entre movimentos do S-1200 e detalhes do S-5001;
+- exportação em Excel com aba específica `07_levantamento`.
 
 ## Como rodar
+
+Crie o ambiente virtual:
 
 ```bash
 python -m venv .venv
@@ -67,3 +45,17 @@ Para upload maior:
 ```bash
 streamlit run app.py --server.maxUploadSize=1000
 ```
+
+## Relatório gerado
+
+```text
+relatorio_incidencia_cp_esocial_v6.xlsx
+```
+
+## Conjunto recomendado de arquivos
+
+- S-1010 — tabela de rubricas / `codIncCP`;
+- S-1200 — movimentos de remuneração;
+- S-5001 — conferência da base por trabalhador;
+- S-5011 — apoio consolidado, quando existir;
+- S-3000 — exclusões, quando existir.

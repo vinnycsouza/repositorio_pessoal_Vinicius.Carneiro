@@ -164,4 +164,3 @@ def processar_zip_esocial(zip_bytes: bytes) -> Dict[str, object]:
         "layout_check": df_layout,
         "recibos_excluidos": recibos_excluidos,
     }
-
