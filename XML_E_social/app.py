@@ -13,7 +13,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 6.1: relatório de incidência CP separado do levantamento interativo de verbas."
+    "Versão 6.2: relatório de incidência CP e exportação separada do levantamento de verbas."
 )
 
 with st.sidebar:
@@ -270,6 +270,51 @@ with aba_levantamento:
             st.dataframe(df_resumo_lev, use_container_width=True, hide_index=True)
             with st.expander("Ver movimentos detalhados do levantamento"):
                 st.dataframe(df_levantamento, use_container_width=True, hide_index=True)
+
+            df_parametros_lev = pd.DataFrame({
+                "Indicador": [
+                    "Status CP filtrado",
+                    "Caráter filtrado",
+                    "Tipo filtrado",
+                    "codIncCP filtrado",
+                    "Competências filtradas",
+                    "Apenas valores positivos",
+                    "Alíquota CPP (%)",
+                    "Total levantado",
+                    "CPP estimada",
+                    "Quantidade de rubricas",
+                    "Quantidade de CPFs",
+                ],
+                "Valor": [
+                    status_lev,
+                    carater_lev,
+                    tipo_lev,
+                    cp_lev,
+                    ", ".join(comp_lev) if comp_lev else "Todas",
+                    "Sim" if positivos_lev else "Não",
+                    float(aliquota_lev),
+                    total_lev,
+                    cpp_lev,
+                    qtd_rubricas_lev,
+                    qtd_cpfs_lev,
+                ],
+            })
+
+            buffer_levantamento = io.BytesIO()
+            with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
+                df_parametros_lev.to_excel(writer, index=False, sheet_name="01_resumo")
+                df_resumo_lev.to_excel(writer, index=False, sheet_name="02_resumo_rubricas")
+                df_levantamento.to_excel(writer, index=False, sheet_name="03_movimentos")
+
+            st.download_button(
+                label="Baixar levantamento de verbas",
+                data=buffer_levantamento.getvalue(),
+                file_name="levantamento_verbas_cp_v6_2.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_levantamento_verbas",
+            )
+
             df_levantamento_export = df_resumo_lev.copy()
 
 st.markdown("## Exportação")
@@ -294,7 +339,7 @@ excel_bytes = gerar_excel_saida(
 st.download_button(
     label="Baixar relatório de incidência CP",
     data=excel_bytes,
-    file_name="relatorio_incidencia_cp_esocial_v6_1.xlsx",
+    file_name="relatorio_incidencia_cp_esocial_v6_2.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
