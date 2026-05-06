@@ -13,7 +13,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 6.2: relatório de incidência CP e exportação separada do levantamento de verbas."
+    "Versão 6.3: relatório de incidência CP, levantamento separado e identificação da empresa."
 )
 
 with st.sidebar:
@@ -80,6 +80,32 @@ df_bases_trab = resultado.get("bases_trabalhador", pd.DataFrame())
 df_bases_contrib = resultado.get("bases_contribuicao", pd.DataFrame())
 df_erros = resultado.get("erros_xml", pd.DataFrame())
 df_layout = resultado.get("layout_check", pd.DataFrame())
+df_empresa = resultado.get("empresa", pd.DataFrame())
+
+
+def formatar_cnpj(cnpj: str) -> str:
+    cnpj = "" if pd.isna(cnpj) else str(cnpj)
+    cnpj = "".join(ch for ch in cnpj if ch.isdigit())
+    if len(cnpj) == 14:
+        return f"{cnpj[:2]}.{cnpj[2:5]}.{cnpj[5:8]}/{cnpj[8:12]}-{cnpj[12:]}"
+    return cnpj
+
+
+def empresa_principal(df: pd.DataFrame) -> tuple[str, str]:
+    if df.empty:
+        return "", ""
+    base = df.copy()
+    if "nome_empresa" not in base.columns:
+        base["nome_empresa"] = ""
+    if "cnpj_empregador" not in base.columns:
+        base["cnpj_empregador"] = ""
+    base["tem_nome"] = base["nome_empresa"].fillna("").astype(str).str.strip().ne("")
+    base = base.sort_values(["tem_nome"], ascending=False)
+    linha = base.iloc[0]
+    return str(linha.get("nome_empresa", "") or ""), formatar_cnpj(linha.get("cnpj_empregador", ""))
+
+
+nome_empresa, cnpj_empresa = empresa_principal(df_empresa)
 
 with st.spinner("Montando relatório de composição da incidência CP..."):
     (
@@ -102,6 +128,9 @@ aba_relatorio, aba_levantamento = st.tabs([
 ])
 
 df_levantamento_export = pd.DataFrame()
+
+if nome_empresa or cnpj_empresa:
+    st.info(f"Empresa: {nome_empresa or 'Nome não localizado'} | CNPJ: {cnpj_empresa or 'CNPJ não localizado'}")
 
 with aba_relatorio:
     qtd_rubricas = len(df_rubricas_cp) if not df_rubricas_cp.empty else 0
@@ -302,6 +331,7 @@ with aba_levantamento:
 
             buffer_levantamento = io.BytesIO()
             with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
+                df_empresa.to_excel(writer, index=False, sheet_name="00_empresa")
                 df_parametros_lev.to_excel(writer, index=False, sheet_name="01_resumo")
                 df_resumo_lev.to_excel(writer, index=False, sheet_name="02_resumo_rubricas")
                 df_levantamento.to_excel(writer, index=False, sheet_name="03_movimentos")
@@ -309,7 +339,7 @@ with aba_levantamento:
             st.download_button(
                 label="Baixar levantamento de verbas",
                 data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v6_2.xlsx",
+                file_name="levantamento_verbas_cp_v6_3.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_levantamento_verbas",
@@ -334,12 +364,13 @@ excel_bytes = gerar_excel_saida(
     df_sem_cadastro=df_sem_cadastro,
     df_s5001_resumo=df_s5001_resumo,
     df_levantamento=df_levantamento_export,
+    df_empresa=df_empresa,
 )
 
 st.download_button(
     label="Baixar relatório de incidência CP",
     data=excel_bytes,
-    file_name="relatorio_incidencia_cp_esocial_v6_2.xlsx",
+    file_name="relatorio_incidencia_cp_esocial_v6_3.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )

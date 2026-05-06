@@ -17,6 +17,7 @@ from modules.parser_xml import (
     parse_s3000,
     parse_s5001,
     parse_s5011,
+    parse_empresa_info,
 )
 
 
@@ -51,6 +52,7 @@ def processar_zip_esocial(zip_bytes: bytes) -> Dict[str, object]:
     xmls_relevantes: List[Tuple[str, str, ET.Element]] = []
     rubricas: List[RubricaInfo] = []
     exclusoes: List[Dict[str, str]] = []
+    empresas: List[Dict[str, str]] = []
 
     eventos_relevantes = {"S-1000", "S-1005", "S-1010", "S-1020", "S-1200", "S-3000", "S-5001", "S-5011"}
 
@@ -86,6 +88,7 @@ def processar_zip_esocial(zip_bytes: bytes) -> Dict[str, object]:
 
         if tipo_evento in eventos_relevantes:
             xmls_relevantes.append((caminho, tipo_evento, root))
+            empresas.append(parse_empresa_info(root, caminho))
             if tipo_evento == "S-1010":
                 rubricas.extend(parse_s1010(root))
             elif tipo_evento == "S-3000":
@@ -134,6 +137,12 @@ def processar_zip_esocial(zip_bytes: bytes) -> Dict[str, object]:
     df_bases_trab = pd.DataFrame([asdict(x) for x in bases_trabalhador_filtradas])
     df_bases_contrib = pd.DataFrame([asdict(x) for x in bases_contribuicao_filtradas])
     df_erros = pd.DataFrame(erros_xml)
+    df_empresa = pd.DataFrame(empresas)
+    if not df_empresa.empty:
+        df_empresa = df_empresa.drop_duplicates().copy()
+        # Prioriza linha que tenha nome/razão social, normalmente vinda do S-1000.
+        df_empresa["tem_nome"] = df_empresa["nome_empresa"].fillna("").astype(str).str.strip().ne("")
+        df_empresa = df_empresa.sort_values(["tem_nome", "cnpj_empregador"], ascending=[False, True]).drop(columns=["tem_nome"])
 
     resumo_eventos = (
         df_inventario[df_inventario["tipo"].isin(eventos_relevantes)]
@@ -162,5 +171,6 @@ def processar_zip_esocial(zip_bytes: bytes) -> Dict[str, object]:
         "bases_contribuicao": df_bases_contrib,
         "erros_xml": df_erros,
         "layout_check": df_layout,
+        "empresa": df_empresa,
         "recibos_excluidos": recibos_excluidos,
     }

@@ -12,7 +12,8 @@ Principais recursos:
 - classificação visual da verba: remuneratória, rescisória, férias, 13º salário, desconto, informativa/técnica ou revisar;
 - área de **Levantamento de verbas**, com filtros, busca por rubrica, seleção múltipla e cálculo estimado de CPP;
 - base por trabalhador para conferência entre movimentos do S-1200 e detalhes do S-5001;
-- exportação em Excel com aba específica `07_levantamento`.
+- exportação em Excel com aba específica `07_levantamento`;
+- identificação da empresa em aba `00_empresa` nos relatórios gerados.
 
 ## Como rodar
 

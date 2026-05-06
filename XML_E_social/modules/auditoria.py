@@ -327,9 +327,11 @@ def gerar_excel_saida(
     df_sem_cadastro: pd.DataFrame,
     df_s5001_resumo: pd.DataFrame | None = None,
     df_levantamento: pd.DataFrame | None = None,
+    df_empresa: pd.DataFrame | None = None,
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        (df_empresa if df_empresa is not None else pd.DataFrame()).to_excel(writer, sheet_name="00_empresa", index=False)
         df_resumo_visual.to_excel(writer, sheet_name="01_resumo", index=False)
         df_rubricas_cp.to_excel(writer, sheet_name="02_rubricas_cp", index=False)
         df_movimentos_cp.to_excel(writer, sheet_name="03_movimentos_cp", index=False)

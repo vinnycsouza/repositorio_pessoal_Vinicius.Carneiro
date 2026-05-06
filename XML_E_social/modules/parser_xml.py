@@ -139,6 +139,34 @@ def obter_recibo_principal(root: ET.Element) -> str:
     )
 
 
+
+def parse_empresa_info(root: ET.Element, arquivo: str = "") -> Dict[str, str]:
+    """Extrai identificação do empregador/contribuinte quando disponível.
+
+    O CNPJ/CPF do empregador costuma aparecer em ideEmpregador em praticamente
+    todos os eventos. O nome/razão social aparece principalmente no S-1000
+    como nmRazao.
+    """
+    ide_empregador = None
+    for el in root.iter():
+        if localname(el.tag) == "ideEmpregador":
+            ide_empregador = el
+            break
+
+    tp_insc = first_text_by_localname(ide_empregador, "tpInsc") if ide_empregador is not None else ""
+    nr_insc = first_text_by_localname(ide_empregador, "nrInsc") if ide_empregador is not None else ""
+    nr_insc_limpo = only_digits(nr_insc)
+
+    nm_razao = first_text_by_localname(root, "nmRazao") or first_text_by_localname(root, "razaoSocial") or ""
+
+    return {
+        "arquivo_origem": arquivo,
+        "tp_insc_empregador": tp_insc or "",
+        "cnpj_empregador": nr_insc_limpo,
+        "nome_empresa": nm_razao or "",
+    }
+
+
 def parse_s3000(root: ET.Element) -> Dict[str, str]:
     return {
         "nrRecEvt": first_text_by_localname(root, "nrRecEvt") or "",
