@@ -13,7 +13,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 6.5: relatório de incidência CP, levantamento separado e seleção estável por checklist."
+    "Versão 6.6: relatório de incidência CP, seleção estável por checklist e resumo de competência em matriz por rubrica."
 )
 
 with st.sidebar:
@@ -388,13 +388,6 @@ with aba_levantamento:
             )
             df_resumo_lev["cpp_estimado"] = pd.to_numeric(df_resumo_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
 
-            df_resumo_competencia_lev = (
-                df_levantamento.groupby(["per_apur"], dropna=False, as_index=False)
-                .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_rubricas=("cod_rubr", "nunique"), qtd_cpfs=("cpf", "nunique"))
-                .sort_values("per_apur")
-            )
-            df_resumo_competencia_lev["cpp_estimado"] = pd.to_numeric(df_resumo_competencia_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
-
             df_resumo_competencia_rubrica_lev = (
                 df_levantamento.groupby(["per_apur", "cod_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
                 .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"))
@@ -402,10 +395,39 @@ with aba_levantamento:
             )
             df_resumo_competencia_rubrica_lev["cpp_estimado"] = pd.to_numeric(df_resumo_competencia_rubrica_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
 
+            # Resumo em matriz: período de apuração na coluna A e uma coluna para cada rubrica selecionada.
+            # Esse é o formato usado para facilitar conferência mensal e copiar para planilhas de levantamento.
+            df_matriz_competencia = df_levantamento.copy()
+            df_matriz_competencia["rubrica_resumo"] = (
+                df_matriz_competencia["cod_rubr"].fillna("").astype(str).str.strip()
+                + " - "
+                + df_matriz_competencia["dsc_rubr"].fillna("").astype(str).str.strip()
+            ).str.strip(" -")
+            df_resumo_competencia_lev = (
+                df_matriz_competencia.pivot_table(
+                    index="per_apur",
+                    columns="rubrica_resumo",
+                    values="vr_rubr",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                .reset_index()
+                .rename(columns={"per_apur": "Periodo de apuracao"})
+            )
+            colunas_rubricas = [col for col in df_resumo_competencia_lev.columns if col != "Periodo de apuracao"]
+            if colunas_rubricas:
+                df_resumo_competencia_lev["Total"] = df_resumo_competencia_lev[colunas_rubricas].sum(axis=1)
+                df_resumo_competencia_lev["CPP estimada"] = df_resumo_competencia_lev["Total"] * (float(aliquota_lev) / 100.0)
+            else:
+                df_resumo_competencia_lev["Total"] = 0.0
+                df_resumo_competencia_lev["CPP estimada"] = 0.0
+            df_resumo_competencia_lev = df_resumo_competencia_lev.sort_values("Periodo de apuracao")
+
             st.markdown("### Resumo das rubricas levantadas")
             st.dataframe(df_resumo_lev, use_container_width=True, hide_index=True)
 
             st.markdown("### Resumo por competência")
+            st.caption("Período de apuração na primeira coluna e rubricas selecionadas nas demais colunas.")
             st.dataframe(df_resumo_competencia_lev, use_container_width=True, hide_index=True)
 
             with st.expander("Ver movimentos detalhados do levantamento"):
@@ -452,7 +474,7 @@ with aba_levantamento:
             st.download_button(
                 label="Baixar levantamento de verbas",
                 data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v6_5.xlsx",
+                file_name="levantamento_verbas_cp_v6_6.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_levantamento_verbas",
@@ -483,7 +505,7 @@ excel_bytes = gerar_excel_saida(
 st.download_button(
     label="Baixar relatório de incidência CP",
     data=excel_bytes,
-    file_name="relatorio_incidencia_cp_esocial_v6_5.xlsx",
+    file_name="relatorio_incidencia_cp_esocial_v6_6.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
