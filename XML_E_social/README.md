@@ -60,3 +60,15 @@ relatorio_incidencia_cp_esocial_v6.xlsx
 - S-5001 — conferência da base por trabalhador;
 - S-5011 — apoio consolidado, quando existir;
 - S-3000 — exclusões, quando existir.
+
+
+## Atualizacao v6.5
+- levantamento de verbas mantido no padrao do app;
+- inclusao de resumo por competencia no Excel do levantamento;
+- inclusao de resumo por competencia/rubrica para apoio ao recalculo.
+
+
+## Atualização v6.5
+- seleção de rubricas no levantamento por checklist com busca;
+- a seleção fica armazenada em sessão e não se perde a cada clique;
+- botão separado para aplicar seleção antes de recalcular o levantamento.

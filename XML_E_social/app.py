@@ -13,7 +13,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 6.3: relatório de incidência CP, levantamento separado e identificação da empresa."
+    "Versão 6.5: relatório de incidência CP, levantamento separado e seleção estável por checklist."
 )
 
 with st.sidebar:
@@ -263,20 +263,112 @@ with aba_levantamento:
             df_opts = (
                 df_base_lev.groupby(["cod_rubr", "ide_tab_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
                 .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"))
-                .sort_values("valor_total", ascending=False)
+                .sort_values(["dsc_rubr", "cod_rubr"], ascending=[True, True])
             )
-            df_opts["rubrica_label"] = df_opts.apply(lambda r: f"{r['cod_rubr']} | {r['dsc_rubr']} | CP {r['cod_inc_cp'] or 'sem S-1010'} | {r['carater_verba']} | R$ {decimal_br(r['valor_total'])}", axis=1)
-            mapa_label_codigo = dict(zip(df_opts["rubrica_label"], df_opts["cod_rubr"].astype(str)))
-            labels = st.multiselect(
-                "Selecione uma ou mais rubricas para o cálculo",
-                options=df_opts["rubrica_label"].tolist(),
-                help="Digite parte do código ou descrição. Se deixar vazio, o cálculo usa todas as rubricas filtradas.",
-                key="lev_rubricas",
+            df_opts["chave_rubrica"] = (
+                df_opts["cod_rubr"].fillna("").astype(str)
+                + "||"
+                + df_opts["ide_tab_rubr"].fillna("").astype(str)
             )
-            codigos = [mapa_label_codigo[label] for label in labels]
+
+            if "lev_chaves_rubricas_selecionadas" not in st.session_state:
+                st.session_state["lev_chaves_rubricas_selecionadas"] = []
+
+            st.markdown("### Seleção de rubricas")
+            busca_lev = st.text_input(
+                "Buscar rubrica por código ou descrição",
+                value="",
+                key="lev_busca_rubrica",
+            )
+
+            df_opts_busca = df_opts.copy()
+            if busca_lev.strip():
+                termo = busca_lev.strip().lower()
+                mascara_busca = (
+                    df_opts_busca["cod_rubr"].fillna("").astype(str).str.lower().str.contains(termo, na=False)
+                    | df_opts_busca["dsc_rubr"].fillna("").astype(str).str.lower().str.contains(termo, na=False)
+                    | df_opts_busca["cod_inc_cp"].fillna("").astype(str).str.lower().str.contains(termo, na=False)
+                    | df_opts_busca["carater_verba"].fillna("").astype(str).str.lower().str.contains(termo, na=False)
+                )
+                df_opts_busca = df_opts_busca[mascara_busca].copy()
+
+            b1, b2, b3, b4 = st.columns([1.4, 1.4, 0.8, 1.4])
+            chaves_resultado = set(df_opts_busca["chave_rubrica"].astype(str).tolist())
+            chaves_filtradas = set(df_opts["chave_rubrica"].astype(str).tolist())
+            chaves_atuais = set(st.session_state["lev_chaves_rubricas_selecionadas"])
+
+            if b1.button("Selecionar resultado da busca", use_container_width=True, key="lev_btn_sel_busca"):
+                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais | chaves_resultado)
+                st.rerun()
+            if b2.button("Limpar resultado da busca", use_container_width=True, key="lev_btn_limpa_busca"):
+                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais - chaves_resultado)
+                st.rerun()
+            if b3.button("Limpar tudo", use_container_width=True, key="lev_btn_limpa_tudo"):
+                st.session_state["lev_chaves_rubricas_selecionadas"] = []
+                st.rerun()
+            if b4.button("Selecionar tudo filtrado", use_container_width=True, key="lev_btn_sel_filtrado"):
+                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais | chaves_filtradas)
+                st.rerun()
+
+            df_editor = df_opts_busca[[
+                "chave_rubrica",
+                "cod_rubr",
+                "dsc_rubr",
+                "cod_inc_cp",
+                "status_cp",
+                "carater_verba",
+                "tipo_verba",
+                "valor_total",
+                "qtd_lancamentos",
+                "qtd_cpfs",
+            ]].copy()
+            selecionadas = set(st.session_state["lev_chaves_rubricas_selecionadas"])
+            df_editor.insert(0, "Selecionar", df_editor["chave_rubrica"].astype(str).isin(selecionadas))
+            df_editor = df_editor.rename(columns={
+                "cod_rubr": "codRubr",
+                "dsc_rubr": "Descrição",
+                "cod_inc_cp": "codIncCP",
+                "status_cp": "Status CP",
+                "carater_verba": "Caráter",
+                "tipo_verba": "Tipo",
+                "valor_total": "Valor total",
+                "qtd_lancamentos": "Lançamentos",
+                "qtd_cpfs": "CPFs",
+            })
+
+            with st.form("form_selecao_rubricas_levantamento"):
+                df_editado = st.data_editor(
+                    df_editor.drop(columns=["chave_rubrica"]),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=420,
+                    disabled=["codRubr", "Descrição", "codIncCP", "Status CP", "Caráter", "Tipo", "Valor total", "Lançamentos", "CPFs"],
+                    column_config={
+                        "Selecionar": st.column_config.CheckboxColumn("Selecionar"),
+                        "Valor total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
+                    },
+                    key="lev_editor_rubricas",
+                )
+                aplicar_selecao = st.form_submit_button("Aplicar seleção", use_container_width=True)
+
+            if aplicar_selecao:
+                novas_resultado = set(df_opts_busca.loc[df_editado["Selecionar"].fillna(False).tolist(), "chave_rubrica"].astype(str).tolist())
+                fora_resultado = set(st.session_state["lev_chaves_rubricas_selecionadas"]) - chaves_resultado
+                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(fora_resultado | novas_resultado)
+                st.rerun()
+
+            chaves_selecionadas = set(st.session_state["lev_chaves_rubricas_selecionadas"])
+            st.caption(f"Rubricas selecionadas: {len(chaves_selecionadas)}. Se nenhuma rubrica for selecionada, o cálculo usa todas as rubricas filtradas.")
+
             df_levantamento = df_base_lev.copy()
-            if codigos:
-                df_levantamento = df_levantamento[df_levantamento["cod_rubr"].astype(str).isin(codigos)]
+            df_levantamento["chave_rubrica"] = (
+                df_levantamento["cod_rubr"].fillna("").astype(str)
+                + "||"
+                + df_levantamento["ide_tab_rubr"].fillna("").astype(str)
+            )
+            if chaves_selecionadas:
+                df_levantamento = df_levantamento[df_levantamento["chave_rubrica"].astype(str).isin(chaves_selecionadas)].copy()
+            df_levantamento = df_levantamento.drop(columns=["chave_rubrica"], errors="ignore")
 
             total_lev = float(pd.to_numeric(df_levantamento["vr_rubr"], errors="coerce").fillna(0).sum())
             cpp_lev = total_lev * (float(aliquota_lev) / 100.0)
@@ -295,8 +387,27 @@ with aba_levantamento:
                 .sort_values("valor_total", ascending=False)
             )
             df_resumo_lev["cpp_estimado"] = pd.to_numeric(df_resumo_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
+
+            df_resumo_competencia_lev = (
+                df_levantamento.groupby(["per_apur"], dropna=False, as_index=False)
+                .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_rubricas=("cod_rubr", "nunique"), qtd_cpfs=("cpf", "nunique"))
+                .sort_values("per_apur")
+            )
+            df_resumo_competencia_lev["cpp_estimado"] = pd.to_numeric(df_resumo_competencia_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
+
+            df_resumo_competencia_rubrica_lev = (
+                df_levantamento.groupby(["per_apur", "cod_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
+                .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"))
+                .sort_values(["per_apur", "valor_total"], ascending=[True, False])
+            )
+            df_resumo_competencia_rubrica_lev["cpp_estimado"] = pd.to_numeric(df_resumo_competencia_rubrica_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
+
             st.markdown("### Resumo das rubricas levantadas")
             st.dataframe(df_resumo_lev, use_container_width=True, hide_index=True)
+
+            st.markdown("### Resumo por competência")
+            st.dataframe(df_resumo_competencia_lev, use_container_width=True, hide_index=True)
+
             with st.expander("Ver movimentos detalhados do levantamento"):
                 st.dataframe(df_levantamento, use_container_width=True, hide_index=True)
 
@@ -335,11 +446,13 @@ with aba_levantamento:
                 df_parametros_lev.to_excel(writer, index=False, sheet_name="01_resumo")
                 df_resumo_lev.to_excel(writer, index=False, sheet_name="02_resumo_rubricas")
                 df_levantamento.to_excel(writer, index=False, sheet_name="03_movimentos")
+                df_resumo_competencia_lev.to_excel(writer, index=False, sheet_name="04_resumo_competencia")
+                df_resumo_competencia_rubrica_lev.to_excel(writer, index=False, sheet_name="05_competencia_rubrica")
 
             st.download_button(
                 label="Baixar levantamento de verbas",
                 data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v6_3.xlsx",
+                file_name="levantamento_verbas_cp_v6_5.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_levantamento_verbas",
@@ -370,7 +483,7 @@ excel_bytes = gerar_excel_saida(
 st.download_button(
     label="Baixar relatório de incidência CP",
     data=excel_bytes,
-    file_name="relatorio_incidencia_cp_esocial_v6_3.xlsx",
+    file_name="relatorio_incidencia_cp_esocial_v6_5.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
