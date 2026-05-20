@@ -1,24 +1,30 @@
-from dataclasses import dataclass
 import pandas as pd
-from .utils import normalize_column_name
 
+def validar_abas(arquivo, modo):
 
-@dataclass
-class ValidationResult:
-    ok: bool
-    errors: list[str]
-    warnings: list[str]
+    xls = pd.ExcelFile(arquivo)
+    abas = xls.sheet_names
 
+    erros = []
 
-def validate_sheet_exists(xls: pd.ExcelFile, required_sheets: list[str], file_label: str) -> ValidationResult:
-    existing = {normalize_column_name(s): s for s in xls.sheet_names}
-    errors = []
-    for sheet in required_sheets:
-        if normalize_column_name(sheet) not in existing:
-            errors.append(f"{file_label}: aba obrigatória não localizada: {sheet}")
-    return ValidationResult(ok=len(errors) == 0, errors=errors, warnings=[])
+    if modo == "ICMS":
+        if "C190" not in abas:
+            erros.append("Aba C190 não encontrada.")
 
+    if modo == "C170":
+        if "C170" not in abas:
+            erros.append("Aba C170 não encontrada.")
 
-def get_sheet_name(xls: pd.ExcelFile, sheet: str) -> str:
-    existing = {normalize_column_name(s): s for s in xls.sheet_names}
-    return existing[normalize_column_name(sheet)]
+    if modo == "C175":
+        if "C175" not in abas:
+            erros.append("Aba C175 não encontrada.")
+
+    if modo == "AMBOS":
+
+        if "C170" not in abas:
+            erros.append("Aba C170 não encontrada.")
+
+        if "C175" not in abas:
+            erros.append("Aba C175 não encontrada.")
+
+    return erros
