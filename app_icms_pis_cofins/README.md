@@ -6,8 +6,8 @@ Aplicativo Streamlit para cruzar informações do SPED ICMS/IPI e SPED Contribui
 
 ### Excel ICMS/IPI
 Abas obrigatórias:
-- `C100`
-- `C190`
+- `C100` ou `C100 - Nota Fiscal`
+- `C190` ou `C190 - Analítico`
 
 Colunas mínimas esperadas:
 
@@ -27,8 +27,8 @@ Colunas mínimas esperadas:
 
 ### Excel PIS/COFINS
 Abas conforme escolha no app:
-- `C170`
-- `C175`
+- `C170` ou `C170 - Itens da Nota`
+- `C175` ou `C175 - Analítico`
 
 #### Aba C170
 - `CHV_NFE` ou `CHAVE`
@@ -65,3 +65,15 @@ O app gera um Excel com abas:
 - `06_divergencias`
 - `07_potencial_credito`
 - `08_parametros`
+
+
+## Atualização v3
+
+Esta versão corrige a validação de abas para arquivos exportados com nomes descritivos, como:
+
+- `C100 - Nota Fiscal`
+- `C170 - Itens da Nota`
+- `C175 - Analítico`
+- `C190 - Analítico`
+
+Também mantém o layout da versão 1 e inclui `.streamlit/config.toml` para upload local de até 1GB.

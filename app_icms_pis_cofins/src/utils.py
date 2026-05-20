@@ -52,3 +52,17 @@ def normalize_key(series: pd.Series) -> pd.Series:
 def competence_from_date(series: pd.Series) -> pd.Series:
     dt = pd.to_datetime(series, errors="coerce", dayfirst=True)
     return dt.dt.strftime("%Y-%m").fillna("SEM_DATA")
+
+
+def competence_from_month_year(mes_series: pd.Series, ano_series: pd.Series) -> pd.Series:
+    mapa = {
+        "JANEIRO": "01", "FEVEREIRO": "02", "MARCO": "03", "MARÇO": "03",
+        "ABRIL": "04", "MAIO": "05", "JUNHO": "06", "JULHO": "07",
+        "AGOSTO": "08", "SETEMBRO": "09", "OUTUBRO": "10", "NOVEMBRO": "11", "DEZEMBRO": "12",
+    }
+    mes_txt = mes_series.astype(str).str.strip().str.upper()
+    mes_txt = mes_txt.apply(lambda x: unicodedata.normalize("NFKD", x).encode("ASCII", "ignore").decode("ASCII"))
+    mapa_ascii = {unicodedata.normalize("NFKD", k).encode("ASCII", "ignore").decode("ASCII"): v for k, v in mapa.items()}
+    mm = mes_txt.map(mapa_ascii).fillna(mes_txt.str.extract(r"(\d{1,2})", expand=False).str.zfill(2))
+    aa = ano_series.astype(str).str.extract(r"(\d{4})", expand=False)
+    return (aa.fillna("SEM_ANO") + "-" + mm.fillna("00")).fillna("SEM_DATA")

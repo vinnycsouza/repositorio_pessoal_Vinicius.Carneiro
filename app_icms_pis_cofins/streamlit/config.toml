@@ -1,8 +1,6 @@
 [server]
 maxUploadSize = 1024
 maxMessageSize = 1024
-enableXsrfProtection = false
-enableCORS = false
 
 [runner]
 fastReruns = true
