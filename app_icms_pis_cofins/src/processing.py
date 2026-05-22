@@ -183,10 +183,18 @@ def resumo_geral(cruzamentos: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def _lista_contem_codigo(valor, codigo: str) -> bool:
-    """Verifica se uma lista de CSTs contém determinado código."""
+    """
+    Verifica se uma lista de CSTs contém determinado código.
+    Exemplo: '000, 020' contém '000'.
+    """
     if pd.isna(valor):
         return False
-    partes = [str(p).strip().zfill(len(codigo)) for p in str(valor).replace(";", ",").split(",")]
+
+    partes = [
+        str(p).strip().zfill(len(codigo))
+        for p in str(valor).replace(";", ",").split(",")
+        if str(p).strip() != ""
+    ]
     return codigo in partes
 
 
@@ -197,70 +205,149 @@ def potencial_credito(
     regime: str = ""
 ) -> pd.DataFrame:
     """
-    Aba 07_potencial_credito.
+    Aba 07_potencial_credito — versão final.
 
-    Considera crédito somente quando:
+    Regra:
+    A aba 07 deve ser o resumo mensal da aba 04 após os filtros:
+
     - CST ICMS = 000
     - CST PIS/COFINS = 01
     - STATUS = ICMS INCLUÍDO
 
-    Crédito = ICMS_POTENCIAL_INCLUIDO_ANTERIOR x alíquota PIS/COFINS.
+    O valor consolidado deve vir da coluna:
+    CREDITO_PISCOFINS_BASE_ESPERADA
+
+    Assim, o total da aba 07 deve bater com a soma da aba 04
+    quando os mesmos filtros forem aplicados.
     """
+
     frames = []
+
     for nome, df in cruzamentos.items():
         if df is None or df.empty:
             continue
+
         base = df.copy()
+
         colunas_necessarias = [
-            "COMPETENCIA", "CHAVE", "CST_ICMS_LISTA", "CST_PIS_LISTA",
-            "STATUS", "ICMS_POTENCIAL_INCLUIDO_ANTERIOR"
+            "COMPETENCIA",
+            "CHAVE",
+            "CST_ICMS_LISTA",
+            "CST_PIS_LISTA",
+            "STATUS",
+            "CREDITO_PISCOFINS_BASE_ESPERADA",
         ]
-        if any(c not in base.columns for c in colunas_necessarias):
+
+        faltantes = [c for c in colunas_necessarias if c not in base.columns]
+        if faltantes:
             continue
+
         elegivel = base[
             base["CST_ICMS_LISTA"].apply(lambda x: _lista_contem_codigo(x, "000"))
             & base["CST_PIS_LISTA"].apply(lambda x: _lista_contem_codigo(x, "01"))
             & (base["STATUS"].astype(str).str.upper().str.strip() == "ICMS INCLUÍDO")
         ].copy()
+
         if elegivel.empty:
             continue
-        elegivel["ICMS_POTENCIAL_INCLUIDO_ANTERIOR"] = pd.to_numeric(
-            elegivel["ICMS_POTENCIAL_INCLUIDO_ANTERIOR"], errors="coerce"
-        ).fillna(0.0)
-        tmp = elegivel.groupby("COMPETENCIA", dropna=False).agg(
-            QTD_CHAVES_ELEGIVEIS=("CHAVE", "nunique"),
-            QTD_REGISTROS_ELEGIVEIS=("CHAVE", "size"),
-            ICMS_POTENCIAL_INCLUIDO=("ICMS_POTENCIAL_INCLUIDO_ANTERIOR", "sum"),
-            VL_OPR_ICMS=("VL_OPR_ICMS", "sum"),
-            VL_ICMS=("VL_ICMS", "sum"),
-            VL_BC_PIS=("VL_BC_PIS", "sum"),
-            VL_BC_COFINS=("VL_BC_COFINS", "sum"),
-        ).reset_index()
+
+        colunas_numericas = [
+            "VL_OPR_ICMS",
+            "VL_ICMS",
+            "BASE_ESPERADA_SEM_ICMS",
+            "VL_BC_PIS",
+            "VL_BC_COFINS",
+            "ICMS_POTENCIAL_INCLUIDO_ANTERIOR",
+            "CREDITO_PISCOFINS_BASE_ESPERADA",
+        ]
+
+        for coluna in colunas_numericas:
+            if coluna in elegivel.columns:
+                elegivel[coluna] = pd.to_numeric(elegivel[coluna], errors="coerce").fillna(0.0)
+
+        agg_dict = {
+            "QTD_CHAVES_ELEGIVEIS": ("CHAVE", "nunique"),
+            "QTD_REGISTROS_ELEGIVEIS": ("CHAVE", "size"),
+            "CREDITO_PISCOFINS_BASE_ESPERADA": ("CREDITO_PISCOFINS_BASE_ESPERADA", "sum"),
+        }
+
+        for coluna in [
+            "VL_OPR_ICMS",
+            "VL_ICMS",
+            "BASE_ESPERADA_SEM_ICMS",
+            "VL_BC_PIS",
+            "VL_BC_COFINS",
+            "ICMS_POTENCIAL_INCLUIDO_ANTERIOR",
+        ]:
+            if coluna in elegivel.columns:
+                agg_dict[coluna] = (coluna, "sum")
+
+        tmp = elegivel.groupby("COMPETENCIA", dropna=False).agg(**agg_dict).reset_index()
+
         tmp.insert(1, "ANALISE", nome)
         tmp["REGIME"] = regime if regime else "Não informado"
         tmp["ALIQUOTA_PIS"] = float(aliquota_pis)
         tmp["ALIQUOTA_COFINS"] = float(aliquota_cofins)
         tmp["ALIQUOTA_TOTAL_PIS_COFINS"] = float(aliquota_pis) + float(aliquota_cofins)
-        tmp["CREDITO_PIS"] = tmp["ICMS_POTENCIAL_INCLUIDO"] * float(aliquota_pis)
-        tmp["CREDITO_COFINS"] = tmp["ICMS_POTENCIAL_INCLUIDO"] * float(aliquota_cofins)
-        tmp["CREDITO_TOTAL"] = tmp["CREDITO_PIS"] + tmp["CREDITO_COFINS"]
-        tmp["CRITERIO"] = "CST ICMS 000 + CST PIS/COFINS 01 + STATUS ICMS INCLUÍDO"
+
+        # Mantém nomes também como crédito total para facilitar leitura no Excel.
+        tmp["CREDITO_TOTAL"] = tmp["CREDITO_PISCOFINS_BASE_ESPERADA"]
+
+        if "ICMS_POTENCIAL_INCLUIDO_ANTERIOR" in tmp.columns:
+            tmp = tmp.rename(
+                columns={
+                    "ICMS_POTENCIAL_INCLUIDO_ANTERIOR": "ICMS_POTENCIAL_INCLUIDO"
+                }
+            )
+
+        tmp["CRITERIO"] = (
+            "Resumo da aba 04 filtrado por CST ICMS 000 + "
+            "CST PIS/COFINS 01 + STATUS ICMS INCLUÍDO; "
+            "valor = soma de CREDITO_PISCOFINS_BASE_ESPERADA"
+        )
+
         frames.append(tmp)
+
     if not frames:
-        return pd.DataFrame(columns=[
-            "COMPETENCIA", "ANALISE", "REGIME", "QTD_CHAVES_ELEGIVEIS",
-            "QTD_REGISTROS_ELEGIVEIS", "ICMS_POTENCIAL_INCLUIDO",
-            "ALIQUOTA_PIS", "ALIQUOTA_COFINS", "ALIQUOTA_TOTAL_PIS_COFINS",
-            "CREDITO_PIS", "CREDITO_COFINS", "CREDITO_TOTAL", "CRITERIO"
-        ])
-    final = pd.concat(frames, ignore_index=True).sort_values(["ANALISE", "COMPETENCIA"]).reset_index(drop=True)
+        return pd.DataFrame(
+            columns=[
+                "COMPETENCIA",
+                "ANALISE",
+                "REGIME",
+                "QTD_CHAVES_ELEGIVEIS",
+                "QTD_REGISTROS_ELEGIVEIS",
+                "CREDITO_PISCOFINS_BASE_ESPERADA",
+                "CREDITO_TOTAL",
+                "ALIQUOTA_PIS",
+                "ALIQUOTA_COFINS",
+                "ALIQUOTA_TOTAL_PIS_COFINS",
+                "CRITERIO",
+            ]
+        )
+
+    final = pd.concat(frames, ignore_index=True)
+    final = final.sort_values(["ANALISE", "COMPETENCIA"]).reset_index(drop=True)
+
     ordem = [
-        "COMPETENCIA", "ANALISE", "REGIME", "QTD_CHAVES_ELEGIVEIS",
-        "QTD_REGISTROS_ELEGIVEIS", "ICMS_POTENCIAL_INCLUIDO",
-        "ALIQUOTA_PIS", "ALIQUOTA_COFINS", "ALIQUOTA_TOTAL_PIS_COFINS",
-        "CREDITO_PIS", "CREDITO_COFINS", "CREDITO_TOTAL",
-        "VL_OPR_ICMS", "VL_ICMS", "VL_BC_PIS", "VL_BC_COFINS", "CRITERIO"
+        "COMPETENCIA",
+        "ANALISE",
+        "REGIME",
+        "QTD_CHAVES_ELEGIVEIS",
+        "QTD_REGISTROS_ELEGIVEIS",
+        "VL_OPR_ICMS",
+        "VL_ICMS",
+        "BASE_ESPERADA_SEM_ICMS",
+        "VL_BC_PIS",
+        "VL_BC_COFINS",
+        "ICMS_POTENCIAL_INCLUIDO",
+        "CREDITO_PISCOFINS_BASE_ESPERADA",
+        "CREDITO_TOTAL",
+        "ALIQUOTA_PIS",
+        "ALIQUOTA_COFINS",
+        "ALIQUOTA_TOTAL_PIS_COFINS",
+        "CRITERIO",
     ]
+
     existentes = [c for c in ordem if c in final.columns]
     demais = [c for c in final.columns if c not in existentes]
     return final[existentes + demais]
