@@ -88,14 +88,14 @@ if st.button("Processar análise", type="primary"):
                 c170 = load_sheet(xls_pis, get_sheet_name(xls_pis, "C170"))
                 pis170 = prepare_pis_cofins(c170, "C170")
                 pis170_key = consolidate_pis_by_key(pis170)
-                cruz_c170 = cruzar_icms_pis(icms_base, pis170_key, tolerancia)
+                cruz_c170 = cruzar_icms_pis(icms_base, pis170_key, tolerancia, aliquota_pis, aliquota_cofins)
                 cruzamentos["C170"] = cruz_c170
 
             if modo in ["C175", "C170 + C175"]:
                 c175 = load_sheet(xls_pis, get_sheet_name(xls_pis, "C175"))
                 pis175 = prepare_pis_cofins(c175, "C175")
                 pis175_key = consolidate_pis_by_key(pis175)
-                cruz_c175 = cruzar_icms_pis(icms_base, pis175_key, tolerancia)
+                cruz_c175 = cruzar_icms_pis(icms_base, pis175_key, tolerancia, aliquota_pis, aliquota_cofins)
                 cruzamentos["C175"] = cruz_c175
 
             resumo = resumo_geral(cruzamentos)
@@ -115,7 +115,7 @@ if st.button("Processar análise", type="primary"):
                 {"PARAMETRO": "Tolerância", "VALOR": tolerancia},
                 {"PARAMETRO": "Alíquota PIS", "VALOR": aliquota_pis},
                 {"PARAMETRO": "Alíquota COFINS", "VALOR": aliquota_cofins},
-                {"PARAMETRO": "Metodologia", "VALOR": "Base esperada = VL_OPR_ICMS - VL_ICMS; comparação com VL_BC_PIS e VL_BC_COFINS"},
+                {"PARAMETRO": "Metodologia", "VALOR": "Base esperada = VL_OPR_ICMS - VL_ICMS; crédito/recalculo = Base esperada sem ICMS x alíquota PIS/COFINS"},
             ])
 
             excel_bytes = gerar_excel(
@@ -133,7 +133,7 @@ if st.button("Processar análise", type="primary"):
         st.dataframe(resumo, use_container_width=True)
 
         if not credito.empty:
-            st.subheader("Potencial crédito por competência")
+            st.subheader("Potencial crédito por competência — base esperada sem ICMS")
             st.dataframe(credito, use_container_width=True)
 
         limpar_memoria()

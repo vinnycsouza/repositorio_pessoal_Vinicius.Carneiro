@@ -77,3 +77,21 @@ Esta versão corrige a validação de abas para arquivos exportados com nomes de
 - `C190 - Analítico`
 
 Também mantém o layout da versão 1 e inclui `.streamlit/config.toml` para upload local de até 1GB.
+
+
+## Atualização v4 — potencial crédito
+
+A aba `07_potencial_credito` foi reestruturada para somar mês a mês a
+`BASE_ESPERADA_SEM_ICMS` gerada nos cruzamentos e aplicar as alíquotas de PIS e COFINS.
+
+Nova lógica principal:
+
+```text
+BASE_ESPERADA_SEM_ICMS = VL_OPR_ICMS - VL_ICMS
+CREDITO_PIS_BASE_ESPERADA = BASE_ESPERADA_SEM_ICMS x Alíquota PIS
+CREDITO_COFINS_BASE_ESPERADA = BASE_ESPERADA_SEM_ICMS x Alíquota COFINS
+CREDITO_TOTAL_BASE_ESPERADA = BASE_ESPERADA_SEM_ICMS x Alíquota total
+```
+
+Na aba de cruzamento, a coluna imediatamente posterior à base esperada mostra o
+valor calculado por chave, equivalente ao cálculo manual feito como `H x alíquota`.
