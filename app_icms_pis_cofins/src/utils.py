@@ -296,3 +296,5 @@ def gerar_potencial_credito_por_competencia(
     ]
 
     return resumo[colunas].sort_values("COMPETENCIA")
+def normalize_column_name(texto):
+    return normalizar_texto(texto)
