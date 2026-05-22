@@ -1,18 +1,213 @@
 from pathlib import Path
 from datetime import date
+import re
+import unicodedata
 import pandas as pd
-
-from .utils import normalize_columns, find_col, to_number, normalize_key, competence_from_date
 
 
 TABELA_ALIQUOTAS = Path(__file__).parent / "tabelas" / "aliquotas_icms_uf_2021_2026.csv"
 
 
+# ---------------------------------------------------------------------
+# Utilitários internos
+# ---------------------------------------------------------------------
+
+def _norm_col(valor) -> str:
+    texto = "" if valor is None else str(valor).strip()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = texto.upper()
+    texto = re.sub(r"[^A-Z0-9]+", "_", texto)
+    texto = re.sub(r"_+", "_", texto).strip("_")
+    return texto
+
+
+def _normalizar_colunas(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out.columns = [_norm_col(c) for c in out.columns]
+    return out
+
+
+def _achar_coluna(df: pd.DataFrame, possibilidades: list[str], obrigatoria: bool = False) -> str | None:
+    cols = list(df.columns)
+    cols_norm = {_norm_col(c): c for c in cols}
+
+    # match exato normalizado
+    for nome in possibilidades:
+        nome_norm = _norm_col(nome)
+        if nome_norm in cols_norm:
+            return cols_norm[nome_norm]
+
+    # match parcial
+    for nome in possibilidades:
+        nome_norm = _norm_col(nome)
+        for col in cols:
+            col_norm = _norm_col(col)
+            if nome_norm and (nome_norm in col_norm or col_norm in nome_norm):
+                return col
+
+    if obrigatoria:
+        raise KeyError(
+            "Coluna obrigatória não localizada. Procurado: "
+            + ", ".join(possibilidades)
+            + ". Colunas disponíveis: "
+            + ", ".join(map(str, cols[:50]))
+        )
+
+    return None
+
+
+def _serie_texto(df: pd.DataFrame, coluna: str | None, padrao: str = "") -> pd.Series:
+    if coluna and coluna in df.columns:
+        return df[coluna].fillna(padrao).astype(str).str.strip()
+    return pd.Series([padrao] * len(df), index=df.index, dtype="object")
+
+
+def _converter_numero(valor):
+    if pd.isna(valor):
+        return 0.0
+
+    texto = str(valor).strip()
+    if texto == "":
+        return 0.0
+
+    texto = (
+        texto.replace("R$", "")
+        .replace("%", "")
+        .replace(" ", "")
+        .replace("\u00a0", "")
+    )
+
+    # Formato BR: 1.234,56
+    if "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+
+    try:
+        return float(texto)
+    except Exception:
+        return 0.0
+
+
+def _serie_numero(df: pd.DataFrame, coluna: str | None) -> pd.Series:
+    if coluna and coluna in df.columns:
+        return df[coluna].apply(_converter_numero).astype(float)
+    return pd.Series([0.0] * len(df), index=df.index, dtype="float64")
+
+
+def _lista_contem_codigo(valor, codigo: str) -> bool:
+    if pd.isna(valor):
+        return False
+
+    partes = [
+        str(p).strip().zfill(len(codigo))
+        for p in str(valor).replace(";", ",").replace("/", ",").split(",")
+        if str(p).strip() != ""
+    ]
+    return codigo in partes
+
+
+def _limpar_documento(valor) -> str:
+    if pd.isna(valor):
+        return ""
+    texto = str(valor).strip()
+    # Excel pode transformar número NF em 123.0
+    if re.fullmatch(r"\d+\.0", texto):
+        texto = texto[:-2]
+    return texto
+
+
+def _competencia_para_data(valor):
+    """
+    Tenta converter Mês/Competência para Timestamp do primeiro dia do mês.
+    Aceita:
+    - datas Excel/pandas
+    - 2021-01
+    - 01/2021
+    - jan/21, jan/2021
+    - janeiro/2021
+    """
+    if pd.isna(valor):
+        return pd.NaT
+
+    if isinstance(valor, (pd.Timestamp,)):
+        return pd.Timestamp(valor.year, valor.month, 1)
+
+    texto = str(valor).strip().lower()
+    if texto == "":
+        return pd.NaT
+
+    # Remove acento
+    texto_norm = unicodedata.normalize("NFKD", texto)
+    texto_norm = "".join(c for c in texto_norm if not unicodedata.combining(c))
+    texto_norm = texto_norm.replace(".", "").replace("-", "/").strip()
+
+    # yyyy/mm
+    m = re.search(r"(\d{4})/(\d{1,2})", texto_norm)
+    if m:
+        ano = int(m.group(1))
+        mes = int(m.group(2))
+        if 1 <= mes <= 12:
+            return pd.Timestamp(ano, mes, 1)
+
+    # mm/yyyy ou mm/yy
+    m = re.search(r"(\d{1,2})/(\d{2,4})", texto_norm)
+    if m:
+        mes = int(m.group(1))
+        ano = int(m.group(2))
+        if ano < 100:
+            ano += 2000
+        if 1 <= mes <= 12:
+            return pd.Timestamp(ano, mes, 1)
+
+    meses = {
+        "jan": 1, "janeiro": 1,
+        "fev": 2, "fevereiro": 2,
+        "mar": 3, "marco": 3, "março": 3,
+        "abr": 4, "abril": 4,
+        "mai": 5, "maio": 5,
+        "jun": 6, "junho": 6,
+        "jul": 7, "julho": 7,
+        "ago": 8, "agosto": 8,
+        "set": 9, "setembro": 9,
+        "out": 10, "outubro": 10,
+        "nov": 11, "novembro": 11,
+        "dez": 12, "dezembro": 12,
+    }
+
+    # jan/21, janeiro/2021
+    for nome_mes, num_mes in meses.items():
+        if texto_norm.startswith(nome_mes):
+            anos = re.findall(r"\d{2,4}", texto_norm)
+            if anos:
+                ano = int(anos[-1])
+                if ano < 100:
+                    ano += 2000
+                return pd.Timestamp(ano, num_mes, 1)
+
+    # tentativa geral
+    data = pd.to_datetime(valor, errors="coerce", dayfirst=True)
+    if not pd.isna(data):
+        return pd.Timestamp(data.year, data.month, 1)
+
+    return pd.NaT
+
+
+def _competencia_texto(valor) -> str:
+    data = _competencia_para_data(valor)
+    if pd.isna(data):
+        return "SEM_DATA"
+    return data.strftime("%Y-%m")
+
+
+# ---------------------------------------------------------------------
+# Alíquotas
+# ---------------------------------------------------------------------
+
 def carregar_tabela_aliquotas() -> pd.DataFrame:
     df = pd.read_csv(TABELA_ALIQUOTAS, dtype=str, sep=";")
     df["INICIO_VIGENCIA"] = pd.to_datetime(df["INICIO_VIGENCIA"], errors="coerce")
     df["FIM_VIGENCIA"] = pd.to_datetime(df["FIM_VIGENCIA"], errors="coerce")
-    df["ALIQUOTA_ICMS"] = to_number(df["ALIQUOTA_ICMS"]) / 100
+    df["ALIQUOTA_ICMS"] = df["ALIQUOTA_ICMS"].apply(_converter_numero) / 100
     df["UF"] = df["UF"].astype(str).str.upper().str.strip()
     return df
 
@@ -29,88 +224,8 @@ def listar_ufs_aliquotas() -> list[str]:
         ]
 
 
-def _lista_contem_codigo(valor, codigo: str) -> bool:
-    if pd.isna(valor):
-        return False
-
-    partes = [
-        str(p).strip().zfill(len(codigo))
-        for p in str(valor).replace(";", ",").split(",")
-        if str(p).strip() != ""
-    ]
-    return codigo in partes
-
-
-def _coluna_ou_zero(df: pd.DataFrame, coluna: str):
-    if coluna and coluna in df.columns:
-        return to_number(df[coluna])
-    return 0.0
-
-
-def _coluna_ou_vazio(df: pd.DataFrame, coluna: str):
-    if coluna and coluna in df.columns:
-        return df[coluna].astype(str).str.strip()
-    return ""
-
-
-def _normalizar_nome_coluna_local(valor) -> str:
-    """
-    Normalização local para comparar cabeçalhos com acento, hífen e espaços.
-    """
-    import unicodedata
-    import re
-
-    texto = str(valor).strip()
-    texto = unicodedata.normalize("NFKD", texto)
-    texto = "".join(c for c in texto if not unicodedata.combining(c))
-    texto = texto.upper()
-    texto = re.sub(r"[^A-Z0-9]+", "_", texto)
-    texto = re.sub(r"_+", "_", texto).strip("_")
-    return texto
-
-
-def _primeira_existente_manual(df: pd.DataFrame, possibilidades: list[str]):
-    """
-    Fallback para encontrar coluna quando find_col não reconhece alguma variação.
-
-    Agora compara:
-    - nome literal
-    - nome em maiúsculo
-    - nome normalizado sem acento/espaço/hífen
-    """
-    cols_upper = {str(c).upper().strip(): c for c in df.columns}
-    cols_norm = {_normalizar_nome_coluna_local(c): c for c in df.columns}
-
-    for nome in possibilidades:
-        nome_upper = str(nome).upper().strip()
-        nome_norm = _normalizar_nome_coluna_local(nome)
-
-        if nome_upper in cols_upper:
-            return cols_upper[nome_upper]
-
-        if nome_norm in cols_norm:
-            return cols_norm[nome_norm]
-
-    for nome in possibilidades:
-        nome_upper = str(nome).upper().strip()
-        nome_norm = _normalizar_nome_coluna_local(nome)
-
-        for col_upper, col_original in cols_upper.items():
-            if nome_upper and (nome_upper in col_upper or col_upper in nome_upper):
-                return col_original
-
-        for col_norm, col_original in cols_norm.items():
-            if nome_norm and (nome_norm in col_norm or col_norm in nome_norm):
-                return col_original
-
-    return None
-
-
 def _buscar_aliquota_por_uf_competencia(uf: str, competencia: str, tabela: pd.DataFrame) -> tuple[float, str, str]:
-    try:
-        data_comp = pd.to_datetime(str(competencia) + "-01", errors="coerce")
-    except Exception:
-        data_comp = pd.NaT
+    data_comp = pd.to_datetime(str(competencia) + "-01", errors="coerce")
 
     if pd.isna(data_comp):
         return 0.0, "NÃO LOCALIZADO", "Competência inválida"
@@ -128,177 +243,144 @@ def _buscar_aliquota_por_uf_competencia(uf: str, competencia: str, tabela: pd.Da
     return float(linha["ALIQUOTA_ICMS"]), str(linha.get("FONTE", "")), str(linha.get("OBSERVACAO", ""))
 
 
-def _preparar_contribuicoes_st(df: pd.DataFrame, registro: str) -> pd.DataFrame:
-    df = normalize_columns(df)
+# ---------------------------------------------------------------------
+# Preparação do C170/C175 no padrão manual
+# ---------------------------------------------------------------------
 
-    chave = _primeira_existente_manual(df, ["CHV_NFE", "CHAVE", "CHAVE_NFE", "CHAVE_NF", "CHAVE_C100", "CHAVE_DE_ACESSO_C100"])
-    cfop = _primeira_existente_manual(df, ["CFOP"])
-    cst_pis = _primeira_existente_manual(
-        df,
-        [
-            "CST_PIS",
-            "CST - PIS",
-            "CST PIS",
-            "CST",
-            "CST_DE_PIS",
-            "CST DO PIS",
-        ],
-    )
-    cst_cofins = _primeira_existente_manual(
-        df,
-        [
-            "CST_COFINS",
-            "CST COFINS",
-            "CST - COFINS",
-            "CST_DE_COFINS",
-            "CST DO COFINS",
-        ],
-    )
-    dt_doc = _primeira_existente_manual(
-        df,
-        [
-            "DT_DOC",
-            "DATA",
-            "DATA_DOC",
-            "DT_E_S",
-            "DATA_DE_EMISSAO",
-            "DATA DE EMISSÃO",
-            "DATA DE EMISSAO",
-        ],
-    )
-    mes = _primeira_existente_manual(
-        df,
-        [
-            "COMPETENCIA",
-            "MÊS",
-            "MES",
-            "Mês",
-            "MES_ANO",
-            "MÊS_ANO",
-            "PERIODO",
-            "PERÍODO",
-        ],
-    )
+def _preparar_contribuicoes_st(df_original: pd.DataFrame, registro: str) -> pd.DataFrame:
+    """
+    Transforma C170/C175 em uma base documental compatível com a planilha manual
+    'Calculo ICMS ST'.
 
-    valor_op = _primeira_existente_manual(
+    O foco é o C175 com cabeçalho:
+    Mês | Número NF | CFOP | Valor da Operação | Valor de Desconto |
+    CST - PIS | Valor BC PIS | CST COFINS | Valor BC COFINS
+    """
+    df = _normalizar_colunas(df_original)
+
+    col_mes = _achar_coluna(df, ["Mês", "MES", "COMPETENCIA", "PERIODO", "DT_DOC", "DATA"])
+    col_chave = _achar_coluna(df, ["CHAVE", "CHV_NFE", "CHAVE_NFE", "CHAVE NF", "CHAVE DE ACESSO"])
+    col_nf = _achar_coluna(df, ["Número NF", "NUMERO NF", "NÚMERO NF", "NUM_DOC", "NUMERO", "NR_DOC", "N_DOC"])
+    col_cfop = _achar_coluna(df, ["CFOP"], obrigatoria=True)
+
+    col_valor_op = _achar_coluna(
         df,
         [
-            "VL_OPERACAO",
-            "VL_OPR",
-            "VALOR_OPERACAO",
-            "VALOR_DA_OPERACAO",
-            "VALOR_DA_OPERAÇÃO",
+            "Valor da Operação",
             "VALOR DA OPERACAO",
-            "VALOR DA OPERAÇÃO",
-            "VALOR DE OPERAÇÃO",
             "VALOR DE OPERACAO",
-            "VALOR_DA_OPERACAO_C175",
+            "Valor Operação",
+            "VL_OPR",
             "VL_ITEM",
             "VALOR_ITEM",
-            "SOMA_DE_VALOR_DA_OPERACAO",
-            "SOMA_DE_VALOR_OPERACAO",
-            "SOMA_DE_VALOR_ITEM",
-            "SOMA_DE_VALOR_DO_ITEM",
-            "SOMA_DE_VALOR_TOTAL_DO_ITEM",
-            "VALOR_TOTAL_DO_PRODUTO",
+            "VALOR DA OPERAÇÃO",
         ],
+        obrigatoria=True,
     )
 
-    desconto = _primeira_existente_manual(
+    col_desconto = _achar_coluna(
         df,
         [
+            "Valor de Desconto",
+            "VALOR DE DESCONTO",
+            "Valor do Desconto",
             "VL_DESC",
             "DESCONTO",
-            "VALOR_DESCONTO",
-            "VALOR_DE_DESCONTO",
-            "VALOR DE DESCONTO",
-            "VALOR DO DESCONTO",
-            "VL_DESCONTO",
-            "SOMA_DE_VALOR_DO_DESCONTO",
-            "SOMA_DE_VALOR_DESCONTO",
         ],
     )
 
-    bc_pis = _primeira_existente_manual(
+    col_cst_pis = _achar_coluna(
         df,
         [
-            "VL_BC_PIS",
-            "BC_PIS",
-            "BASE_PIS",
-            "BASE_DE_PIS",
-            "VALOR_BC_PIS",
+            "CST - PIS",
+            "CST PIS",
+            "CST_PIS",
+            "CST DE PIS",
+            "CST",
+        ],
+    )
+
+    col_bc_pis = _achar_coluna(
+        df,
+        [
+            "Valor BC PIS",
             "VALOR BC PIS",
-            "VALOR DA BC PIS",
-            "BASE DE CÁLCULO PIS",
-            "BASE DE CALCULO PIS",
-            "SOMA_DE_VALOR_BC_PIS",
-            "SOMA_DE_BASE_PIS",
+            "VL_BC_PIS",
+            "BC PIS",
+            "BASE PIS",
+            "BASE DE PIS",
+        ],
+        obrigatoria=True,
+    )
+
+    col_aliq_pis = _achar_coluna(df, ["Alíquota PIS", "ALIQUOTA PIS", "ALIQ_PIS"])
+    col_valor_pis = _achar_coluna(df, ["Valor PIS", "VALOR PIS", "VL_PIS"])
+
+    col_cst_cofins = _achar_coluna(
+        df,
+        [
+            "CST COFINS",
+            "CST - COFINS",
+            "CST_COFINS",
+            "CST DE COFINS",
         ],
     )
 
-    bc_cofins = _primeira_existente_manual(
+    col_bc_cofins = _achar_coluna(
         df,
         [
-            "VL_BC_COFINS",
-            "BC_COFINS",
-            "BASE_COFINS",
-            "BASE_DE_COFINS",
-            "VALOR_BC_COFINS",
+            "Valor BC COFINS",
             "VALOR BC COFINS",
-            "VALOR DA BC COFINS",
-            "BASE DE CÁLCULO COFINS",
-            "BASE DE CALCULO COFINS",
-            "SOMA_DE_VALOR_BC_COFINS",
-            "SOMA_DE_BASE_COFINS",
+            "VL_BC_COFINS",
+            "BC COFINS",
+            "BASE COFINS",
+            "BASE DE COFINS",
         ],
     )
+
+    col_aliq_cofins = _achar_coluna(df, ["Alíquota COFINS", "ALIQUOTA COFINS", "ALIQ_COFINS"])
+    col_valor_cofins = _achar_coluna(df, ["Valor COFINS", "VALOR COFINS", "VL_COFINS"])
 
     out = pd.DataFrame(index=df.index)
     out["REGISTRO"] = registro
-    out["CHAVE"] = normalize_key(df[chave]) if chave else ""
-    out["CFOP"] = _coluna_ou_vazio(df, cfop)
-    out["CST_PIS"] = _coluna_ou_vazio(df, cst_pis)
-    out["CST_COFINS"] = _coluna_ou_vazio(df, cst_cofins) if cst_cofins else out["CST_PIS"]
 
-    if mes:
-        comp = df[mes].astype(str).str.strip()
-        datas = pd.to_datetime(comp, errors="coerce", dayfirst=True)
-        out["COMPETENCIA"] = datas.dt.strftime("%Y-%m")
-        out["COMPETENCIA"] = out["COMPETENCIA"].fillna(
-            comp.str.extract(r"(\d{4}-\d{2})", expand=False)
-        )
-        out["COMPETENCIA"] = out["COMPETENCIA"].fillna(
-            comp.str.extract(r"(\d{2}/\d{4})", expand=False)
-        )
-
-        # Hotfix v9.3:
-        # Garante string antes de usar .str, pois a coluna Mês pode vir como número/data.
-        out["COMPETENCIA"] = out["COMPETENCIA"].astype("string")
-        out["COMPETENCIA"] = out["COMPETENCIA"].str.replace(
-            r"^(\d{2})/(\d{4})$",
-            r"\2-\1",
-            regex=True
-        )
-        out["COMPETENCIA"] = out["COMPETENCIA"].fillna("SEM_DATA")
-    elif dt_doc:
-        out["COMPETENCIA"] = competence_from_date(df[dt_doc])
+    if col_mes:
+        out["COMPETENCIA_ORIGINAL"] = _serie_texto(df, col_mes)
+        out["COMPETENCIA"] = df[col_mes].apply(_competencia_texto)
     else:
+        out["COMPETENCIA_ORIGINAL"] = "SEM_DATA"
         out["COMPETENCIA"] = "SEM_DATA"
 
-    out["VL_OPERACAO"] = _coluna_ou_zero(df, valor_op)
-    out["VL_DESCONTO"] = _coluna_ou_zero(df, desconto)
-    out["VL_BC_PIS"] = _coluna_ou_zero(df, bc_pis)
-    out["VL_BC_COFINS"] = _coluna_ou_zero(df, bc_cofins)
+    out["CHAVE"] = _serie_texto(df, col_chave)
+    out["NUMERO_NF"] = _serie_texto(df, col_nf)
+    out["DOCUMENTO"] = out["CHAVE"].where(out["CHAVE"].astype(str).str.strip() != "", out["NUMERO_NF"])
+    out["DOCUMENTO"] = out["DOCUMENTO"].apply(_limpar_documento)
 
-    out["COLUNA_ORIGEM_OPERACAO"] = valor_op or "NÃO LOCALIZADA"
-    out["COLUNA_ORIGEM_DESCONTO"] = desconto or "NÃO LOCALIZADA"
-    out["COLUNA_ORIGEM_BC_PIS"] = bc_pis or "NÃO LOCALIZADA"
-    out["COLUNA_ORIGEM_BC_COFINS"] = bc_cofins or "NÃO LOCALIZADA"
+    out["CFOP"] = _serie_texto(df, col_cfop)
+    out["CST_PIS"] = _serie_texto(df, col_cst_pis)
+    out["CST_COFINS"] = _serie_texto(df, col_cst_cofins) if col_cst_cofins else out["CST_PIS"]
+
+    out["VL_OPERACAO"] = _serie_numero(df, col_valor_op)
+    out["VL_DESCONTO"] = _serie_numero(df, col_desconto)
+    out["VL_BC_PIS"] = _serie_numero(df, col_bc_pis)
+    out["VL_BC_COFINS"] = _serie_numero(df, col_bc_cofins)
+
+    out["ALIQ_PIS_ORIGINAL"] = _serie_numero(df, col_aliq_pis)
+    out["VL_PIS_ORIGINAL"] = _serie_numero(df, col_valor_pis)
+    out["ALIQ_COFINS_ORIGINAL"] = _serie_numero(df, col_aliq_cofins)
+    out["VL_COFINS_ORIGINAL"] = _serie_numero(df, col_valor_cofins)
+
+    # Rastreabilidade das colunas localizadas
+    out["COLUNA_ORIGEM_MES"] = col_mes or "NÃO LOCALIZADA"
+    out["COLUNA_ORIGEM_OPERACAO"] = col_valor_op or "NÃO LOCALIZADA"
+    out["COLUNA_ORIGEM_DESCONTO"] = col_desconto or "NÃO LOCALIZADA"
+    out["COLUNA_ORIGEM_BC_PIS"] = col_bc_pis or "NÃO LOCALIZADA"
+    out["COLUNA_ORIGEM_BC_COFINS"] = col_bc_cofins or "NÃO LOCALIZADA"
 
     return out.reset_index(drop=True)
 
 
-def _adicionar_calculos(
+def _adicionar_calculos_manuais(
     df: pd.DataFrame,
     uf: str,
     origem_aliquota: str,
@@ -311,21 +393,14 @@ def _adicionar_calculos(
 ) -> pd.DataFrame:
     out = df.copy()
 
-    # Hotfix: garante colunas mínimas mesmo quando a base filtrada vem vazia.
-    for coluna in ["VL_OPERACAO", "VL_DESCONTO", "VL_BC_PIS", "VL_BC_COFINS"]:
-        if coluna not in out.columns:
-            out[coluna] = 0.0
-
-    if "COMPETENCIA" not in out.columns:
-        out["COMPETENCIA"] = "SEM_DATA"
-
-    if "CHAVE" not in out.columns:
-        out["CHAVE"] = ""
-
     out["UF"] = uf
-    out["BASE_OPERACAO"] = out["VL_OPERACAO"] - out["VL_DESCONTO"]
-    out["DIF_BC_PIS_VS_OPERACAO"] = out["VL_BC_PIS"] - out["BASE_OPERACAO"]
-    out["BC_PIS_COMPATIVEL"] = out["DIF_BC_PIS_VS_OPERACAO"].abs() <= float(tolerancia_bc)
+
+    # Lógica manual: operação líquida = valor operação - desconto
+    out["BASE_OPERACAO_LIQUIDA"] = out["VL_OPERACAO"] - out["VL_DESCONTO"]
+
+    # Validação da veracidade da BC PIS
+    out["DIF_BASE_OPERACAO_VS_BC_PIS"] = out["BASE_OPERACAO_LIQUIDA"] - out["VL_BC_PIS"]
+    out["BC_PIS_COMPATIVEL"] = out["DIF_BASE_OPERACAO_VS_BC_PIS"].abs() <= float(tolerancia_bc)
 
     if origem_aliquota == "Alíquota manual":
         out["ALIQUOTA_ICMS"] = float(aliquota_icms_manual or 0.0)
@@ -339,22 +414,51 @@ def _adicionar_calculos(
         out["FONTE_ALIQUOTA"] = aliquotas.apply(lambda x: x[1])
         out["OBS_ALIQUOTA"] = aliquotas.apply(lambda x: x[2])
 
-    out["ICMS_ST_ESTIMADO"] = out["BASE_OPERACAO"] * out["ALIQUOTA_ICMS"]
-    out["BASE_ESTIMADA_SEM_ST"] = out["BASE_OPERACAO"] - out["ICMS_ST_ESTIMADO"]
+    # Estimativa manual do ICMS-ST embutido
+    out["ICMS_ST_ESTIMADO"] = out["BASE_OPERACAO_LIQUIDA"] * out["ALIQUOTA_ICMS"]
+    out["BASE_ESTIMADA_SEM_ICMS_ST"] = out["BASE_OPERACAO_LIQUIDA"] - out["ICMS_ST_ESTIMADO"]
 
-    out["ALIQUOTA_PIS"] = float(aliquota_pis)
-    out["ALIQUOTA_COFINS"] = float(aliquota_cofins)
+    # Recalculo PIS/COFINS com alíquotas do regime selecionado
+    out["REGIME_PIS_COFINS"] = regime
+    out["ALIQUOTA_PIS_CALCULO"] = float(aliquota_pis)
+    out["ALIQUOTA_COFINS_CALCULO"] = float(aliquota_cofins)
     out["ALIQUOTA_TOTAL_PIS_COFINS"] = float(aliquota_pis) + float(aliquota_cofins)
 
-    out["CREDITO_PIS_ESTIMADO"] = out["ICMS_ST_ESTIMADO"] * out["ALIQUOTA_PIS"]
-    out["CREDITO_COFINS_ESTIMADO"] = out["ICMS_ST_ESTIMADO"] * out["ALIQUOTA_COFINS"]
+    out["PIS_RECALCULADO_SEM_ST"] = out["BASE_ESTIMADA_SEM_ICMS_ST"] * out["ALIQUOTA_PIS_CALCULO"]
+    out["COFINS_RECALCULADO_SEM_ST"] = out["BASE_ESTIMADA_SEM_ICMS_ST"] * out["ALIQUOTA_COFINS_CALCULO"]
+    out["PISCOFINS_RECALCULADO_SEM_ST"] = out["PIS_RECALCULADO_SEM_ST"] + out["COFINS_RECALCULADO_SEM_ST"]
+
+    # Crédito estimado sobre o ICMS-ST retirado da base
+    out["CREDITO_PIS_ESTIMADO"] = out["ICMS_ST_ESTIMADO"] * out["ALIQUOTA_PIS_CALCULO"]
+    out["CREDITO_COFINS_ESTIMADO"] = out["ICMS_ST_ESTIMADO"] * out["ALIQUOTA_COFINS_CALCULO"]
     out["CREDITO_TOTAL_ESTIMADO"] = out["CREDITO_PIS_ESTIMADO"] + out["CREDITO_COFINS_ESTIMADO"]
 
-    out["REGIME_PIS_COFINS"] = regime
+    def status(row):
+        if not _lista_contem_codigo(row.get("CFOP", ""), "5405"):
+            return "FORA CFOP 5405"
+        if not _lista_contem_codigo(row.get("CST_PIS", ""), "01"):
+            return "CST PIS DIFERENTE DE 01"
+        if not _lista_contem_codigo(row.get("CST_COFINS", ""), "01"):
+            return "CST COFINS DIFERENTE DE 01"
+        if row.get("ALIQUOTA_ICMS", 0) <= 0:
+            return "SEM ALÍQUOTA ICMS"
+        if not bool(row.get("BC_PIS_COMPATIVEL", False)):
+            return "BC PIS INCOMPATÍVEL"
+        return "ELEGÍVEL"
+
+    out["STATUS_ANALISE"] = out.apply(status, axis=1)
     out["TIPO_APURACAO"] = "ESTIMADO"
-    out["CRITERIO"] = "CFOP 5405 + CST PIS/COFINS 01 + BC PIS compatível com operação líquida"
+    out["CRITERIO"] = (
+        "CFOP 5405 + CST PIS/COFINS 01 + BC PIS compatível com "
+        "Valor da Operação - Valor de Desconto"
+    )
+
     return out
 
+
+# ---------------------------------------------------------------------
+# Função principal chamada pelo app.py
+# ---------------------------------------------------------------------
 
 def processar_icms_st(
     xls_pis: pd.ExcelFile,
@@ -377,43 +481,48 @@ def processar_icms_st(
         registros.append("C175")
 
     frames = []
+    erros_leitura = []
+
     for registro in registros:
-        aba = get_sheet_name(xls_pis, registro)
-        df = pd.read_excel(xls_pis, sheet_name=aba, dtype=object)
-        frames.append(_preparar_contribuicoes_st(df, registro))
+        try:
+            aba = get_sheet_name(xls_pis, registro)
+            df = pd.read_excel(xls_pis, sheet_name=aba, dtype=object)
+            frames.append(_preparar_contribuicoes_st(df, registro))
+        except Exception as e:
+            erros_leitura.append({"REGISTRO": registro, "ERRO": str(e)})
 
     if frames:
         base = pd.concat(frames, ignore_index=True)
     else:
-        base = pd.DataFrame(
-            columns=[
-                "REGISTRO", "CHAVE", "CFOP", "CST_PIS", "CST_COFINS",
-                "COMPETENCIA", "VL_OPERACAO", "VL_DESCONTO", "VL_BC_PIS", "VL_BC_COFINS"
-            ]
-        )
+        base = pd.DataFrame()
 
     tabela_aliquotas = carregar_tabela_aliquotas()
 
     if base.empty:
+        parametros = pd.DataFrame([
+            {"PARAMETRO": "Módulo", "VALOR": "ICMS-ST - análise preliminar"},
+            {"PARAMETRO": "Aviso", "VALOR": "Nenhuma linha lida do SPED Contribuições."},
+        ])
         return {
             "01_resumo_mensal": pd.DataFrame(),
-            "02_analitico_5405": pd.DataFrame(),
+            "02_analitico_documental": pd.DataFrame(),
             "03_elegiveis_credito": pd.DataFrame(),
-            "04_divergencias": pd.DataFrame(),
-            "05_parametros": pd.DataFrame(),
+            "04_divergencias": pd.DataFrame(erros_leitura),
+            "05_parametros": parametros,
             "06_tabela_aliquotas_usada": tabela_aliquotas,
         }
 
+    # Filtro de período. Se competência não for parseada, não elimina automaticamente:
+    # mantém em divergências para revisão.
     base["DATA_COMP"] = pd.to_datetime(base["COMPETENCIA"].astype(str) + "-01", errors="coerce")
     inicio = pd.to_datetime(data_inicio)
     fim = pd.to_datetime(data_fim)
 
-    base = base[(base["DATA_COMP"] >= inicio) & (base["DATA_COMP"] <= fim)].copy()
+    dentro_periodo = base["DATA_COMP"].isna() | ((base["DATA_COMP"] >= inicio) & (base["DATA_COMP"] <= fim))
+    base_periodo = base[dentro_periodo].copy()
 
-    analitico_5405 = base[base["CFOP"].apply(lambda x: _lista_contem_codigo(x, "5405"))].copy()
-
-    analitico_5405 = _adicionar_calculos(
-        analitico_5405,
+    analitico = _adicionar_calculos_manuais(
+        base_periodo,
         uf=uf,
         origem_aliquota=origem_aliquota,
         aliquota_icms_manual=aliquota_icms_manual,
@@ -424,42 +533,28 @@ def processar_icms_st(
         tolerancia_bc=tolerancia_bc,
     )
 
-    # Hotfix v9.4:
-    # Garante colunas mínimas antes dos filtros, inclusive quando não há CFOP 5405
-    # ou quando alguma coluna veio com nome não reconhecido.
-    colunas_texto_minimas = ["CST_PIS", "CST_COFINS", "CFOP", "CHAVE", "COMPETENCIA"]
-    for coluna in colunas_texto_minimas:
-        if coluna not in analitico_5405.columns:
-            analitico_5405[coluna] = ""
+    # A aba 02 mostra o documental filtrado em CFOP 5405, porque é o foco do seu trabalho manual.
+    analitico_5405 = analitico[analitico["CFOP"].apply(lambda x: _lista_contem_codigo(x, "5405"))].copy()
 
-    colunas_num_minimas = ["BC_PIS_COMPATIVEL", "ALIQUOTA_ICMS"]
-    if "BC_PIS_COMPATIVEL" not in analitico_5405.columns:
-        analitico_5405["BC_PIS_COMPATIVEL"] = False
-    if "ALIQUOTA_ICMS" not in analitico_5405.columns:
-        analitico_5405["ALIQUOTA_ICMS"] = 0.0
+    elegiveis = analitico_5405[analitico_5405["STATUS_ANALISE"] == "ELEGÍVEL"].copy()
+    divergencias = analitico_5405[analitico_5405["STATUS_ANALISE"] != "ELEGÍVEL"].copy()
 
-    elegiveis = analitico_5405[
-        analitico_5405["CST_PIS"].apply(lambda x: _lista_contem_codigo(x, "01"))
-        & analitico_5405["CST_COFINS"].apply(lambda x: _lista_contem_codigo(x, "01"))
-        & (analitico_5405["BC_PIS_COMPATIVEL"])
-        & (analitico_5405["ALIQUOTA_ICMS"] > 0)
-    ].copy()
-
-    divergencias = analitico_5405[
-        ~(
-            analitico_5405["CST_PIS"].apply(lambda x: _lista_contem_codigo(x, "01"))
-            & analitico_5405["CST_COFINS"].apply(lambda x: _lista_contem_codigo(x, "01"))
-            & (analitico_5405["BC_PIS_COMPATIVEL"])
-            & (analitico_5405["ALIQUOTA_ICMS"] > 0)
-        )
-    ].copy()
+    if erros_leitura:
+        divergencias = pd.concat([divergencias, pd.DataFrame(erros_leitura)], ignore_index=True)
 
     if elegiveis.empty:
         resumo = pd.DataFrame(
             columns=[
-                "COMPETENCIA", "UF", "ALIQUOTA_ICMS_MEDIA", "QTD_REGISTROS",
-                "QTD_CHAVES", "BASE_OPERACAO", "ICMS_ST_ESTIMADO",
-                "CREDITO_PIS_ESTIMADO", "CREDITO_COFINS_ESTIMADO",
+                "COMPETENCIA",
+                "UF",
+                "ALIQUOTA_ICMS_MEDIA",
+                "QTD_REGISTROS",
+                "QTD_DOCUMENTOS",
+                "BASE_OPERACAO_LIQUIDA",
+                "ICMS_ST_ESTIMADO",
+                "BASE_ESTIMADA_SEM_ICMS_ST",
+                "CREDITO_PIS_ESTIMADO",
+                "CREDITO_COFINS_ESTIMADO",
                 "CREDITO_TOTAL_ESTIMADO",
             ]
         )
@@ -468,10 +563,11 @@ def processar_icms_st(
             elegiveis.groupby(["COMPETENCIA", "UF"], dropna=False)
             .agg(
                 ALIQUOTA_ICMS_MEDIA=("ALIQUOTA_ICMS", "mean"),
-                QTD_REGISTROS=("CHAVE", "size"),
-                QTD_CHAVES=("CHAVE", "nunique"),
-                BASE_OPERACAO=("BASE_OPERACAO", "sum"),
+                QTD_REGISTROS=("DOCUMENTO", "size"),
+                QTD_DOCUMENTOS=("DOCUMENTO", "nunique"),
+                BASE_OPERACAO_LIQUIDA=("BASE_OPERACAO_LIQUIDA", "sum"),
                 ICMS_ST_ESTIMADO=("ICMS_ST_ESTIMADO", "sum"),
+                BASE_ESTIMADA_SEM_ICMS_ST=("BASE_ESTIMADA_SEM_ICMS_ST", "sum"),
                 CREDITO_PIS_ESTIMADO=("CREDITO_PIS_ESTIMADO", "sum"),
                 CREDITO_COFINS_ESTIMADO=("CREDITO_COFINS_ESTIMADO", "sum"),
                 CREDITO_TOTAL_ESTIMADO=("CREDITO_TOTAL_ESTIMADO", "sum"),
@@ -480,10 +576,21 @@ def processar_icms_st(
             .sort_values(["COMPETENCIA", "UF"])
         )
 
+    # Diagnóstico para explicar quando sai vazio
+    diagnostico = pd.DataFrame(
+        [
+            {"ETAPA": "Linhas lidas", "QTD": len(base)},
+            {"ETAPA": "Linhas no período", "QTD": len(base_periodo)},
+            {"ETAPA": "Linhas CFOP 5405", "QTD": len(analitico_5405)},
+            {"ETAPA": "Elegíveis", "QTD": len(elegiveis)},
+            {"ETAPA": "Divergências/revisar", "QTD": len(divergencias)},
+        ]
+    )
+
     parametros = pd.DataFrame(
         [
             {"PARAMETRO": "Data da análise", "VALOR": pd.Timestamp.now().strftime("%d/%m/%Y %H:%M:%S")},
-            {"PARAMETRO": "Módulo", "VALOR": "ICMS-ST - análise preliminar"},
+            {"PARAMETRO": "Módulo", "VALOR": "ICMS-ST - análise preliminar documental"},
             {"PARAMETRO": "Modo", "VALOR": modo},
             {"PARAMETRO": "UF", "VALOR": uf},
             {"PARAMETRO": "Período inicial", "VALOR": str(data_inicio)},
@@ -493,22 +600,23 @@ def processar_icms_st(
             {"PARAMETRO": "Alíquota PIS", "VALOR": aliquota_pis},
             {"PARAMETRO": "Alíquota COFINS", "VALOR": aliquota_cofins},
             {"PARAMETRO": "Tolerância BC PIS", "VALOR": tolerancia_bc},
-            {"PARAMETRO": "Critério", "VALOR": "CFOP 5405 + CST PIS/COFINS 01 + BC PIS compatível com valor operação menos desconto"},
+            {"PARAMETRO": "Critério", "VALOR": "CFOP 5405 + CST PIS/COFINS 01 + BC PIS compatível com Valor da Operação - Valor de Desconto"},
             {"PARAMETRO": "Aviso", "VALOR": "Cálculo estimativo; validar NCM/CEST/produto/FECOP/legislação estadual antes de usar como valor definitivo."},
         ]
     )
 
     tabela_usada = tabela_aliquotas[tabela_aliquotas["UF"].astype(str).str.upper() == str(uf).upper()].copy()
 
-    for df in [analitico_5405, elegiveis, divergencias]:
-        if "DATA_COMP" in df.columns:
+    for df in [analitico_5405, elegiveis, divergencias, base_periodo, analitico]:
+        if isinstance(df, pd.DataFrame) and "DATA_COMP" in df.columns:
             df.drop(columns=["DATA_COMP"], inplace=True)
 
     return {
         "01_resumo_mensal": resumo,
-        "02_analitico_5405": analitico_5405,
+        "02_analitico_documental": analitico_5405,
         "03_elegiveis_credito": elegiveis,
         "04_divergencias": divergencias,
         "05_parametros": parametros,
         "06_tabela_aliquotas_usada": tabela_usada,
+        "07_diagnostico": diagnostico,
     }
