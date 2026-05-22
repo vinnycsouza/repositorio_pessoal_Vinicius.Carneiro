@@ -232,6 +232,7 @@ def potencial_credito(
         colunas_necessarias = [
             "COMPETENCIA",
             "CHAVE",
+            "CFOP_LISTA",
             "CST_ICMS_LISTA",
             "CST_PIS_LISTA",
             "STATUS",
@@ -243,7 +244,8 @@ def potencial_credito(
             continue
 
         elegivel = base[
-            base["CST_ICMS_LISTA"].apply(lambda x: _lista_contem_codigo(x, "000"))
+            base["CFOP_LISTA"].apply(lambda x: _lista_contem_codigo(x, "5102"))
+            & base["CST_ICMS_LISTA"].apply(lambda x: _lista_contem_codigo(x, "000"))
             & base["CST_PIS_LISTA"].apply(lambda x: _lista_contem_codigo(x, "01"))
             & (base["STATUS"].astype(str).str.upper().str.strip() == "ICMS INCLUÍDO")
         ].copy()
@@ -301,7 +303,7 @@ def potencial_credito(
             )
 
         tmp["CRITERIO"] = (
-            "Resumo da aba 04 filtrado por CST ICMS 000 + "
+            "Resumo da aba 04 filtrado por CFOP 5102 + CST ICMS 000 + "
             "CST PIS/COFINS 01 + STATUS ICMS INCLUÍDO; "
             "valor = soma de CREDITO_PISCOFINS_BASE_ESPERADA"
         )
