@@ -41,11 +41,72 @@ def _lista_contem_codigo(valor, codigo: str) -> bool:
     return codigo in partes
 
 
+def _coluna_ou_zero(df: pd.DataFrame, coluna: str):
+    if coluna and coluna in df.columns:
+        return to_number(df[coluna])
+    return 0.0
+
+
+def _coluna_ou_vazio(df: pd.DataFrame, coluna: str):
+    if coluna and coluna in df.columns:
+        return df[coluna].astype(str).str.strip()
+    return ""
+
+
+def _normalizar_nome_coluna_local(valor) -> str:
+    """
+    Normalização local para comparar cabeçalhos com acento, hífen e espaços.
+    """
+    import unicodedata
+    import re
+
+    texto = str(valor).strip()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = texto.upper()
+    texto = re.sub(r"[^A-Z0-9]+", "_", texto)
+    texto = re.sub(r"_+", "_", texto).strip("_")
+    return texto
+
+
+def _primeira_existente_manual(df: pd.DataFrame, possibilidades: list[str]):
+    """
+    Fallback para encontrar coluna quando find_col não reconhece alguma variação.
+
+    Agora compara:
+    - nome literal
+    - nome em maiúsculo
+    - nome normalizado sem acento/espaço/hífen
+    """
+    cols_upper = {str(c).upper().strip(): c for c in df.columns}
+    cols_norm = {_normalizar_nome_coluna_local(c): c for c in df.columns}
+
+    for nome in possibilidades:
+        nome_upper = str(nome).upper().strip()
+        nome_norm = _normalizar_nome_coluna_local(nome)
+
+        if nome_upper in cols_upper:
+            return cols_upper[nome_upper]
+
+        if nome_norm in cols_norm:
+            return cols_norm[nome_norm]
+
+    for nome in possibilidades:
+        nome_upper = str(nome).upper().strip()
+        nome_norm = _normalizar_nome_coluna_local(nome)
+
+        for col_upper, col_original in cols_upper.items():
+            if nome_upper and (nome_upper in col_upper or col_upper in nome_upper):
+                return col_original
+
+        for col_norm, col_original in cols_norm.items():
+            if nome_norm and (nome_norm in col_norm or col_norm in nome_norm):
+                return col_original
+
+    return None
+
+
 def _buscar_aliquota_por_uf_competencia(uf: str, competencia: str, tabela: pd.DataFrame) -> tuple[float, str, str]:
-    """
-    Retorna (aliquota, fonte, observacao) para UF + competência.
-    competência esperada: YYYY-MM.
-    """
     try:
         data_comp = pd.to_datetime(str(competencia) + "-01", errors="coerce")
     except Exception:
@@ -70,55 +131,163 @@ def _buscar_aliquota_por_uf_competencia(uf: str, competencia: str, tabela: pd.Da
 def _preparar_contribuicoes_st(df: pd.DataFrame, registro: str) -> pd.DataFrame:
     df = normalize_columns(df)
 
-    chave = find_col(df, ["CHV_NFE", "CHAVE", "CHAVE_NFE", "CHAVE_NF", "CHAVE_C100", "CHAVE_DE_ACESSO_C100"], required=False)
-    cfop = find_col(df, ["CFOP"], required=True)
-    cst_pis = find_col(df, ["CST_PIS", "CST", "CST_DE_PIS"], required=False)
-    cst_cofins = find_col(df, ["CST_COFINS", "CST_DE_COFINS"], required=False)
-    dt_doc = find_col(df, ["DT_DOC", "DATA", "DATA_DOC", "DT_E_S", "DATA_DE_EMISSAO"], required=False)
-    mes = find_col(df, ["COMPETENCIA", "MES_ANO", "MÊS_ANO", "MES", "PERIODO"], required=False)
-
-    valor_op = find_col(
+    chave = _primeira_existente_manual(df, ["CHV_NFE", "CHAVE", "CHAVE_NFE", "CHAVE_NF", "CHAVE_C100", "CHAVE_DE_ACESSO_C100"])
+    cfop = _primeira_existente_manual(df, ["CFOP"])
+    cst_pis = _primeira_existente_manual(
         df,
-        ["VL_ITEM", "VL_OPR", "VALOR_OPERACAO", "VL_OPERACAO", "VALOR_TOTAL_DO_PRODUTO", "VALOR_DA_OPERACAO"],
-        required=True,
+        [
+            "CST_PIS",
+            "CST - PIS",
+            "CST PIS",
+            "CST",
+            "CST_DE_PIS",
+            "CST DO PIS",
+        ],
+    )
+    cst_cofins = _primeira_existente_manual(
+        df,
+        [
+            "CST_COFINS",
+            "CST COFINS",
+            "CST - COFINS",
+            "CST_DE_COFINS",
+            "CST DO COFINS",
+        ],
+    )
+    dt_doc = _primeira_existente_manual(
+        df,
+        [
+            "DT_DOC",
+            "DATA",
+            "DATA_DOC",
+            "DT_E_S",
+            "DATA_DE_EMISSAO",
+            "DATA DE EMISSÃO",
+            "DATA DE EMISSAO",
+        ],
+    )
+    mes = _primeira_existente_manual(
+        df,
+        [
+            "COMPETENCIA",
+            "MÊS",
+            "MES",
+            "Mês",
+            "MES_ANO",
+            "MÊS_ANO",
+            "PERIODO",
+            "PERÍODO",
+        ],
     )
 
-    desconto = find_col(
+    valor_op = _primeira_existente_manual(
         df,
-        ["VL_DESC", "DESCONTO", "VALOR_DESCONTO", "VL_DESCONTO", "SOMA_DE_VALOR_DO_DESCONTO"],
-        required=False,
+        [
+            "VL_OPERACAO",
+            "VL_OPR",
+            "VALOR_OPERACAO",
+            "VALOR_DA_OPERACAO",
+            "VALOR_DA_OPERAÇÃO",
+            "VALOR DA OPERACAO",
+            "VALOR DA OPERAÇÃO",
+            "VALOR DE OPERAÇÃO",
+            "VALOR DE OPERACAO",
+            "VALOR_DA_OPERACAO_C175",
+            "VL_ITEM",
+            "VALOR_ITEM",
+            "SOMA_DE_VALOR_DA_OPERACAO",
+            "SOMA_DE_VALOR_OPERACAO",
+            "SOMA_DE_VALOR_ITEM",
+            "SOMA_DE_VALOR_DO_ITEM",
+            "SOMA_DE_VALOR_TOTAL_DO_ITEM",
+            "VALOR_TOTAL_DO_PRODUTO",
+        ],
     )
 
-    bc_pis = find_col(df, ["VL_BC_PIS", "BC_PIS", "BASE_PIS", "BASE_DE_PIS", "VALOR_BC_PIS"], required=True)
-    bc_cofins = find_col(df, ["VL_BC_COFINS", "BC_COFINS", "BASE_COFINS", "BASE_DE_COFINS", "VALOR_BC_COFINS"], required=False)
+    desconto = _primeira_existente_manual(
+        df,
+        [
+            "VL_DESC",
+            "DESCONTO",
+            "VALOR_DESCONTO",
+            "VALOR_DE_DESCONTO",
+            "VALOR DE DESCONTO",
+            "VALOR DO DESCONTO",
+            "VL_DESCONTO",
+            "SOMA_DE_VALOR_DO_DESCONTO",
+            "SOMA_DE_VALOR_DESCONTO",
+        ],
+    )
 
-    out = pd.DataFrame()
+    bc_pis = _primeira_existente_manual(
+        df,
+        [
+            "VL_BC_PIS",
+            "BC_PIS",
+            "BASE_PIS",
+            "BASE_DE_PIS",
+            "VALOR_BC_PIS",
+            "VALOR BC PIS",
+            "VALOR DA BC PIS",
+            "BASE DE CÁLCULO PIS",
+            "BASE DE CALCULO PIS",
+            "SOMA_DE_VALOR_BC_PIS",
+            "SOMA_DE_BASE_PIS",
+        ],
+    )
+
+    bc_cofins = _primeira_existente_manual(
+        df,
+        [
+            "VL_BC_COFINS",
+            "BC_COFINS",
+            "BASE_COFINS",
+            "BASE_DE_COFINS",
+            "VALOR_BC_COFINS",
+            "VALOR BC COFINS",
+            "VALOR DA BC COFINS",
+            "BASE DE CÁLCULO COFINS",
+            "BASE DE CALCULO COFINS",
+            "SOMA_DE_VALOR_BC_COFINS",
+            "SOMA_DE_BASE_COFINS",
+        ],
+    )
+
+    out = pd.DataFrame(index=df.index)
     out["REGISTRO"] = registro
     out["CHAVE"] = normalize_key(df[chave]) if chave else ""
-    out["CFOP"] = df[cfop].astype(str).str.strip()
-    out["CST_PIS"] = df[cst_pis].astype(str).str.strip() if cst_pis else ""
-    out["CST_COFINS"] = df[cst_cofins].astype(str).str.strip() if cst_cofins else out["CST_PIS"]
+    out["CFOP"] = _coluna_ou_vazio(df, cfop)
+    out["CST_PIS"] = _coluna_ou_vazio(df, cst_pis)
+    out["CST_COFINS"] = _coluna_ou_vazio(df, cst_cofins) if cst_cofins else out["CST_PIS"]
 
     if mes:
         comp = df[mes].astype(str).str.strip()
-        # aceita YYYY-MM, MM/YYYY, datas ou nomes.
         datas = pd.to_datetime(comp, errors="coerce", dayfirst=True)
         out["COMPETENCIA"] = datas.dt.strftime("%Y-%m")
         out["COMPETENCIA"] = out["COMPETENCIA"].fillna(
             comp.str.extract(r"(\d{4}-\d{2})", expand=False)
         )
+        out["COMPETENCIA"] = out["COMPETENCIA"].fillna(
+            comp.str.extract(r"(\d{2}/\d{4})", expand=False)
+        )
+        out["COMPETENCIA"] = out["COMPETENCIA"].str.replace(r"^(\d{2})/(\d{4})$", r"\2-\1", regex=True)
         out["COMPETENCIA"] = out["COMPETENCIA"].fillna("SEM_DATA")
     elif dt_doc:
         out["COMPETENCIA"] = competence_from_date(df[dt_doc])
     else:
         out["COMPETENCIA"] = "SEM_DATA"
 
-    out["VL_OPERACAO"] = to_number(df[valor_op])
-    out["VL_DESCONTO"] = to_number(df[desconto]) if desconto else 0.0
-    out["VL_BC_PIS"] = to_number(df[bc_pis])
-    out["VL_BC_COFINS"] = to_number(df[bc_cofins]) if bc_cofins else 0.0
+    out["VL_OPERACAO"] = _coluna_ou_zero(df, valor_op)
+    out["VL_DESCONTO"] = _coluna_ou_zero(df, desconto)
+    out["VL_BC_PIS"] = _coluna_ou_zero(df, bc_pis)
+    out["VL_BC_COFINS"] = _coluna_ou_zero(df, bc_cofins)
 
-    return out
+    out["COLUNA_ORIGEM_OPERACAO"] = valor_op or "NÃO LOCALIZADA"
+    out["COLUNA_ORIGEM_DESCONTO"] = desconto or "NÃO LOCALIZADA"
+    out["COLUNA_ORIGEM_BC_PIS"] = bc_pis or "NÃO LOCALIZADA"
+    out["COLUNA_ORIGEM_BC_COFINS"] = bc_cofins or "NÃO LOCALIZADA"
+
+    return out.reset_index(drop=True)
 
 
 def _adicionar_calculos(
@@ -133,6 +302,17 @@ def _adicionar_calculos(
     tolerancia_bc: float,
 ) -> pd.DataFrame:
     out = df.copy()
+
+    # Hotfix: garante colunas mínimas mesmo quando a base filtrada vem vazia.
+    for coluna in ["VL_OPERACAO", "VL_DESCONTO", "VL_BC_PIS", "VL_BC_COFINS"]:
+        if coluna not in out.columns:
+            out[coluna] = 0.0
+
+    if "COMPETENCIA" not in out.columns:
+        out["COMPETENCIA"] = "SEM_DATA"
+
+    if "CHAVE" not in out.columns:
+        out["CHAVE"] = ""
 
     out["UF"] = uf
     out["BASE_OPERACAO"] = out["VL_OPERACAO"] - out["VL_DESCONTO"]
@@ -197,7 +377,12 @@ def processar_icms_st(
     if frames:
         base = pd.concat(frames, ignore_index=True)
     else:
-        base = pd.DataFrame()
+        base = pd.DataFrame(
+            columns=[
+                "REGISTRO", "CHAVE", "CFOP", "CST_PIS", "CST_COFINS",
+                "COMPETENCIA", "VL_OPERACAO", "VL_DESCONTO", "VL_BC_PIS", "VL_BC_COFINS"
+            ]
+        )
 
     tabela_aliquotas = carregar_tabela_aliquotas()
 
@@ -293,7 +478,6 @@ def processar_icms_st(
 
     tabela_usada = tabela_aliquotas[tabela_aliquotas["UF"].astype(str).str.upper() == str(uf).upper()].copy()
 
-    # Remove coluna auxiliar do relatório
     for df in [analitico_5405, elegiveis, divergencias]:
         if "DATA_COMP" in df.columns:
             df.drop(columns=["DATA_COMP"], inplace=True)
