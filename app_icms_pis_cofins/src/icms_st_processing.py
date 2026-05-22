@@ -424,6 +424,20 @@ def processar_icms_st(
         tolerancia_bc=tolerancia_bc,
     )
 
+    # Hotfix v9.4:
+    # Garante colunas mínimas antes dos filtros, inclusive quando não há CFOP 5405
+    # ou quando alguma coluna veio com nome não reconhecido.
+    colunas_texto_minimas = ["CST_PIS", "CST_COFINS", "CFOP", "CHAVE", "COMPETENCIA"]
+    for coluna in colunas_texto_minimas:
+        if coluna not in analitico_5405.columns:
+            analitico_5405[coluna] = ""
+
+    colunas_num_minimas = ["BC_PIS_COMPATIVEL", "ALIQUOTA_ICMS"]
+    if "BC_PIS_COMPATIVEL" not in analitico_5405.columns:
+        analitico_5405["BC_PIS_COMPATIVEL"] = False
+    if "ALIQUOTA_ICMS" not in analitico_5405.columns:
+        analitico_5405["ALIQUOTA_ICMS"] = 0.0
+
     elegiveis = analitico_5405[
         analitico_5405["CST_PIS"].apply(lambda x: _lista_contem_codigo(x, "01"))
         & analitico_5405["CST_COFINS"].apply(lambda x: _lista_contem_codigo(x, "01"))
