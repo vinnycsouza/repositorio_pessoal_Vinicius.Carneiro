@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 
@@ -17,42 +17,212 @@ from src.processing import (
 from src.exporter import gerar_excel
 from src.memory_manager import limpar_memoria
 
+from src.icms_st_processing import (
+    listar_ufs_aliquotas,
+    processar_icms_st,
+)
+from src.icms_st_exporter import gerar_excel_icms_st
+
+
 st.set_page_config(page_title="ICMS na Base PIS/COFINS", layout="wide")
 
 st.title("Investigação - ICMS na base do PIS/COFINS")
-st.caption("Layout da versão 1 + validação corrigida para abas com nomes descritivos, como C190 - Analítico e C170 - Itens da Nota.")
+st.caption("Layout da versão 1 + módulo adicional para análise preliminar de ICMS-ST.")
 st.warning("Para arquivos grandes, rode localmente. Esta versão aceita upload de até 1GB via .streamlit/config.toml.")
+
+
+def obter_aliquotas_pis_cofins(regime_nome: str):
+    if regime_nome == "Lucro Real":
+        return 0.0165, 0.0760
+    if regime_nome == "Lucro Presumido":
+        return 0.0065, 0.0300
+    return None, None
+
 
 with st.sidebar:
     st.header("Parâmetros")
-    modo = st.radio(
-        "Registro do SPED Contribuições para análise",
-        ["C170", "C175", "C170 + C175"],
-        index=2,
-    )
-    tolerancia = st.number_input("Tolerância para diferença", min_value=0.0, value=0.05, step=0.01)
 
-    regime = st.radio(
-        "Regime tributário",
-        ["Lucro Real", "Lucro Presumido", "Alíquota personalizada"],
+    tipo_analise = st.radio(
+        "Tipo de análise",
+        [
+            "Exclusão ICMS da base PIS/COFINS",
+            "ICMS-ST - análise preliminar",
+        ],
         index=0,
     )
 
-    if regime == "Lucro Real":
-        aliquota_pis = 0.0165
-        aliquota_cofins = 0.0760
-    elif regime == "Lucro Presumido":
-        aliquota_pis = 0.0065
-        aliquota_cofins = 0.0300
-    else:
-        aliquota_pis = st.number_input("Alíquota PIS", min_value=0.0, value=0.0165, format="%.4f")
-        aliquota_cofins = st.number_input("Alíquota COFINS", min_value=0.0, value=0.0760, format="%.4f")
+    if tipo_analise == "Exclusão ICMS da base PIS/COFINS":
+        modo = st.radio(
+            "Registro do SPED Contribuições para análise",
+            ["C170", "C175", "C170 + C175"],
+            index=2,
+        )
+        tolerancia = st.number_input("Tolerância para diferença", min_value=0.0, value=0.05, step=0.01)
 
-    st.caption(
-        f"PIS: {aliquota_pis:.4%} | COFINS: {aliquota_cofins:.4%} | "
-        f"Total: {(aliquota_pis + aliquota_cofins):.4%}"
+        regime = st.radio(
+            "Regime tributário",
+            ["Lucro Real", "Lucro Presumido", "Alíquota personalizada"],
+            index=0,
+        )
+
+        if regime == "Lucro Real":
+            aliquota_pis = 0.0165
+            aliquota_cofins = 0.0760
+        elif regime == "Lucro Presumido":
+            aliquota_pis = 0.0065
+            aliquota_cofins = 0.0300
+        else:
+            aliquota_pis = st.number_input("Alíquota PIS", min_value=0.0, value=0.0165, format="%.4f")
+            aliquota_cofins = st.number_input("Alíquota COFINS", min_value=0.0, value=0.0760, format="%.4f")
+
+        st.caption(
+            f"PIS: {aliquota_pis:.4%} | COFINS: {aliquota_cofins:.4%} | "
+            f"Total: {(aliquota_pis + aliquota_cofins):.4%}"
+        )
+
+    else:
+        modo_st = st.radio(
+            "Registro do SPED Contribuições para ICMS-ST",
+            ["C170", "C175", "C170 + C175"],
+            index=1,
+        )
+
+        ufs_disponiveis = listar_ufs_aliquotas()
+        uf_st = st.selectbox("UF para buscar alíquota ICMS", ufs_disponiveis, index=ufs_disponiveis.index("PE") if "PE" in ufs_disponiveis else 0)
+
+        col_ini, col_fim = st.columns(2)
+        with col_ini:
+            data_ini_st = st.date_input("Início", value=date(2021, 1, 1), format="DD/MM/YYYY")
+        with col_fim:
+            data_fim_st = st.date_input("Fim", value=date.today(), format="DD/MM/YYYY")
+
+        origem_aliquota_st = st.radio(
+            "Origem da alíquota ICMS",
+            ["Tabela interna por UF/competência", "Alíquota manual"],
+            index=0,
+        )
+
+        aliquota_icms_manual = None
+        if origem_aliquota_st == "Alíquota manual":
+            aliquota_icms_manual = st.number_input(
+                "Alíquota ICMS manual (%)",
+                min_value=0.0,
+                max_value=100.0,
+                value=18.0,
+                step=0.1,
+            ) / 100
+
+        tolerancia_bc_st = st.number_input(
+            "Tolerância BC PIS vs operação",
+            min_value=0.0,
+            value=0.05,
+            step=0.01,
+        )
+
+        regime_st = st.radio(
+            "Regime PIS/COFINS",
+            ["Lucro Real", "Lucro Presumido", "Alíquota personalizada"],
+            index=0,
+        )
+
+        if regime_st == "Alíquota personalizada":
+            aliquota_pis_st = st.number_input("Alíquota PIS ST", min_value=0.0, value=0.0165, format="%.4f")
+            aliquota_cofins_st = st.number_input("Alíquota COFINS ST", min_value=0.0, value=0.0760, format="%.4f")
+        else:
+            aliquota_pis_st, aliquota_cofins_st = obter_aliquotas_pis_cofins(regime_st)
+
+        st.caption(
+            f"PIS: {aliquota_pis_st:.4%} | COFINS: {aliquota_cofins_st:.4%} | "
+            f"Total: {(aliquota_pis_st + aliquota_cofins_st):.4%}"
+        )
+
+
+if tipo_analise == "ICMS-ST - análise preliminar":
+    st.subheader("1. Upload do SPED Contribuições")
+    arq_pis_st = st.file_uploader(
+        "Excel SPED PIS/COFINS para análise preliminar de ICMS-ST",
+        type=["xlsx", "xlsm", "xls"],
+        key="upload_icms_st"
     )
 
+    st.info(
+        "Este módulo é preliminar e estimativo. Ele filtra CFOP 5405, CST PIS/COFINS 01, "
+        "valida BC PIS contra valor da operação menos desconto e calcula crédito estimado por mês/ano."
+    )
+
+    if not arq_pis_st:
+        st.stop()
+
+    try:
+        xls_pis_st = pd.ExcelFile(arq_pis_st)
+    except Exception as e:
+        st.error(f"Erro ao abrir o arquivo: {e}")
+        st.stop()
+
+    required_pis_st = []
+    if modo_st in ["C170", "C170 + C175"]:
+        required_pis_st.append("C170")
+    if modo_st in ["C175", "C170 + C175"]:
+        required_pis_st.append("C175")
+
+    val_pis_st = validate_sheet_exists(xls_pis_st, required_pis_st, "SPED PIS/COFINS - ICMS-ST")
+    if val_pis_st.errors:
+        st.error("Validação não concluída. Corrija os pontos abaixo:")
+        for err in val_pis_st.errors:
+            st.write(f"- {err}")
+        st.stop()
+
+    st.success("Validação de abas concluída.")
+
+    if st.button("Processar análise preliminar ICMS-ST", type="primary"):
+        try:
+            with st.spinner("Processando ICMS-ST preliminar..."):
+                resultado_st = processar_icms_st(
+                    xls_pis=xls_pis_st,
+                    get_sheet_name=get_sheet_name,
+                    modo=modo_st,
+                    uf=uf_st,
+                    data_inicio=data_ini_st,
+                    data_fim=data_fim_st,
+                    origem_aliquota=origem_aliquota_st,
+                    aliquota_icms_manual=aliquota_icms_manual,
+                    aliquota_pis=aliquota_pis_st,
+                    aliquota_cofins=aliquota_cofins_st,
+                    regime=regime_st,
+                    tolerancia_bc=tolerancia_bc_st,
+                )
+
+                excel_st = gerar_excel_icms_st(resultado_st)
+
+            st.subheader("2. Resultado ICMS-ST preliminar")
+            resumo_mensal = resultado_st.get("01_resumo_mensal")
+            if resumo_mensal is not None and not resumo_mensal.empty:
+                st.dataframe(resumo_mensal, use_container_width=True)
+            else:
+                st.warning("Nenhuma operação elegível foi encontrada para os filtros do ICMS-ST.")
+
+            st.download_button(
+                "Baixar Excel ICMS-ST preliminar",
+                data=excel_st,
+                file_name="analise_preliminar_icms_st.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            with st.expander("Visualizar analítico 5405"):
+                analitico = resultado_st.get("02_analitico_5405")
+                if analitico is not None:
+                    st.dataframe(analitico.head(200), use_container_width=True)
+
+            limpar_memoria()
+
+        except Exception as e:
+            st.error("Erro durante o processamento do ICMS-ST.")
+            st.exception(e)
+
+    st.stop()
+
+
+# Fluxo original preservado abaixo.
 st.subheader("1. Upload dos arquivos")
 col1, col2 = st.columns(2)
 with col1:
@@ -135,7 +305,7 @@ if st.button("Processar análise", type="primary"):
                 {"PARAMETRO": "Regime tributário", "VALOR": regime},
                 {"PARAMETRO": "Alíquota PIS", "VALOR": aliquota_pis},
                 {"PARAMETRO": "Alíquota COFINS", "VALOR": aliquota_cofins},
-                {"PARAMETRO": "Metodologia", "VALOR": "Crédito elegível = ICMS potencial incluído x alíquota PIS/COFINS; filtro: CST ICMS 000 + CST PIS/COFINS 01 + STATUS ICMS INCLUÍDO"},
+                {"PARAMETRO": "Metodologia", "VALOR": "Crédito elegível = soma de CREDITO_PISCOFINS_BASE_ESPERADA da aba 04, filtrando CFOP 5102 + CST ICMS 000 + CST PIS/COFINS 01 + STATUS ICMS INCLUÍDO"},
             ])
 
             excel_bytes = gerar_excel(
