@@ -57,3 +57,24 @@ def get_sheet_name(xls: pd.ExcelFile, sheet: str) -> str:
         return existing[nome_norm]
 
     raise KeyError(f"Aba não localizada: {sheet}")
+def validar_abas(arquivo, modo):
+    xls = pd.ExcelFile(arquivo)
+
+    if modo == "ICMS":
+        required = ["C190"]
+        label = "SPED ICMS/IPI"
+    elif modo == "C170":
+        required = ["C170"]
+        label = "SPED PIS/COFINS"
+    elif modo == "C175":
+        required = ["C175"]
+        label = "SPED PIS/COFINS"
+    elif modo == "AMBOS":
+        required = ["C170", "C175"]
+        label = "SPED PIS/COFINS"
+    else:
+        return [f"Modo inválido: {modo}"]
+
+    result = validate_sheet_exists(xls, required, label)
+
+    return result.errors
