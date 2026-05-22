@@ -199,6 +199,34 @@ def _competencia_texto(valor) -> str:
     return data.strftime("%Y-%m")
 
 
+
+def _competencia_mes_ano(mes_valor, ano_valor) -> str:
+    """
+    Monta competência usando colunas separadas do C175: Mês + Ano.
+    Exemplo: Março + 2021 => 2021-03
+    """
+    if pd.isna(mes_valor) or pd.isna(ano_valor):
+        return "SEM_DATA"
+
+    mes_txt = str(mes_valor).strip()
+    ano_txt = str(ano_valor).strip()
+
+    if mes_txt == "" or ano_txt == "":
+        return "SEM_DATA"
+
+    try:
+        mes_num = int(float(mes_txt))
+        ano_num = int(float(ano_txt))
+        if ano_num < 100:
+            ano_num += 2000
+        if 1 <= mes_num <= 12:
+            return f"{ano_num:04d}-{mes_num:02d}"
+    except Exception:
+        pass
+
+    return _competencia_texto(f"{mes_txt}/{ano_txt}")
+
+
 # ---------------------------------------------------------------------
 # Alíquotas
 # ---------------------------------------------------------------------
@@ -259,8 +287,9 @@ def _preparar_contribuicoes_st(df_original: pd.DataFrame, registro: str) -> pd.D
     df = _normalizar_colunas(df_original)
 
     col_mes = _achar_coluna(df, ["Mês", "MES", "COMPETENCIA", "PERIODO", "DT_DOC", "DATA"])
-    col_chave = _achar_coluna(df, ["CHAVE", "CHV_NFE", "CHAVE_NFE", "CHAVE NF", "CHAVE DE ACESSO"])
-    col_nf = _achar_coluna(df, ["Número NF", "NUMERO NF", "NÚMERO NF", "NUM_DOC", "NUMERO", "NR_DOC", "N_DOC"])
+    col_ano = _achar_coluna(df, ["Ano", "ANO", "EXERCICIO", "EXERCÍCIO"])
+    col_chave = _achar_coluna(df, ["Chave(C100)", "CHAVE(C100)", "CHAVE C100", "CHAVE", "CHV_NFE", "CHAVE_NFE", "CHAVE NF", "CHAVE DE ACESSO"])
+    col_nf = _achar_coluna(df, ["Número da Nota(C100)", "NUMERO DA NOTA(C100)", "NÚMERO DA NOTA(C100)", "Número NF", "NUMERO NF", "NÚMERO NF", "NUM_DOC", "NUMERO", "NR_DOC", "N_DOC"])
     col_cfop = _achar_coluna(df, ["CFOP"], obrigatoria=True)
 
     col_valor_op = _achar_coluna(
@@ -284,6 +313,7 @@ def _preparar_contribuicoes_st(df_original: pd.DataFrame, registro: str) -> pd.D
             "Valor de Desconto",
             "VALOR DE DESCONTO",
             "Valor do Desconto",
+            "VALOR DO DESCONTO",
             "VL_DESC",
             "DESCONTO",
         ],
@@ -344,7 +374,15 @@ def _preparar_contribuicoes_st(df_original: pd.DataFrame, registro: str) -> pd.D
     out = pd.DataFrame(index=df.index)
     out["REGISTRO"] = registro
 
-    if col_mes:
+    if col_mes and col_ano:
+        out["COMPETENCIA_ORIGINAL"] = (
+            _serie_texto(df, col_mes) + "/" + _serie_texto(df, col_ano)
+        )
+        out["COMPETENCIA"] = [
+            _competencia_mes_ano(mes, ano)
+            for mes, ano in zip(df[col_mes], df[col_ano])
+        ]
+    elif col_mes:
         out["COMPETENCIA_ORIGINAL"] = _serie_texto(df, col_mes)
         out["COMPETENCIA"] = df[col_mes].apply(_competencia_texto)
     else:
