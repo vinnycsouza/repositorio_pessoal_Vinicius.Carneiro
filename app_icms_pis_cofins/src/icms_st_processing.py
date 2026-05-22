@@ -270,7 +270,15 @@ def _preparar_contribuicoes_st(df: pd.DataFrame, registro: str) -> pd.DataFrame:
         out["COMPETENCIA"] = out["COMPETENCIA"].fillna(
             comp.str.extract(r"(\d{2}/\d{4})", expand=False)
         )
-        out["COMPETENCIA"] = out["COMPETENCIA"].str.replace(r"^(\d{2})/(\d{4})$", r"\2-\1", regex=True)
+
+        # Hotfix v9.3:
+        # Garante string antes de usar .str, pois a coluna Mês pode vir como número/data.
+        out["COMPETENCIA"] = out["COMPETENCIA"].astype("string")
+        out["COMPETENCIA"] = out["COMPETENCIA"].str.replace(
+            r"^(\d{2})/(\d{4})$",
+            r"\2-\1",
+            regex=True
+        )
         out["COMPETENCIA"] = out["COMPETENCIA"].fillna("SEM_DATA")
     elif dt_doc:
         out["COMPETENCIA"] = competence_from_date(df[dt_doc])
