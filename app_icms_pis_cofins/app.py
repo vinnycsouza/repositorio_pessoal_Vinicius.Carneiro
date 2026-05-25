@@ -58,6 +58,37 @@ with st.sidebar:
     )
 
     if tipo_analise == "Exclusão ICMS da base PIS/COFINS":
+            
+            
+        with st.expander("Como escolher entre C170, C175 ou ambos?", expanded=True):
+            st.markdown(
+                """
+                **Use C170 quando:**
+
+                - a empresa for indústria, atacado ou distribuidora;
+                - houver NF-e itemizada;
+                - você precisar de análise item a item;
+                - o SPED ICMS/IPI e o SPED Contribuições tiverem `NUM_ITEM` consistente.
+
+                **Use C175 quando:**
+
+                - a empresa for mercado, supermercado, varejo ou tiver grande volume de NFC-e;
+                - o C170 vier incompleto, pesado ou pouco confiável;
+                - a análise principal for por nota/operação consolidada;
+                - o confronto principal for `C190 x C175`.
+
+                **Use C170 + C175 quando:**
+
+                - quiser comparar os dois métodos;
+                - estiver validando a qualidade do SPED;
+                - houver dúvida sobre qual registro representa melhor a operação.
+
+                **Recomendação prática:**
+
+                - Mercado/supermercado: comece pelo **C175**.
+                - Indústria/atacado/distribuidora: comece pelo **C170**.
+                """
+            )
         modo = st.radio(
             "Registro do SPED Contribuições para análise",
             ["C170", "C175", "C170 + C175"],
