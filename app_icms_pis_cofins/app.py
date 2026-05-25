@@ -266,7 +266,16 @@ if st.button("Processar análise", type="primary"):
             c100_icms = load_sheet(xls_icms, get_sheet_name(xls_icms, "C100"))
             c190_icms = load_sheet(xls_icms, get_sheet_name(xls_icms, "C190"))
 
-            icms_linhas = prepare_icms_c190(c100_icms, c190_icms)
+            # Melhoria v14:
+            # C100 é a âncora documental e C170 ICMS/IPI passa a ser usado
+            # item a item quando a aba existir. Se não existir, o sistema
+            # continua usando C190 como base consolidada/varejo.
+            try:
+                c170_icms = load_sheet(xls_icms, get_sheet_name(xls_icms, "C170"))
+            except Exception:
+                c170_icms = pd.DataFrame()
+
+            icms_linhas = prepare_icms_c190(c100_icms, c190_icms, c170_icms)
             icms_base = consolidate_icms_by_key(icms_linhas)
 
             cruzamentos = {}

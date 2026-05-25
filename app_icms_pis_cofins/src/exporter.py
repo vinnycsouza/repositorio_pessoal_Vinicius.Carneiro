@@ -33,7 +33,7 @@ def gerar_excel(
     output = BytesIO()
     dfs: dict[str, pd.DataFrame] = {
         "01_resumo_geral": resumo,
-        "02_icms_c190_base": icms_base,
+        "02_icms_fiscal_base": icms_base,
     }
     if cruz_c170 is not None and not cruz_c170.empty:
         dfs["03_cruzamento_c170"] = cruz_c170
