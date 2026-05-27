@@ -45,6 +45,17 @@ def obter_aliquotas_pis_cofins(regime_nome: str):
     return None, None
 
 
+def carregar_aba_opcional(xls: pd.ExcelFile, nome_aba: str) -> pd.DataFrame:
+    try:
+        return load_sheet(xls, get_sheet_name(xls, nome_aba))
+    except Exception:
+        return pd.DataFrame()
+
+
+def precisa_c170_icms(modo_analise: str) -> bool:
+    return modo_analise in ["C170", "C170 + C175"]
+
+
 with st.sidebar:
     st.header("Parâmetros")
 
@@ -58,8 +69,7 @@ with st.sidebar:
     )
 
     if tipo_analise == "Exclusão ICMS da base PIS/COFINS":
-            
-            
+
         with st.expander("Como escolher entre C170, C175 ou ambos?", expanded=True):
             st.markdown(
                 """
@@ -85,14 +95,15 @@ with st.sidebar:
 
                 **Recomendação prática:**
 
-                - Mercado/supermercado: comece pelo **C175**.
+                - Mercado/supermercado/atacarejo/farmácia de rede: comece pelo **C175**.
                 - Indústria/atacado/distribuidora: comece pelo **C170**.
                 """
             )
+
         modo = st.radio(
             "Registro do SPED Contribuições para análise",
             ["C170", "C175", "C170 + C175"],
-            index=2,
+            index=1,
         )
 
         tolerancia = st.number_input(
@@ -354,7 +365,6 @@ except Exception as e:
 
 
 required_icms = ["C100", "C190"]
-
 required_pis = []
 
 if modo in ["C170", "C170 + C175"]:
@@ -402,12 +412,11 @@ if st.button("Processar análise", type="primary"):
                 get_sheet_name(xls_icms, "C190"),
             )
 
-            try:
-                c170_icms = load_sheet(
-                    xls_icms,
-                    get_sheet_name(xls_icms, "C170"),
-                )
-            except Exception:
+            # Otimização principal:
+            # Se você escolheu apenas C175, não carrega C170 do SPED ICMS/IPI.
+            if precisa_c170_icms(modo):
+                c170_icms = carregar_aba_opcional(xls_icms, "C170")
+            else:
                 c170_icms = pd.DataFrame()
 
             icms_linhas = preparar_icms_c190(
@@ -529,6 +538,14 @@ if st.button("Processar análise", type="primary"):
                     {
                         "PARAMETRO": "Alíquota COFINS",
                         "VALOR": aliquota_cofins,
+                    },
+                    {
+                        "PARAMETRO": "Otimização de performance",
+                        "VALOR": (
+                            "C170 do ICMS/IPI só é carregado quando o modo selecionado "
+                            "for C170 ou C170 + C175. No modo C175, o app usa C100 + C190 "
+                            "e evita a leitura pesada do C170 fiscal."
+                        ),
                     },
                     {
                         "PARAMETRO": "Melhoria v14",
