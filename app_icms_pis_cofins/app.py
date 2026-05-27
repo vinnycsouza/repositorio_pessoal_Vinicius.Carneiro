@@ -5,6 +5,7 @@ import streamlit as st
 from src.validation import validate_sheet_exists, get_sheet_name
 from src.processing import (
     load_sheet,
+    load_sheet_from_bytes,
     preparar_icms_c190,
     consolidate_icms_by_key,
     prepare_pis_cofins,
@@ -54,6 +55,48 @@ def carregar_aba_opcional(xls: pd.ExcelFile, nome_aba: str) -> pd.DataFrame:
 
 def precisa_c170_icms(modo_analise: str) -> bool:
     return modo_analise in ["C170", "C170 + C175"]
+
+
+
+@st.cache_data(show_spinner=False)
+def carregar_excel_file_cache(file_bytes: bytes) -> pd.ExcelFile:
+    """
+    Cacheia o objeto ExcelFile pelo conteúdo do arquivo.
+    Isso evita reabrir o Excel a cada rerun do Streamlit.
+    """
+    import io
+    return pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
+
+
+@st.cache_data(show_spinner=False)
+def carregar_aba_cache(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+    """
+    Cacheia a leitura da aba. Se o arquivo e a aba forem os mesmos,
+    o Streamlit reaproveita o DataFrame.
+    """
+    return load_sheet_from_bytes(file_bytes, sheet_name)
+
+
+def nome_aba_seguro(xls: pd.ExcelFile, nome_aba: str) -> str:
+    """
+    Wrapper para manter a resolução de nomes flexíveis: C175, C175 - Analítico etc.
+    """
+    return get_sheet_name(xls, nome_aba)
+
+
+def carregar_aba_cacheada(file_bytes: bytes, xls: pd.ExcelFile, nome_aba: str) -> pd.DataFrame:
+    """
+    Resolve o nome real da aba e usa cache por bytes + nome real.
+    """
+    sheet_name = nome_aba_seguro(xls, nome_aba)
+    return carregar_aba_cache(file_bytes, sheet_name)
+
+
+def carregar_aba_opcional_cacheada(file_bytes: bytes, xls: pd.ExcelFile, nome_aba: str) -> pd.DataFrame:
+    try:
+        return carregar_aba_cacheada(file_bytes, xls, nome_aba)
+    except Exception:
+        return pd.DataFrame()
 
 
 with st.sidebar:
@@ -252,7 +295,8 @@ if tipo_analise == "ICMS-ST - análise preliminar":
         st.stop()
 
     try:
-        xls_pis_st = pd.ExcelFile(arq_pis_st)
+        pis_st_bytes = arq_pis_st.getvalue()
+        xls_pis_st = carregar_excel_file_cache(pis_st_bytes)
     except Exception as e:
         st.error(f"Erro ao abrir o arquivo: {e}")
         st.stop()
@@ -357,8 +401,11 @@ if not arq_icms or not arq_pis:
     st.stop()
 
 try:
-    xls_icms = pd.ExcelFile(arq_icms)
-    xls_pis = pd.ExcelFile(arq_pis)
+    icms_bytes = arq_icms.getvalue()
+    pis_bytes = arq_pis.getvalue()
+
+    xls_icms = carregar_excel_file_cache(icms_bytes)
+    xls_pis = carregar_excel_file_cache(pis_bytes)
 except Exception as e:
     st.error(f"Erro ao abrir os arquivos: {e}")
     st.stop()
@@ -402,20 +449,14 @@ st.success("Validação de abas concluída.")
 if st.button("Processar análise", type="primary"):
     try:
         with st.spinner("Processando arquivos..."):
-            c100_icms = load_sheet(
-                xls_icms,
-                get_sheet_name(xls_icms, "C100"),
-            )
+            c100_icms = carregar_aba_cacheada(icms_bytes, xls_icms, "C100")
 
-            c190_icms = load_sheet(
-                xls_icms,
-                get_sheet_name(xls_icms, "C190"),
-            )
+            c190_icms = carregar_aba_cacheada(icms_bytes, xls_icms, "C190")
 
             # Otimização principal:
             # Se você escolheu apenas C175, não carrega C170 do SPED ICMS/IPI.
             if precisa_c170_icms(modo):
-                c170_icms = carregar_aba_opcional(xls_icms, "C170")
+                c170_icms = carregar_aba_opcional_cacheada(icms_bytes, xls_icms, "C170")
             else:
                 c170_icms = pd.DataFrame()
 
@@ -432,10 +473,7 @@ if st.button("Processar análise", type="primary"):
             cruz_c175 = pd.DataFrame()
 
             if modo in ["C170", "C170 + C175"]:
-                c170 = load_sheet(
-                    xls_pis,
-                    get_sheet_name(xls_pis, "C170"),
-                )
+                c170 = carregar_aba_cacheada(pis_bytes, xls_pis, "C170")
 
                 pis170 = prepare_pis_cofins(c170, "C170")
                 pis170_key = consolidate_pis_by_key(pis170)
@@ -451,10 +489,7 @@ if st.button("Processar análise", type="primary"):
                 cruzamentos["C170"] = cruz_c170
 
             if modo in ["C175", "C170 + C175"]:
-                c175 = load_sheet(
-                    xls_pis,
-                    get_sheet_name(xls_pis, "C175"),
-                )
+                c175 = carregar_aba_cacheada(pis_bytes, xls_pis, "C175")
 
                 pis175 = prepare_pis_cofins(c175, "C175")
                 pis175_key = consolidate_pis_by_key(pis175)

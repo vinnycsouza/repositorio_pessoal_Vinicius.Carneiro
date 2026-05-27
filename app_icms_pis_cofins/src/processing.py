@@ -1,3 +1,4 @@
+import io
 import pandas as pd
 import numpy as np
 
@@ -16,7 +17,26 @@ from .utils import (
 # ---------------------------------------------------------------------
 
 def load_sheet(xls: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+    """
+    Leitura padrão preservada para compatibilidade.
+    """
     df = pd.read_excel(xls, sheet_name=sheet_name, dtype=object)
+    return normalize_columns(df)
+
+
+def load_sheet_from_bytes(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+    """
+    Leitura cacheável por bytes do arquivo.
+
+    O app.py usa esta função com st.cache_data para evitar reler a mesma aba
+    sempre que houver interação no Streamlit.
+    """
+    df = pd.read_excel(
+        io.BytesIO(file_bytes),
+        sheet_name=sheet_name,
+        dtype=object,
+        engine="openpyxl",
+    )
     return normalize_columns(df)
 
 
@@ -693,3 +713,8 @@ def comparativo_c170_c175(df170: pd.DataFrame, df175: pd.DataFrame) -> pd.DataFr
     comp = a.merge(b, on="CHAVE", how="outer")
     comp["DIF_CREDITO_BASE_ESPERADA"] = comp["CREDITO_BASE_ESPERADA_C170"].fillna(0) - comp["CREDITO_BASE_ESPERADA_C175"].fillna(0)
     return comp
+
+
+# Compatibilidade com app.py/versões antigas
+def prepare_icms_c190(*args, **kwargs):
+    return preparar_icms_c190(*args, **kwargs)
