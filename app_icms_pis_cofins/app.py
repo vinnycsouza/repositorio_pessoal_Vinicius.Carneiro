@@ -59,13 +59,14 @@ def precisa_c170_icms(modo_analise: str) -> bool:
 
 
 @st.cache_data(show_spinner=False)
-def carregar_excel_file_cache(file_bytes: bytes) -> pd.ExcelFile:
+def listar_abas_cache(file_bytes: bytes) -> list[str]:
     """
     Cacheia o objeto ExcelFile pelo conteúdo do arquivo.
     Isso evita reabrir o Excel a cada rerun do Streamlit.
     """
     import io
-    return pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
+    xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
+    return xls.sheet_names
 
 
 @st.cache_data(show_spinner=False)
@@ -296,7 +297,7 @@ if tipo_analise == "ICMS-ST - análise preliminar":
 
     try:
         pis_st_bytes = arq_pis_st.getvalue()
-        xls_pis_st = carregar_excel_file_cache(pis_st_bytes)
+        xls_pis_st = pd.ExcelFile(arq_pis_st, engine="openpyxl")
     except Exception as e:
         st.error(f"Erro ao abrir o arquivo: {e}")
         st.stop()
@@ -404,8 +405,8 @@ try:
     icms_bytes = arq_icms.getvalue()
     pis_bytes = arq_pis.getvalue()
 
-    xls_icms = carregar_excel_file_cache(icms_bytes)
-    xls_pis = carregar_excel_file_cache(pis_bytes)
+    xls_icms = pd.ExcelFile(arq_icms, engine="openpyxl")
+    xls_pis = pd.ExcelFile(arq_pis, engine="openpyxl")
 except Exception as e:
     st.error(f"Erro ao abrir os arquivos: {e}")
     st.stop()
