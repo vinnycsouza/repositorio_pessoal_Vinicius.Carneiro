@@ -61,8 +61,8 @@ def precisa_c170_icms(modo_analise: str) -> bool:
 @st.cache_data(show_spinner=False)
 def listar_abas_cache(file_bytes: bytes) -> list[str]:
     """
-    Cacheia o objeto ExcelFile pelo conteúdo do arquivo.
-    Isso evita reabrir o Excel a cada rerun do Streamlit.
+    Cacheia apenas a lista de abas.
+    ExcelFile não é serializável pelo st.cache_data.
     """
     import io
     xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
@@ -327,8 +327,17 @@ if tipo_analise == "ICMS-ST - análise preliminar":
     st.success("Validação de abas concluída.")
 
     if st.button("Processar análise preliminar ICMS-ST", type="primary"):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
         try:
+            status_text.info("Preparando análise ICMS-ST...")
+            progress_bar.progress(10)
+
             with st.spinner("Processando ICMS-ST preliminar..."):
+                status_text.info("Processando base ICMS-ST...")
+                progress_bar.progress(40)
+
                 resultado_st = processar_icms_st(
                     xls_pis=xls_pis_st,
                     get_sheet_name=get_sheet_name,
@@ -344,7 +353,13 @@ if tipo_analise == "ICMS-ST - análise preliminar":
                     tolerancia_bc=tolerancia_bc_st,
                 )
 
+                status_text.info("Gerando Excel ICMS-ST...")
+                progress_bar.progress(85)
+
                 excel_st = gerar_excel_icms_st(resultado_st)
+
+            progress_bar.progress(100)
+            status_text.success("Processamento ICMS-ST concluído.")
 
             st.subheader("2. Resultado ICMS-ST preliminar")
 
@@ -448,8 +463,17 @@ st.success("Validação de abas concluída.")
 
 
 if st.button("Processar análise", type="primary"):
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
     try:
+        status_text.info("Iniciando processamento...")
+        progress_bar.progress(5)
+
         with st.spinner("Processando arquivos..."):
+            status_text.info("Lendo SPED ICMS/IPI...")
+            progress_bar.progress(10)
+
             c100_icms = carregar_aba_cacheada(icms_bytes, xls_icms, "C100")
 
             c190_icms = carregar_aba_cacheada(icms_bytes, xls_icms, "C190")
@@ -467,7 +491,13 @@ if st.button("Processar análise", type="primary"):
                 c170_icms,
             )
 
+            status_text.info("Consolidando base ICMS...")
+            progress_bar.progress(25)
+
             icms_base = consolidate_icms_by_key(icms_linhas)
+
+            status_text.info("Lendo SPED PIS/COFINS...")
+            progress_bar.progress(40)
 
             cruzamentos = {}
             cruz_c170 = pd.DataFrame()
@@ -478,6 +508,9 @@ if st.button("Processar análise", type="primary"):
 
                 pis170 = prepare_pis_cofins(c170, "C170")
                 pis170_key = consolidate_pis_by_key(pis170)
+
+                status_text.info("Cruzando bases C170...")
+                progress_bar.progress(60)
 
                 cruz_c170 = cruzar_icms_pis(
                     icms_base,
@@ -495,6 +528,9 @@ if st.button("Processar análise", type="primary"):
                 pis175 = prepare_pis_cofins(c175, "C175")
                 pis175_key = consolidate_pis_by_key(pis175)
 
+                status_text.info("Cruzando bases C175...")
+                progress_bar.progress(70)
+
                 cruz_c175 = cruzar_icms_pis(
                     icms_base,
                     pis175_key,
@@ -504,6 +540,9 @@ if st.button("Processar análise", type="primary"):
                 )
 
                 cruzamentos["C175"] = cruz_c175
+
+            status_text.info("Gerando resumo analítico...")
+            progress_bar.progress(80)
 
             resumo = resumo_geral(cruzamentos)
 
@@ -602,6 +641,9 @@ if st.button("Processar análise", type="primary"):
                 ]
             )
 
+            status_text.info("Gerando Excel final...")
+            progress_bar.progress(95)
+
             excel_bytes = gerar_excel(
                 resumo=resumo,
                 icms_base=icms_base,
@@ -612,6 +654,9 @@ if st.button("Processar análise", type="primary"):
                 credito=credito,
                 parametros=parametros,
             )
+
+            progress_bar.progress(100)
+            status_text.success("Processamento concluído.")
 
         st.subheader("2. Resultado")
         st.dataframe(resumo, use_container_width=True)
