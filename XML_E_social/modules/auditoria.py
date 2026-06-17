@@ -311,6 +311,40 @@ def gerar_resumo_execucao(df_rubricas: pd.DataFrame, df_remun: pd.DataFrame, df_
     return gerar_resumo_visual(df_rubricas_cp, preparar_movimentos_cp(df_remun), df_sem_cadastro, df_bases_trabalhador if df_bases_trabalhador is not None else pd.DataFrame())
 
 
+def _nome_aba_seguro(nome: str, parte: int | None = None) -> str:
+    """Garante nome de aba dentro do limite de 31 caracteres do Excel."""
+    nome = str(nome)[:31]
+    if parte is None:
+        return nome
+    sufixo = f"_{parte}"
+    return f"{nome[:31 - len(sufixo)]}{sufixo}"
+
+
+def _to_excel_dividido(writer, df: pd.DataFrame | None, sheet_name: str, max_linhas_excel: int = 1_048_576):
+    """Exporta DataFrame para Excel respeitando o limite máximo de linhas por aba.
+
+    O Excel suporta 1.048.576 linhas incluindo o cabeçalho; por isso cada parte
+    usa no máximo 1.048.575 linhas de dados.
+    """
+    base = df if df is not None else pd.DataFrame()
+    if base.empty:
+        base.to_excel(writer, sheet_name=_nome_aba_seguro(sheet_name), index=False)
+        return
+
+    max_dados = max_linhas_excel - 1
+    total = len(base)
+    if total <= max_dados:
+        base.to_excel(writer, sheet_name=_nome_aba_seguro(sheet_name), index=False)
+        return
+
+    parte = 1
+    for inicio in range(0, total, max_dados):
+        fim = min(inicio + max_dados, total)
+        aba = _nome_aba_seguro(sheet_name, parte)
+        base.iloc[inicio:fim].to_excel(writer, sheet_name=aba, index=False)
+        parte += 1
+
+
 def gerar_excel_saida(
     df_inventario: pd.DataFrame,
     df_rubricas: pd.DataFrame,
@@ -331,21 +365,21 @@ def gerar_excel_saida(
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        (df_empresa if df_empresa is not None else pd.DataFrame()).to_excel(writer, sheet_name="00_empresa", index=False)
-        df_resumo_visual.to_excel(writer, sheet_name="01_resumo", index=False)
-        df_rubricas_cp.to_excel(writer, sheet_name="02_rubricas_cp", index=False)
-        df_movimentos_cp.to_excel(writer, sheet_name="03_movimentos_cp", index=False)
-        df_base_trabalhador.to_excel(writer, sheet_name="04_base_trabalhador", index=False)
-        df_sem_cadastro.to_excel(writer, sheet_name="05_sem_s1010", index=False)
-        (df_s5001_resumo if df_s5001_resumo is not None else pd.DataFrame()).to_excel(writer, sheet_name="06_s5001_tpvalor", index=False)
-        (df_levantamento if df_levantamento is not None else pd.DataFrame()).to_excel(writer, sheet_name="07_levantamento", index=False)
-        df_rubricas.to_excel(writer, sheet_name="apoio_s1010", index=False)
-        df_remun.to_excel(writer, sheet_name="apoio_s1200", index=False)
-        df_bases_trabalhador.to_excel(writer, sheet_name="apoio_s5001", index=False)
-        df_bases_contribuicao.to_excel(writer, sheet_name="apoio_s5011", index=False)
-        df_exclusoes.to_excel(writer, sheet_name="apoio_s3000", index=False)
-        df_layout.to_excel(writer, sheet_name="checagem_layout", index=False)
-        df_inventario.to_excel(writer, sheet_name="inventario", index=False)
-        df_erros.to_excel(writer, sheet_name="erros_xml", index=False)
+        _to_excel_dividido(writer, df_empresa if df_empresa is not None else pd.DataFrame(), "00_empresa")
+        _to_excel_dividido(writer, df_resumo_visual, "01_resumo")
+        _to_excel_dividido(writer, df_rubricas_cp, "02_rubricas_cp")
+        _to_excel_dividido(writer, df_movimentos_cp, "03_movimentos_cp")
+        _to_excel_dividido(writer, df_base_trabalhador, "04_base_trabalhador")
+        _to_excel_dividido(writer, df_sem_cadastro, "05_sem_s1010")
+        _to_excel_dividido(writer, df_s5001_resumo if df_s5001_resumo is not None else pd.DataFrame(), "06_s5001_tpvalor")
+        _to_excel_dividido(writer, df_levantamento if df_levantamento is not None else pd.DataFrame(), "07_levantamento")
+        _to_excel_dividido(writer, df_rubricas, "apoio_s1010")
+        _to_excel_dividido(writer, df_remun, "apoio_s1200")
+        _to_excel_dividido(writer, df_bases_trabalhador, "apoio_s5001")
+        _to_excel_dividido(writer, df_bases_contribuicao, "apoio_s5011")
+        _to_excel_dividido(writer, df_exclusoes, "apoio_s3000")
+        _to_excel_dividido(writer, df_layout, "checagem_layout")
+        _to_excel_dividido(writer, df_inventario, "inventario")
+        _to_excel_dividido(writer, df_erros, "erros_xml")
     output.seek(0)
     return output.getvalue()

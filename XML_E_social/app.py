@@ -4,7 +4,7 @@ import zipfile
 import pandas as pd
 import streamlit as st
 
-from modules.auditoria import gerar_excel_saida, preparar_pacote_analitico
+from modules.auditoria import gerar_excel_saida, gerar_resumo_visual, preparar_pacote_analitico
 from modules.processador_zip import processar_zip_esocial
 from utils.helpers import decimal_br
 
@@ -13,17 +13,33 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 6.6: relatório de incidência CP, seleção estável por checklist e resumo de competência em matriz por rubrica."
+    "Versão 6.7: aceita ZIP(s) do eSocial ou Excel consolidado, com exportação dividida quando ultrapassar o limite do Excel."
 )
 
 with st.sidebar:
     st.header("Entrada")
-    arquivos_zip = st.file_uploader(
-        "Selecione um ou mais ZIPs do eSocial",
-        type=["zip"],
-        accept_multiple_files=True,
-        help="Pode enviar pacotes separados: S-1010, S-1200 e consolidado S-5001/S-5011.",
+    modo_entrada = st.radio(
+        "Modo de entrada",
+        ["ZIP(s) do eSocial", "Excel consolidado / levantamento"],
+        help="Use Excel consolidado quando os XMLs forem grandes demais e você já tiver uma base exportada com 02_rubricas_cp e 03_movimentos_cp.",
     )
+
+    arquivos_zip = []
+    arquivo_excel = None
+    if modo_entrada == "ZIP(s) do eSocial":
+        arquivos_zip = st.file_uploader(
+            "Selecione um ou mais ZIPs do eSocial",
+            type=["zip"],
+            accept_multiple_files=True,
+            help="Pode enviar pacotes separados: S-1010, S-1200 e consolidado S-5001/S-5011.",
+        )
+    else:
+        arquivo_excel = st.file_uploader(
+            "Selecione o Excel consolidado",
+            type=["xlsx"],
+            accept_multiple_files=False,
+            help="Modelo esperado: abas 02_rubricas_cp e 03_movimentos_cp, como no relatório gerado pelo app ou base manual equivalente.",
+        )
 
     st.markdown("---")
     st.subheader("Conjunto recomendado")
@@ -48,12 +64,40 @@ def executar_processamento(pacotes: list[tuple[str, bytes]]):
     return processar_zip_esocial(buffer.getvalue())
 
 
-if not arquivos_zip:
-    st.info(
-        "Envie um ou mais ZIPs do eSocial. O app localiza automaticamente os XMLs relevantes, inclusive em subpastas e ZIP dentro de ZIP."
-    )
-    st.markdown(
-        """
+@st.cache_data(show_spinner=False)
+def carregar_excel_consolidado(excel_bytes: bytes):
+    origem = io.BytesIO(excel_bytes)
+    xls = pd.ExcelFile(origem)
+
+    def ler_aba(nome: str) -> pd.DataFrame:
+        if nome in xls.sheet_names:
+            return pd.read_excel(xls, sheet_name=nome)
+        return pd.DataFrame()
+
+    df_rubricas_cp = ler_aba("02_rubricas_cp")
+    df_movimentos_cp = ler_aba("03_movimentos_cp")
+    df_empresa = ler_aba("00_empresa")
+
+    # Normalização mínima para aceitar planilhas fabricadas manualmente no padrão do app.
+    for df in (df_rubricas_cp, df_movimentos_cp):
+        if not df.empty:
+            df.columns = [str(c).strip() for c in df.columns]
+
+    return {
+        "rubricas_cp": df_rubricas_cp,
+        "movimentos_cp": df_movimentos_cp,
+        "empresa": df_empresa,
+        "abas": pd.DataFrame({"aba_excel": xls.sheet_names}),
+    }
+
+
+if modo_entrada == "ZIP(s) do eSocial":
+    if not arquivos_zip:
+        st.info(
+            "Envie um ou mais ZIPs do eSocial. O app localiza automaticamente os XMLs relevantes, inclusive em subpastas e ZIP dentro de ZIP."
+        )
+        st.markdown(
+            """
 ### O que esta versão entrega
 - relatório direto de rubricas com **incidência CP** e **sem incidência CP**;
 - classificação visual por caráter da verba: remuneratório, rescisório, férias, 13º, desconto ou informativo/técnico;
@@ -61,26 +105,46 @@ if not arquivos_zip:
 - seleção múltipla, filtros e cálculo estimado de CPP;
 - base por trabalhador para confrontar S-1200 x S-5001;
 - aba específica para rubricas do S-1200 sem correspondência no S-1010;
-- abas de apoio com os dados brutos extraídos.
-        """
-    )
-    st.stop()
+- aceita também Excel consolidado no padrão das abas 02_rubricas_cp e 03_movimentos_cp.
+            """
+        )
+        st.stop()
 
-pacotes = [(arquivo.name, arquivo.getvalue()) for arquivo in arquivos_zip]
+    pacotes = [(arquivo.name, arquivo.getvalue()) for arquivo in arquivos_zip]
 
-with st.spinner("Processando ZIP(s) do eSocial..."):
-    resultado = executar_processamento(pacotes)
+    with st.spinner("Processando ZIP(s) do eSocial..."):
+        resultado = executar_processamento(pacotes)
 
+    df_inventario = resultado.get("inventario", pd.DataFrame())
+    df_rubricas = resultado.get("rubricas", pd.DataFrame())
+    df_exclusoes = resultado.get("exclusoes", pd.DataFrame())
+    df_remun = resultado.get("remuneracoes", pd.DataFrame())
+    df_bases_trab = resultado.get("bases_trabalhador", pd.DataFrame())
+    df_bases_contrib = resultado.get("bases_contribuicao", pd.DataFrame())
+    df_erros = resultado.get("erros_xml", pd.DataFrame())
+    df_layout = resultado.get("layout_check", pd.DataFrame())
+    df_empresa = resultado.get("empresa", pd.DataFrame())
+    modo_excel_consolidado = False
+else:
+    if arquivo_excel is None:
+        st.info("Envie um Excel consolidado com as abas 02_rubricas_cp e 03_movimentos_cp.")
+        st.stop()
 
-df_inventario = resultado.get("inventario", pd.DataFrame())
-df_rubricas = resultado.get("rubricas", pd.DataFrame())
-df_exclusoes = resultado.get("exclusoes", pd.DataFrame())
-df_remun = resultado.get("remuneracoes", pd.DataFrame())
-df_bases_trab = resultado.get("bases_trabalhador", pd.DataFrame())
-df_bases_contrib = resultado.get("bases_contribuicao", pd.DataFrame())
-df_erros = resultado.get("erros_xml", pd.DataFrame())
-df_layout = resultado.get("layout_check", pd.DataFrame())
-df_empresa = resultado.get("empresa", pd.DataFrame())
+    with st.spinner("Carregando Excel consolidado..."):
+        resultado_excel = carregar_excel_consolidado(arquivo_excel.getvalue())
+
+    df_inventario = pd.DataFrame()
+    df_rubricas = pd.DataFrame()
+    df_exclusoes = pd.DataFrame()
+    df_remun = resultado_excel.get("movimentos_cp", pd.DataFrame()).copy()
+    df_bases_trab = pd.DataFrame()
+    df_bases_contrib = pd.DataFrame()
+    df_erros = pd.DataFrame()
+    df_layout = resultado_excel.get("abas", pd.DataFrame())
+    df_empresa = resultado_excel.get("empresa", pd.DataFrame())
+    df_rubricas_cp_excel = resultado_excel.get("rubricas_cp", pd.DataFrame()).copy()
+    df_movimentos_cp_excel = resultado_excel.get("movimentos_cp", pd.DataFrame()).copy()
+    modo_excel_consolidado = True
 
 
 def formatar_cnpj(cnpj: str) -> str:
@@ -108,19 +172,27 @@ def empresa_principal(df: pd.DataFrame) -> tuple[str, str]:
 nome_empresa, cnpj_empresa = empresa_principal(df_empresa)
 
 with st.spinner("Montando relatório de composição da incidência CP..."):
-    (
-        df_resumo_visual,
-        df_rubricas_cp,
-        df_movimentos_cp,
-        df_base_trabalhador,
-        df_sem_cadastro,
-        df_s5001_resumo,
-    ) = preparar_pacote_analitico(
-        df_rubricas=df_rubricas,
-        df_remun=df_remun,
-        df_bases_trabalhador=df_bases_trab,
-        df_bases_contribuicao=df_bases_contrib,
-    )
+    if modo_excel_consolidado:
+        df_rubricas_cp = df_rubricas_cp_excel.copy()
+        df_movimentos_cp = df_movimentos_cp_excel.copy()
+        df_base_trabalhador = pd.DataFrame()
+        df_sem_cadastro = pd.DataFrame()
+        df_s5001_resumo = pd.DataFrame()
+        df_resumo_visual = gerar_resumo_visual(df_rubricas_cp, df_movimentos_cp, df_sem_cadastro, df_bases_trab)
+    else:
+        (
+            df_resumo_visual,
+            df_rubricas_cp,
+            df_movimentos_cp,
+            df_base_trabalhador,
+            df_sem_cadastro,
+            df_s5001_resumo,
+        ) = preparar_pacote_analitico(
+            df_rubricas=df_rubricas,
+            df_remun=df_remun,
+            df_bases_trabalhador=df_bases_trab,
+            df_bases_contribuicao=df_bases_contrib,
+        )
 
 aba_relatorio, aba_levantamento = st.tabs([
     "Relatório de Incidência CP",
@@ -474,7 +546,7 @@ with aba_levantamento:
             st.download_button(
                 label="Baixar levantamento de verbas",
                 data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v6_6.xlsx",
+                file_name="levantamento_verbas_cp_v6_7.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_levantamento_verbas",
@@ -505,7 +577,7 @@ excel_bytes = gerar_excel_saida(
 st.download_button(
     label="Baixar relatório de incidência CP",
     data=excel_bytes,
-    file_name="relatorio_incidencia_cp_esocial_v6_6.xlsx",
+    file_name="relatorio_incidencia_cp_esocial_v6_7.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )

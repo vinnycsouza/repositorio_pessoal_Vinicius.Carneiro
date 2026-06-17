@@ -72,3 +72,9 @@ relatorio_incidencia_cp_esocial_v6.xlsx
 - seleção de rubricas no levantamento por checklist com busca;
 - a seleção fica armazenada em sessão e não se perde a cada clique;
 - botão separado para aplicar seleção antes de recalcular o levantamento.
+
+## Atualização v6.7
+- novo modo de entrada por **Excel consolidado / levantamento**;
+- aceita planilha já fabricada com abas `02_rubricas_cp` e `03_movimentos_cp` para gerar levantamento sem reprocessar XMLs pesados;
+- exportação do relatório principal agora divide automaticamente abas que ultrapassem o limite de 1.048.576 linhas do Excel;
+- arquivos gerados: `relatorio_incidencia_cp_esocial_v6_7.xlsx` e `levantamento_verbas_cp_v6_7.xlsx`.
