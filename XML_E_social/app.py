@@ -13,7 +13,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 6.7: aceita ZIP(s) do eSocial ou Excel consolidado, com exportação dividida quando ultrapassar o limite do Excel."
+    "Versão 6.8: aceita ZIP(s) do eSocial ou Excel consolidado, com exportação inteligente da aba 03_movimentos_cp em grandes volumes."
 )
 
 with st.sidebar:
@@ -546,7 +546,7 @@ with aba_levantamento:
             st.download_button(
                 label="Baixar levantamento de verbas",
                 data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v6_7.xlsx",
+                file_name="levantamento_verbas_cp_v6_8.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_levantamento_verbas",
@@ -555,6 +555,32 @@ with aba_levantamento:
             df_levantamento_export = df_resumo_lev.copy()
 
 st.markdown("## Exportação")
+
+MAX_LINHAS_DADOS_EXCEL = 1_048_575
+modo_exportacao_movimentos_cp = "todos"
+
+if not df_movimentos_cp.empty and len(df_movimentos_cp) > MAX_LINHAS_DADOS_EXCEL:
+    st.warning(
+        f"A aba 03_movimentos_cp possui {len(df_movimentos_cp):,} linhas e ultrapassa o limite de uma aba do Excel.".replace(",", ".")
+    )
+    escolha_movimentos_cp = st.radio(
+        "Como deseja exportar a aba 03_movimentos_cp?",
+        [
+            "Apenas incidências CP padrão (11, 12, 21 e 22)",
+            "Todos os movimentos, dividindo em abas",
+        ],
+        index=0,
+        help=(
+            "A opção de incidências CP mantém o mesmo padrão/colunas da aba 03_movimentos_cp, "
+            "mas reduz o volume para os códigos 11, 12, 21 e 22. Se ainda ultrapassar o limite, a aba será dividida automaticamente."
+        ),
+    )
+    if escolha_movimentos_cp.startswith("Apenas"):
+        modo_exportacao_movimentos_cp = "incidencia_cp_padrao"
+else:
+    if not df_movimentos_cp.empty:
+        st.caption("A aba 03_movimentos_cp cabe em uma única aba do Excel e será exportada no padrão completo.")
+
 excel_bytes = gerar_excel_saida(
     df_inventario=df_inventario,
     df_rubricas=df_rubricas,
@@ -572,12 +598,13 @@ excel_bytes = gerar_excel_saida(
     df_s5001_resumo=df_s5001_resumo,
     df_levantamento=df_levantamento_export,
     df_empresa=df_empresa,
+    modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
 )
 
 st.download_button(
     label="Baixar relatório de incidência CP",
     data=excel_bytes,
-    file_name="relatorio_incidencia_cp_esocial_v6_7.xlsx",
+    file_name="relatorio_incidencia_cp_esocial_v6_8.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )

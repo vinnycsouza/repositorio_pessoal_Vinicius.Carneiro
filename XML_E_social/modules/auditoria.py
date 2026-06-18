@@ -4,6 +4,7 @@ import re
 import pandas as pd
 
 CODIGOS_INCIDENTES_CP = {"11", "12", "13", "14", "15", "16", "21", "22", "23", "24", "25", "26"}
+CODIGOS_CP_EXPORTACAO_PADRAO = {"11", "12", "21", "22"}
 
 PALAVRAS_TECNICAS = (
     "base de calculo", "base cálculo", "base inss", "base previd", "inss base", "fgts base",
@@ -345,6 +346,21 @@ def _to_excel_dividido(writer, df: pd.DataFrame | None, sheet_name: str, max_lin
         parte += 1
 
 
+def _filtrar_movimentos_cp_exportacao(df: pd.DataFrame | None, modo: str = "todos") -> pd.DataFrame:
+    """Filtra a aba 03_movimentos_cp apenas na exportação, preservando layout/colunas.
+
+    modo="todos": mantém todos os movimentos.
+    modo="incidencia_cp_padrao": mantém apenas codIncCP 11, 12, 21 e 22.
+    """
+    base = df if df is not None else pd.DataFrame()
+    if base.empty or modo != "incidencia_cp_padrao":
+        return base
+    if "cod_inc_cp" not in base.columns:
+        return base
+    cod = base["cod_inc_cp"].fillna("").astype(str).str.strip()
+    return base[cod.isin(CODIGOS_CP_EXPORTACAO_PADRAO)].copy()
+
+
 def gerar_excel_saida(
     df_inventario: pd.DataFrame,
     df_rubricas: pd.DataFrame,
@@ -362,13 +378,15 @@ def gerar_excel_saida(
     df_s5001_resumo: pd.DataFrame | None = None,
     df_levantamento: pd.DataFrame | None = None,
     df_empresa: pd.DataFrame | None = None,
+    modo_exportacao_movimentos_cp: str = "todos",
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         _to_excel_dividido(writer, df_empresa if df_empresa is not None else pd.DataFrame(), "00_empresa")
         _to_excel_dividido(writer, df_resumo_visual, "01_resumo")
         _to_excel_dividido(writer, df_rubricas_cp, "02_rubricas_cp")
-        _to_excel_dividido(writer, df_movimentos_cp, "03_movimentos_cp")
+        df_movimentos_cp_export = _filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp)
+        _to_excel_dividido(writer, df_movimentos_cp_export, "03_movimentos_cp")
         _to_excel_dividido(writer, df_base_trabalhador, "04_base_trabalhador")
         _to_excel_dividido(writer, df_sem_cadastro, "05_sem_s1010")
         _to_excel_dividido(writer, df_s5001_resumo if df_s5001_resumo is not None else pd.DataFrame(), "06_s5001_tpvalor")
