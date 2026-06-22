@@ -13,7 +13,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 6.8: aceita ZIP(s) do eSocial ou Excel consolidado, com exportação inteligente da aba 03_movimentos_cp em grandes volumes."
+    "Versão 6.9: aceita ZIP(s) do eSocial ou Excel consolidado, com exportação inteligente da aba 03_movimentos_cp em grandes volumes."
 )
 
 with st.sidebar:
@@ -90,6 +90,45 @@ def carregar_excel_consolidado(excel_bytes: bytes):
         "abas": pd.DataFrame({"aba_excel": xls.sheet_names}),
     }
 
+
+MAX_LINHAS_DADOS_EXCEL = 1_048_575
+
+
+def _nome_aba_excel(nome_base: str, parte: int | None = None) -> str:
+    """Garante nome de aba válido no Excel (máx. 31 caracteres)."""
+    nome_base = str(nome_base or "Aba")[:31]
+    if parte is None:
+        return nome_base
+    sufixo = f"_{parte}"
+    return f"{nome_base[:31-len(sufixo)]}{sufixo}"
+
+
+def _to_excel_dividido_local(writer, df: pd.DataFrame | None, sheet_name: str, max_linhas_excel: int = 1_048_576):
+    """Escreve DataFrame no Excel e divide automaticamente quando excede o limite de linhas."""
+    if df is None:
+        pd.DataFrame().to_excel(writer, index=False, sheet_name=_nome_aba_excel(sheet_name))
+        return
+
+    base = df.copy()
+    if base.empty:
+        base.to_excel(writer, index=False, sheet_name=_nome_aba_excel(sheet_name))
+        return
+
+    # Reserva 1 linha para cabeçalho.
+    max_dados = max_linhas_excel - 1
+    if len(base) <= max_dados:
+        base.to_excel(writer, index=False, sheet_name=_nome_aba_excel(sheet_name))
+        return
+
+    parte = 1
+    for inicio in range(0, len(base), max_dados):
+        fim = inicio + max_dados
+        base.iloc[inicio:fim].to_excel(
+            writer,
+            index=False,
+            sheet_name=_nome_aba_excel(sheet_name, parte),
+        )
+        parte += 1
 
 if modo_entrada == "ZIP(s) do eSocial":
     if not arquivos_zip:
@@ -534,19 +573,25 @@ with aba_levantamento:
                 ],
             })
 
+
+            if len(df_levantamento) > MAX_LINHAS_DADOS_EXCEL:
+                st.warning(
+                    f"A aba 03_movimentos do levantamento possui {len(df_levantamento):,} linhas e será dividida automaticamente em partes no Excel.".replace(",", ".")
+                )
+
             buffer_levantamento = io.BytesIO()
             with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
-                df_empresa.to_excel(writer, index=False, sheet_name="00_empresa")
-                df_parametros_lev.to_excel(writer, index=False, sheet_name="01_resumo")
-                df_resumo_lev.to_excel(writer, index=False, sheet_name="02_resumo_rubricas")
-                df_levantamento.to_excel(writer, index=False, sheet_name="03_movimentos")
-                df_resumo_competencia_lev.to_excel(writer, index=False, sheet_name="04_resumo_competencia")
-                df_resumo_competencia_rubrica_lev.to_excel(writer, index=False, sheet_name="05_competencia_rubrica")
+                _to_excel_dividido_local(writer, df_empresa, "00_empresa")
+                _to_excel_dividido_local(writer, df_parametros_lev, "01_resumo")
+                _to_excel_dividido_local(writer, df_resumo_lev, "02_resumo_rubricas")
+                _to_excel_dividido_local(writer, df_levantamento, "03_movimentos")
+                _to_excel_dividido_local(writer, df_resumo_competencia_lev, "04_resumo_competencia")
+                _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
 
             st.download_button(
                 label="Baixar levantamento de verbas",
                 data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v6_8.xlsx",
+                file_name="levantamento_verbas_cp_v6_9.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_levantamento_verbas",
@@ -556,7 +601,6 @@ with aba_levantamento:
 
 st.markdown("## Exportação")
 
-MAX_LINHAS_DADOS_EXCEL = 1_048_575
 modo_exportacao_movimentos_cp = "todos"
 
 if not df_movimentos_cp.empty and len(df_movimentos_cp) > MAX_LINHAS_DADOS_EXCEL:
@@ -604,7 +648,7 @@ excel_bytes = gerar_excel_saida(
 st.download_button(
     label="Baixar relatório de incidência CP",
     data=excel_bytes,
-    file_name="relatorio_incidencia_cp_esocial_v6_8.xlsx",
+    file_name="relatorio_incidencia_cp_esocial_v6_9.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
 )
