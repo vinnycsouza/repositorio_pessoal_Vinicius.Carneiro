@@ -13,7 +13,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 6.9: aceita ZIP(s) do eSocial ou Excel consolidado, com exportação inteligente da aba 03_movimentos_cp em grandes volumes."
+    "Versão 7.0: interface reorganizada, módulos separados e seleção de rubricas mais estável."
 )
 
 with st.sidebar:
@@ -233,17 +233,23 @@ with st.spinner("Montando relatório de composição da incidência CP..."):
             df_bases_contribuicao=df_bases_contrib,
         )
 
-aba_relatorio, aba_levantamento = st.tabs([
-    "Relatório de Incidência CP",
-    "Levantamento de Verbas",
-])
+if "modulo_ativo" not in st.session_state:
+    st.session_state["modulo_ativo"] = "Relatório de Incidência CP"
+
+st.markdown("---")
+modulo_ativo = st.radio(
+    "Módulo do app",
+    ["Relatório de Incidência CP", "Levantamento de Verbas"],
+    horizontal=True,
+    key="modulo_ativo",
+)
 
 df_levantamento_export = pd.DataFrame()
 
 if nome_empresa or cnpj_empresa:
     st.info(f"Empresa: {nome_empresa or 'Nome não localizado'} | CNPJ: {cnpj_empresa or 'CNPJ não localizado'}")
 
-with aba_relatorio:
+if modulo_ativo == "Relatório de Incidência CP":
     qtd_rubricas = len(df_rubricas_cp) if not df_rubricas_cp.empty else 0
     qtd_incide = int(df_rubricas_cp["status_cp"].eq("Incide CP").sum()) if not df_rubricas_cp.empty else 0
     qtd_nao_incide = int(df_rubricas_cp["status_cp"].eq("Não incide CP").sum()) if not df_rubricas_cp.empty else 0
@@ -327,7 +333,7 @@ with aba_relatorio:
         with tabs[8]:
             st.dataframe(df_erros, use_container_width=True, hide_index=True)
 
-with aba_levantamento:
+if modulo_ativo == "Levantamento de Verbas":
     st.markdown("## Levantamento de verbas")
     st.caption("Selecione rubricas já lidas no S-1200 e cruzadas com o S-1010 para calcular valores e estimar CPP.")
 
@@ -384,6 +390,8 @@ with aba_levantamento:
 
             if "lev_chaves_rubricas_selecionadas" not in st.session_state:
                 st.session_state["lev_chaves_rubricas_selecionadas"] = []
+            if "lev_editor_versao" not in st.session_state:
+                st.session_state["lev_editor_versao"] = 0
 
             st.markdown("### Seleção de rubricas")
             busca_lev = st.text_input(
@@ -410,15 +418,19 @@ with aba_levantamento:
 
             if b1.button("Selecionar resultado da busca", use_container_width=True, key="lev_btn_sel_busca"):
                 st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais | chaves_resultado)
+                st.session_state["lev_editor_versao"] += 1
                 st.rerun()
             if b2.button("Limpar resultado da busca", use_container_width=True, key="lev_btn_limpa_busca"):
                 st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais - chaves_resultado)
+                st.session_state["lev_editor_versao"] += 1
                 st.rerun()
             if b3.button("Limpar tudo", use_container_width=True, key="lev_btn_limpa_tudo"):
                 st.session_state["lev_chaves_rubricas_selecionadas"] = []
+                st.session_state["lev_editor_versao"] += 1
                 st.rerun()
             if b4.button("Selecionar tudo filtrado", use_container_width=True, key="lev_btn_sel_filtrado"):
                 st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais | chaves_filtradas)
+                st.session_state["lev_editor_versao"] += 1
                 st.rerun()
 
             df_editor = df_opts_busca[[
@@ -458,7 +470,7 @@ with aba_levantamento:
                         "Selecionar": st.column_config.CheckboxColumn("Selecionar"),
                         "Valor total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
                     },
-                    key="lev_editor_rubricas",
+                    key=f"lev_editor_rubricas_{st.session_state['lev_editor_versao']}",
                 )
                 aplicar_selecao = st.form_submit_button("Aplicar seleção", use_container_width=True)
 
@@ -466,6 +478,7 @@ with aba_levantamento:
                 novas_resultado = set(df_opts_busca.loc[df_editado["Selecionar"].fillna(False).tolist(), "chave_rubrica"].astype(str).tolist())
                 fora_resultado = set(st.session_state["lev_chaves_rubricas_selecionadas"]) - chaves_resultado
                 st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(fora_resultado | novas_resultado)
+                st.session_state["lev_editor_versao"] += 1
                 st.rerun()
 
             chaves_selecionadas = set(st.session_state["lev_chaves_rubricas_selecionadas"])
@@ -591,7 +604,7 @@ with aba_levantamento:
             st.download_button(
                 label="Baixar levantamento de verbas",
                 data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v6_9.xlsx",
+                file_name="levantamento_verbas_cp_v7_0.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_levantamento_verbas",
@@ -599,56 +612,57 @@ with aba_levantamento:
 
             df_levantamento_export = df_resumo_lev.copy()
 
-st.markdown("## Exportação")
+if modulo_ativo == "Relatório de Incidência CP":
+    st.markdown("## Exportação")
 
-modo_exportacao_movimentos_cp = "todos"
+    modo_exportacao_movimentos_cp = "todos"
 
-if not df_movimentos_cp.empty and len(df_movimentos_cp) > MAX_LINHAS_DADOS_EXCEL:
-    st.warning(
-        f"A aba 03_movimentos_cp possui {len(df_movimentos_cp):,} linhas e ultrapassa o limite de uma aba do Excel.".replace(",", ".")
+    if not df_movimentos_cp.empty and len(df_movimentos_cp) > MAX_LINHAS_DADOS_EXCEL:
+        st.warning(
+            f"A aba 03_movimentos_cp possui {len(df_movimentos_cp):,} linhas e ultrapassa o limite de uma aba do Excel.".replace(",", ".")
+        )
+        escolha_movimentos_cp = st.radio(
+            "Como deseja exportar a aba 03_movimentos_cp?",
+            [
+                "Apenas incidências CP padrão (11, 12, 21 e 22)",
+                "Todos os movimentos, dividindo em abas",
+            ],
+            index=0,
+            help=(
+                "A opção de incidências CP mantém o mesmo padrão/colunas da aba 03_movimentos_cp, "
+                "mas reduz o volume para os códigos 11, 12, 21 e 22. Se ainda ultrapassar o limite, a aba será dividida automaticamente."
+            ),
+        )
+        if escolha_movimentos_cp.startswith("Apenas"):
+            modo_exportacao_movimentos_cp = "incidencia_cp_padrao"
+    else:
+        if not df_movimentos_cp.empty:
+            st.caption("A aba 03_movimentos_cp cabe em uma única aba do Excel e será exportada no padrão completo.")
+
+    excel_bytes = gerar_excel_saida(
+        df_inventario=df_inventario,
+        df_rubricas=df_rubricas,
+        df_exclusoes=df_exclusoes,
+        df_remun=df_remun,
+        df_bases_trabalhador=df_bases_trab,
+        df_bases_contribuicao=df_bases_contrib,
+        df_erros=df_erros,
+        df_layout=df_layout,
+        df_resumo_visual=df_resumo_visual,
+        df_rubricas_cp=df_rubricas_cp,
+        df_movimentos_cp=df_movimentos_cp,
+        df_base_trabalhador=df_base_trabalhador,
+        df_sem_cadastro=df_sem_cadastro,
+        df_s5001_resumo=df_s5001_resumo,
+        df_levantamento=df_levantamento_export,
+        df_empresa=df_empresa,
+        modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
     )
-    escolha_movimentos_cp = st.radio(
-        "Como deseja exportar a aba 03_movimentos_cp?",
-        [
-            "Apenas incidências CP padrão (11, 12, 21 e 22)",
-            "Todos os movimentos, dividindo em abas",
-        ],
-        index=0,
-        help=(
-            "A opção de incidências CP mantém o mesmo padrão/colunas da aba 03_movimentos_cp, "
-            "mas reduz o volume para os códigos 11, 12, 21 e 22. Se ainda ultrapassar o limite, a aba será dividida automaticamente."
-        ),
+
+    st.download_button(
+        label="Baixar relatório de incidência CP",
+        data=excel_bytes,
+        file_name="relatorio_incidencia_cp_esocial_v7_0.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
     )
-    if escolha_movimentos_cp.startswith("Apenas"):
-        modo_exportacao_movimentos_cp = "incidencia_cp_padrao"
-else:
-    if not df_movimentos_cp.empty:
-        st.caption("A aba 03_movimentos_cp cabe em uma única aba do Excel e será exportada no padrão completo.")
-
-excel_bytes = gerar_excel_saida(
-    df_inventario=df_inventario,
-    df_rubricas=df_rubricas,
-    df_exclusoes=df_exclusoes,
-    df_remun=df_remun,
-    df_bases_trabalhador=df_bases_trab,
-    df_bases_contribuicao=df_bases_contrib,
-    df_erros=df_erros,
-    df_layout=df_layout,
-    df_resumo_visual=df_resumo_visual,
-    df_rubricas_cp=df_rubricas_cp,
-    df_movimentos_cp=df_movimentos_cp,
-    df_base_trabalhador=df_base_trabalhador,
-    df_sem_cadastro=df_sem_cadastro,
-    df_s5001_resumo=df_s5001_resumo,
-    df_levantamento=df_levantamento_export,
-    df_empresa=df_empresa,
-    modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
-)
-
-st.download_button(
-    label="Baixar relatório de incidência CP",
-    data=excel_bytes,
-    file_name="relatorio_incidencia_cp_esocial_v6_9.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-)
