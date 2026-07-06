@@ -99,8 +99,10 @@ def processar_zip_esocial(zip_bytes: bytes) -> Dict[str, object]:
     # ou alteração de rubrica pode criar novo iniValid/fimValid para o mesmo código.
     rubricas_map: Dict[Tuple[str, str], List[RubricaInfo]] = {}
     for r in rubricas:
-        rubricas_map.setdefault((r.cod_rubr, r.ide_tab_rubr), []).append(r)
-        rubricas_map.setdefault((r.cod_rubr, ""), []).append(r)
+        cod = str(r.cod_rubr or "").strip()
+        tab = str(r.ide_tab_rubr or "").strip()
+        rubricas_map.setdefault((cod, tab), []).append(r)
+        rubricas_map.setdefault((cod, ""), []).append(r)
 
     remuneracoes: List[RubricaPagamento] = []
     bases_trabalhador: List[BaseTrabalhador] = []
