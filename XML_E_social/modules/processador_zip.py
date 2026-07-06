@@ -94,10 +94,13 @@ def processar_zip_esocial(zip_bytes: bytes) -> Dict[str, object]:
             elif tipo_evento == "S-3000":
                 exclusoes.append(parse_s3000(root))
 
-    rubricas_map: Dict[Tuple[str, str], RubricaInfo] = {}
+    # Índice por código/tabela mantendo todas as vigências do S-1010.
+    # Não podemos sobrescrever por codRubr + ideTabRubr, pois uma troca de software
+    # ou alteração de rubrica pode criar novo iniValid/fimValid para o mesmo código.
+    rubricas_map: Dict[Tuple[str, str], List[RubricaInfo]] = {}
     for r in rubricas:
-        rubricas_map[(r.cod_rubr, r.ide_tab_rubr)] = r
-        rubricas_map.setdefault((r.cod_rubr, ""), r)
+        rubricas_map.setdefault((r.cod_rubr, r.ide_tab_rubr), []).append(r)
+        rubricas_map.setdefault((r.cod_rubr, ""), []).append(r)
 
     remuneracoes: List[RubricaPagamento] = []
     bases_trabalhador: List[BaseTrabalhador] = []

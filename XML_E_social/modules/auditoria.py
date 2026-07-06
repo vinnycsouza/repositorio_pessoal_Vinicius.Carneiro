@@ -106,7 +106,7 @@ def preparar_movimentos_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
         df_remun,
         [
             "per_apur", "cpf", "matricula", "cod_categ", "tp_insc_estab", "nr_insc_estab", "cod_lotacao",
-            "cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "cod_inc_cp", "tp_rubr", "arquivo",
+            "cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "cod_inc_cp", "tp_rubr", "ini_valid", "fim_valid", "origem_bloco_s1010", "arquivo",
         ],
     )
     base["vr_rubr"] = pd.to_numeric(base.get("vr_rubr", 0.0), errors="coerce").fillna(0.0)
@@ -118,8 +118,8 @@ def preparar_movimentos_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
 
     ordem = [
         "per_apur", "cpf", "matricula", "cod_categ", "cod_lotacao", "cod_rubr", "ide_tab_rubr",
-        "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp", "status_cp", "considerado_cp",
-        "tipo_verba", "carater_verba", "vr_rubr", "tp_insc_estab", "nr_insc_estab", "observacao", "arquivo",
+        "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp", "ini_valid", "fim_valid", "origem_bloco_s1010",
+        "status_cp", "considerado_cp", "tipo_verba", "carater_verba", "vr_rubr", "tp_insc_estab", "nr_insc_estab", "observacao", "arquivo",
     ]
     return base[[c for c in ordem if c in base.columns]].sort_values(["per_apur", "cpf", "matricula", "considerado_cp", "dsc_rubr"])
 
@@ -145,7 +145,7 @@ def gerar_relatorio_rubricas_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
 
     agrupado = (
         mov.groupby(
-            ["cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp", "status_cp", "considerado_cp", "tipo_verba", "carater_verba"],
+            ["cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp", "ini_valid", "fim_valid", "origem_bloco_s1010", "status_cp", "considerado_cp", "tipo_verba", "carater_verba"],
             dropna=False,
             as_index=False,
         )
@@ -161,7 +161,7 @@ def gerar_relatorio_rubricas_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
     agrupado["observacao"] = agrupado.apply(_observacao_rubrica, axis=1)
     ordem = [
         "status_cp", "considerado_cp", "carater_verba", "tipo_verba", "cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp",
-        "valor_total", "qtd_lancamentos", "qtd_cpfs", "primeira_competencia", "ultima_competencia", "prioridade_revisao", "observacao",
+        "ini_valid", "fim_valid", "origem_bloco_s1010", "valor_total", "qtd_lancamentos", "qtd_cpfs", "primeira_competencia", "ultima_competencia", "prioridade_revisao", "observacao",
     ]
     return agrupado[ordem].sort_values(["status_cp", "carater_verba", "valor_total"], ascending=[True, True, False])
 

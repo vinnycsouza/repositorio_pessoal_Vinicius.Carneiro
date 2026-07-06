@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Sequence, Optional
 import xml.etree.ElementTree as ET
 
 from utils.helpers import (
@@ -43,6 +43,9 @@ class RubricaPagamento:
     cod_inc_cp: str
     dsc_rubr: str
     tp_rubr: str
+    ini_valid: str
+    fim_valid: str
+    origem_bloco_s1010: str
     nr_recibo_evento: str
 
 
@@ -225,13 +228,94 @@ def parse_s1010(root: ET.Element) -> List[RubricaInfo]:
                 )
             )
 
-    dedup: Dict[Tuple[str, str], RubricaInfo] = {}
+    # Não deduplicar apenas por codRubr + ideTabRubr.
+    # A mesma rubrica pode ter múltiplas vigências no S-1010, especialmente
+    # quando há troca de sistema de folha ou alteração de incidência ao longo do tempo.
+    dedup: Dict[Tuple[str, str, str, str, str, str, str, str], RubricaInfo] = {}
     for item in saida:
-        dedup[(item.cod_rubr, item.ide_tab_rubr)] = item
+        chave = (
+            item.cod_rubr,
+            item.ide_tab_rubr,
+            item.ini_valid,
+            item.fim_valid,
+            item.dsc_rubr,
+            item.nat_rubr,
+            item.cod_inc_cp,
+            item.tp_rubr,
+        )
+        dedup[chave] = item
     return list(dedup.values())
 
 
-def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInfo], arquivo: str) -> List[RubricaPagamento]:
+def _competencia_para_chave(valor: str) -> str:
+    texto = str(valor or "").strip()
+    if not texto:
+        return ""
+    # O eSocial costuma usar AAAA-MM. Mantemos apenas ano/mês para comparação lexicográfica.
+    if len(texto) >= 7 and texto[4:5] == "-":
+        return texto[:7]
+    if len(texto) >= 7 and texto[2:3] == "/":
+        # MM/AAAA ou MM/AA
+        mes = texto[:2]
+        ano = texto[3:]
+        if len(ano) == 2:
+            ano = "20" + ano
+        return f"{ano}-{mes}"
+    return texto[:7]
+
+
+def _rubrica_valida_na_competencia(rubrica: RubricaInfo, competencia: str) -> bool:
+    comp = _competencia_para_chave(competencia)
+    ini = _competencia_para_chave(rubrica.ini_valid)
+    fim = _competencia_para_chave(rubrica.fim_valid)
+    if not comp:
+        return True
+    if ini and comp < ini:
+        return False
+    if fim and comp > fim:
+        return False
+    return True
+
+
+def _ordenar_rubricas_por_vigencia(rubricas: Sequence[RubricaInfo]) -> List[RubricaInfo]:
+    return sorted(
+        list(rubricas),
+        key=lambda r: (_competencia_para_chave(r.ini_valid), _competencia_para_chave(r.fim_valid), r.origem_bloco),
+        reverse=True,
+    )
+
+
+def selecionar_rubrica_vigente(
+    rubricas_map: Dict[Tuple[str, str], List[RubricaInfo]],
+    cod_rubr: str,
+    ide_tab_rubr: str,
+    competencia: str,
+) -> Optional[RubricaInfo]:
+    """Seleciona a rubrica S-1010 vigente para a competência do S-1200.
+
+    Critério ideal: codRubr + ideTabRubr + competência dentro de iniValid/fimValid.
+    Fallbacks preservam compatibilidade com bases antigas ou XMLs sem ideTabRubr.
+    """
+    candidatos: List[RubricaInfo] = []
+    if ide_tab_rubr:
+        candidatos.extend(rubricas_map.get((cod_rubr, ide_tab_rubr), []))
+    candidatos.extend(rubricas_map.get((cod_rubr, ""), []))
+
+    # Remove duplicatas por identidade de conteúdo, mantendo ordem.
+    unicos: Dict[Tuple[str, str, str, str, str, str], RubricaInfo] = {}
+    for r in candidatos:
+        unicos[(r.cod_rubr, r.ide_tab_rubr, r.ini_valid, r.fim_valid, r.cod_inc_cp, r.dsc_rubr)] = r
+    candidatos = _ordenar_rubricas_por_vigencia(unicos.values())
+
+    for rubrica in candidatos:
+        if _rubrica_valida_na_competencia(rubrica, competencia):
+            return rubrica
+
+    # Se não houver uma vigência compatível, retorna a mais recente como fallback para não perder descrição.
+    return candidatos[0] if candidatos else None
+
+
+def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[RubricaInfo]], arquivo: str) -> List[RubricaPagamento]:
     saida: List[RubricaPagamento] = []
 
     cpf = only_digits(first_text_by_localname(root, "cpfTrab"))
@@ -258,17 +342,25 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInf
 
                 for remun in blocos_remun:
                     matricula = first_text_by_localname(remun, "matricula") or first_text_by_localname(dm_dev, "matricula") or ""
+                    competencia_movimento = (
+                        first_text_by_localname(remun, "perRef")
+                        or first_text_by_localname(bloco_periodo, "perRef")
+                        or per_apur
+                    )
 
                     for item in all_elements_by_localname(remun, "itensRemun"):
                         cod_rubr = first_text_by_localname(item, "codRubr") or ""
                         ide_tab_rubr = first_text_by_localname(item, "ideTabRubr") or ""
                         vr_rubr = safe_float(first_text_by_localname(item, "vrRubr"))
 
-                        rubr = rubricas_map.get((cod_rubr, ide_tab_rubr)) or rubricas_map.get((cod_rubr, ""))
+                        rubr = selecionar_rubrica_vigente(rubricas_map, cod_rubr, ide_tab_rubr, competencia_movimento)
                         nat_rubr = rubr.nat_rubr if rubr else ""
                         cod_inc_cp = rubr.cod_inc_cp if rubr else ""
                         dsc_rubr = rubr.dsc_rubr if rubr else ""
                         tp_rubr = rubr.tp_rubr if rubr else ""
+                        ini_valid = rubr.ini_valid if rubr else ""
+                        fim_valid = rubr.fim_valid if rubr else ""
+                        origem_bloco_s1010 = rubr.origem_bloco if rubr else ""
 
                         if cod_rubr:
                             saida.append(
@@ -276,7 +368,7 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInf
                                     arquivo=arquivo,
                                     cpf=cpf,
                                     matricula=matricula,
-                                    per_apur=per_apur,
+                                    per_apur=competencia_movimento,
                                     cod_categ=cod_categ,
                                     tp_insc_estab=tp_insc_estab,
                                     nr_insc_estab=nr_insc_estab,
@@ -288,6 +380,9 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], RubricaInf
                                     cod_inc_cp=cod_inc_cp,
                                     dsc_rubr=dsc_rubr,
                                     tp_rubr=tp_rubr,
+                                    ini_valid=ini_valid,
+                                    fim_valid=fim_valid,
+                                    origem_bloco_s1010=origem_bloco_s1010,
                                     nr_recibo_evento=nr_recibo_evento,
                                 )
                             )
