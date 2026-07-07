@@ -1,23 +1,30 @@
-# XML_E_social
+# XML_E_social — v7.3
 
-Aplicativo em Streamlit para ler ZIPs do eSocial e gerar relatório de composição da incidência de CP por rubrica, com apoio para levantamento interativo de verbas.
+Aplicativo em Streamlit para ler ZIPs do eSocial e gerar relatório de composição da incidência de CP por rubrica, com módulo separado para levantamento de verbas.
 
-## Versão 6
+## Principais recursos da v7.3
 
-Principais recursos:
-
-- leitura automática de um ou mais ZIPs do eSocial, inclusive ZIP dentro de ZIP;
-- cruzamento entre S-1010, S-1200, S-5001, S-5011 e S-3000;
-- relatório de rubricas com e sem incidência de CP;
-- classificação visual da verba: remuneratória, rescisória, férias, 13º salário, desconto, informativa/técnica ou revisar;
-- área de **Levantamento de verbas**, com filtros, busca por rubrica, seleção múltipla e cálculo estimado de CPP;
-- base por trabalhador para conferência entre movimentos do S-1200 e detalhes do S-5001;
-- exportação em Excel com aba específica `07_levantamento`;
-- identificação da empresa em aba `00_empresa` nos relatórios gerados.
+- Escolha do módulo logo no início:
+  - Relatório de Incidência CP;
+  - Levantamento de Verbas.
+- O upload aparece somente depois da escolha do módulo.
+- Mantém entrada por ZIP(s) do eSocial.
+- Mantém entrada por Excel consolidado no módulo de levantamento.
+- Motor de cruzamento S-1010 em camadas:
+  1. S-1010 válido por `codRubr + ideTabRubr + validade`;
+  2. S-1010 válido por `codRubr + validade`, quando a tabela diverge ou está ausente;
+  3. S-1010 histórico compatível, quando o mesmo código aparece em outra vigência/tabela com incidência CP única;
+  4. S-1010 histórico divergente, quando o mesmo código aparece com incidências diferentes;
+  5. Sem S-1010.
+- Novas colunas de auditoria:
+  - `origem_validacao`;
+  - `nivel_confianca`;
+  - `status_auditoria`;
+  - `observacao_validacao`.
+- Mantém a exportação inteligente para grandes volumes.
+- Mantém o padrão dos Excel gerados.
 
 ## Como rodar
-
-Crie o ambiente virtual:
 
 ```bash
 python -m venv .venv
@@ -38,19 +45,14 @@ pip install -r requirements.txt
 Execute:
 
 ```bash
-streamlit run app.py
+streamlit run app.py --server.maxUploadSize=2500
 ```
 
-Para upload maior:
-
-```bash
-streamlit run app.py --server.maxUploadSize=1000
-```
-
-## Relatório gerado
+## Relatórios gerados
 
 ```text
-relatorio_incidencia_cp_esocial_v6.xlsx
+relatorio_incidencia_cp_esocial_v7_3.xlsx
+levantamento_verbas_cp_v7_3.xlsx
 ```
 
 ## Conjunto recomendado de arquivos
@@ -60,21 +62,3 @@ relatorio_incidencia_cp_esocial_v6.xlsx
 - S-5001 — conferência da base por trabalhador;
 - S-5011 — apoio consolidado, quando existir;
 - S-3000 — exclusões, quando existir.
-
-
-## Atualizacao v6.5
-- levantamento de verbas mantido no padrao do app;
-- inclusao de resumo por competencia no Excel do levantamento;
-- inclusao de resumo por competencia/rubrica para apoio ao recalculo.
-
-
-## Atualização v6.5
-- seleção de rubricas no levantamento por checklist com busca;
-- a seleção fica armazenada em sessão e não se perde a cada clique;
-- botão separado para aplicar seleção antes de recalcular o levantamento.
-
-## Atualização v6.7
-- novo modo de entrada por **Excel consolidado / levantamento**;
-- aceita planilha já fabricada com abas `02_rubricas_cp` e `03_movimentos_cp` para gerar levantamento sem reprocessar XMLs pesados;
-- exportação do relatório principal agora divide automaticamente abas que ultrapassem o limite de 1.048.576 linhas do Excel;
-- arquivos gerados: `relatorio_incidencia_cp_esocial_v6_7.xlsx` e `levantamento_verbas_cp_v6_7.xlsx`.

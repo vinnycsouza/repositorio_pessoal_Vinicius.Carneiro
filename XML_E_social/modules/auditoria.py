@@ -106,7 +106,7 @@ def preparar_movimentos_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
         df_remun,
         [
             "per_apur", "cpf", "matricula", "cod_categ", "tp_insc_estab", "nr_insc_estab", "cod_lotacao",
-            "cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "cod_inc_cp", "tp_rubr", "ini_valid", "fim_valid", "origem_bloco_s1010", "criterio_cruzamento_s1010", "arquivo",
+            "cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "cod_inc_cp", "tp_rubr", "ini_valid", "fim_valid", "origem_bloco_s1010", "criterio_cruzamento_s1010", "origem_validacao", "nivel_confianca", "status_auditoria", "observacao_validacao", "arquivo",
         ],
     )
     base["vr_rubr"] = pd.to_numeric(base.get("vr_rubr", 0.0), errors="coerce").fillna(0.0)
@@ -118,7 +118,7 @@ def preparar_movimentos_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
 
     ordem = [
         "per_apur", "cpf", "matricula", "cod_categ", "cod_lotacao", "cod_rubr", "ide_tab_rubr",
-        "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp", "ini_valid", "fim_valid", "origem_bloco_s1010", "criterio_cruzamento_s1010",
+        "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp", "ini_valid", "fim_valid", "origem_bloco_s1010", "criterio_cruzamento_s1010", "origem_validacao", "nivel_confianca", "status_auditoria", "observacao_validacao",
         "status_cp", "considerado_cp", "tipo_verba", "carater_verba", "vr_rubr", "tp_insc_estab", "nr_insc_estab", "observacao", "arquivo",
     ]
     return base[[c for c in ordem if c in base.columns]].sort_values(["per_apur", "cpf", "matricula", "considerado_cp", "dsc_rubr"])
@@ -145,7 +145,7 @@ def gerar_relatorio_rubricas_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
 
     agrupado = (
         mov.groupby(
-            ["cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp", "ini_valid", "fim_valid", "origem_bloco_s1010", "criterio_cruzamento_s1010", "status_cp", "considerado_cp", "tipo_verba", "carater_verba"],
+            ["cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp", "ini_valid", "fim_valid", "origem_bloco_s1010", "criterio_cruzamento_s1010", "origem_validacao", "nivel_confianca", "status_auditoria", "status_cp", "considerado_cp", "tipo_verba", "carater_verba"],
             dropna=False,
             as_index=False,
         )
@@ -161,7 +161,7 @@ def gerar_relatorio_rubricas_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
     agrupado["observacao"] = agrupado.apply(_observacao_rubrica, axis=1)
     ordem = [
         "status_cp", "considerado_cp", "carater_verba", "tipo_verba", "cod_rubr", "ide_tab_rubr", "dsc_rubr", "nat_rubr", "tp_rubr", "cod_inc_cp",
-        "ini_valid", "fim_valid", "origem_bloco_s1010", "criterio_cruzamento_s1010", "valor_total", "qtd_lancamentos", "qtd_cpfs", "primeira_competencia", "ultima_competencia", "prioridade_revisao", "observacao",
+        "ini_valid", "fim_valid", "origem_bloco_s1010", "criterio_cruzamento_s1010", "origem_validacao", "nivel_confianca", "status_auditoria", "valor_total", "qtd_lancamentos", "qtd_cpfs", "primeira_competencia", "ultima_competencia", "prioridade_revisao", "observacao",
     ]
     return agrupado[ordem].sort_values(["status_cp", "carater_verba", "valor_total"], ascending=[True, True, False])
 
@@ -170,6 +170,8 @@ def _prioridade_rubrica(row: pd.Series) -> str:
     status = row.get("status_cp", "")
     tipo = row.get("tipo_verba", "")
     valor = float(row.get("valor_total", 0) or 0)
+    if row.get("status_auditoria", "") == "S1010_HISTORICO_DIVERGENTE":
+        return "Alta"
     if status == "Sem S-1010":
         return "Alta"
     if status == "Incide CP" and tipo == "Informativa/Técnica":
@@ -184,6 +186,11 @@ def _prioridade_rubrica(row: pd.Series) -> str:
 
 
 def _observacao_rubrica(row: pd.Series) -> str:
+    status_auditoria = row.get("status_auditoria", "")
+    if status_auditoria == "S1010_HISTORICO_COMPATIVEL":
+        return "Incidência usada por histórico compatível: mesmo código encontrado em outra vigência/tabela com incidência única conhecida."
+    if status_auditoria == "S1010_HISTORICO_DIVERGENTE":
+        return "Mesmo código localizado no S-1010, mas com incidências divergentes/incompletas. Revisar histórico da rubrica."
     status = row.get("status_cp", "")
     tipo = row.get("tipo_verba", "")
     if status == "Incide CP":
@@ -284,6 +291,8 @@ def gerar_resumo_visual(df_rubricas_cp: pd.DataFrame, df_movimentos_cp: pd.DataF
             {"indicador": "Rubricas com incidência CP", "valor": int(df_rubricas_cp["status_cp"].eq("Incide CP").sum())},
             {"indicador": "Rubricas sem incidência CP", "valor": int(df_rubricas_cp["status_cp"].eq("Não incide CP").sum())},
             {"indicador": "Rubricas sem S-1010", "valor": int(df_rubricas_cp["status_cp"].eq("Sem S-1010").sum())},
+            {"indicador": "Rubricas com S-1010 histórico compatível", "valor": int(df_rubricas_cp.get("status_auditoria", pd.Series(dtype=str)).eq("S1010_HISTORICO_COMPATIVEL").sum())},
+            {"indicador": "Rubricas com S-1010 histórico divergente", "valor": int(df_rubricas_cp.get("status_auditoria", pd.Series(dtype=str)).eq("S1010_HISTORICO_DIVERGENTE").sum())},
             {"indicador": "Rubricas remuneratórias", "valor": int(df_rubricas_cp["carater_verba"].eq("Remuneratório").sum())},
             {"indicador": "Rubricas rescisórias", "valor": int(df_rubricas_cp["carater_verba"].eq("Rescisório").sum())},
             {"indicador": "Rubricas informativas/técnicas", "valor": int(df_rubricas_cp["carater_verba"].eq("Informativo/Técnico").sum())},

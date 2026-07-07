@@ -46,6 +46,11 @@ class RubricaPagamento:
     ini_valid: str
     fim_valid: str
     origem_bloco_s1010: str
+    criterio_cruzamento_s1010: str
+    origem_validacao: str
+    nivel_confianca: str
+    status_auditoria: str
+    observacao_validacao: str
     nr_recibo_evento: str
 
 
@@ -285,34 +290,121 @@ def _ordenar_rubricas_por_vigencia(rubricas: Sequence[RubricaInfo]) -> List[Rubr
     )
 
 
+def _normalizar_chave(valor: str) -> str:
+    return str(valor or "").strip()
+
+
+def _deduplicar_rubricas(rubricas: Sequence[RubricaInfo]) -> List[RubricaInfo]:
+    unicos: Dict[Tuple[str, str, str, str, str, str], RubricaInfo] = {}
+    for r in rubricas:
+        unicos[(r.cod_rubr, r.ide_tab_rubr, r.ini_valid, r.fim_valid, r.cod_inc_cp, r.dsc_rubr)] = r
+    return _ordenar_rubricas_por_vigencia(unicos.values())
+
+
+@dataclass
+class RubricaSelecionada:
+    rubrica: Optional[RubricaInfo]
+    criterio: str
+    origem_validacao: str
+    nivel_confianca: str
+    status_auditoria: str
+    observacao_validacao: str
+    usar_incidencia: bool = True
+
+
+def _valores_unicos_nao_vazios(rubricas: Sequence[RubricaInfo], atributo: str) -> set[str]:
+    return {str(getattr(r, atributo, "") or "").strip() for r in rubricas if str(getattr(r, atributo, "") or "").strip()}
+
+
+def _historico_compativel(rubricas: Sequence[RubricaInfo]) -> bool:
+    """Verifica se as versões conhecidas da rubrica têm a mesma incidência.
+
+    A validade continua sendo a fonte principal. Este teste só é usado quando não há
+    S-1010 válido para a competência, mas o mesmo codRubr aparece em outra vigência
+    ou tabela. A regra é conservadora: aceita apenas quando o codIncCP conhecido é único.
+    """
+    return len(_valores_unicos_nao_vazios(rubricas, "cod_inc_cp")) == 1
+
+
 def selecionar_rubrica_vigente(
     rubricas_map: Dict[Tuple[str, str], List[RubricaInfo]],
     cod_rubr: str,
     ide_tab_rubr: str,
     competencia: str,
-) -> Optional[RubricaInfo]:
-    """Seleciona a rubrica S-1010 vigente para a competência do S-1200.
+) -> RubricaSelecionada:
+    """Seleciona a rubrica S-1010 em camadas auditáveis.
 
-    Critério ideal: codRubr + ideTabRubr + competência dentro de iniValid/fimValid.
-    Fallbacks preservam compatibilidade com bases antigas ou XMLs sem ideTabRubr.
+    Hierarquia da v7.3:
+      1) S-1010 válido: codRubr + ideTabRubr + competência dentro de iniValid/fimValid.
+      2) S-1010 válido por código: codRubr + validade, quando ideTabRubr diverge/vem vazio.
+      3) S-1010 histórico compatível: mesmo codRubr em outra vigência/tabela e mesma incidência CP conhecida.
+      4) S-1010 histórico divergente: mesmo codRubr, mas com incidências diferentes entre versões.
+      5) Sem S-1010.
     """
-    candidatos: List[RubricaInfo] = []
-    if ide_tab_rubr:
-        candidatos.extend(rubricas_map.get((cod_rubr, ide_tab_rubr), []))
-    candidatos.extend(rubricas_map.get((cod_rubr, ""), []))
+    cod = _normalizar_chave(cod_rubr)
+    tab = _normalizar_chave(ide_tab_rubr)
 
-    # Remove duplicatas por identidade de conteúdo, mantendo ordem.
-    unicos: Dict[Tuple[str, str, str, str, str, str], RubricaInfo] = {}
-    for r in candidatos:
-        unicos[(r.cod_rubr, r.ide_tab_rubr, r.ini_valid, r.fim_valid, r.cod_inc_cp, r.dsc_rubr)] = r
-    candidatos = _ordenar_rubricas_por_vigencia(unicos.values())
+    candidatos_exatos = _deduplicar_rubricas(rubricas_map.get((cod, tab), [])) if tab else []
+    candidatos_codigo = _deduplicar_rubricas(rubricas_map.get((cod, ""), []))
 
-    for rubrica in candidatos:
+    for rubrica in candidatos_exatos:
         if _rubrica_valida_na_competencia(rubrica, competencia):
-            return rubrica
+            return RubricaSelecionada(
+                rubrica=rubrica,
+                criterio="codRubr+ideTabRubr+validade",
+                origem_validacao="S-1010 válido",
+                nivel_confianca="Alto",
+                status_auditoria="S1010_VALIDO",
+                observacao_validacao="Rubrica localizada na tabela S-1010 com tabela e vigência compatíveis com a competência do movimento.",
+                usar_incidencia=True,
+            )
 
-    # Se não houver uma vigência compatível, retorna a mais recente como fallback para não perder descrição.
-    return candidatos[0] if candidatos else None
+    for rubrica in candidatos_codigo:
+        if _rubrica_valida_na_competencia(rubrica, competencia):
+            return RubricaSelecionada(
+                rubrica=rubrica,
+                criterio="codRubr+validade",
+                origem_validacao="S-1010 válido por código",
+                nivel_confianca="Médio",
+                status_auditoria="S1010_VALIDO_POR_CODIGO",
+                observacao_validacao="Rubrica localizada por código e vigência, mas com ideTabRubr diferente/vazio. Conferir tabela de rubricas.",
+                usar_incidencia=True,
+            )
+
+    # Quando não há vigência compatível, avalia se as versões conhecidas do mesmo código
+    # têm a mesma incidência. Isso reduz falso Sem S-1010 sem mascarar a origem da validação.
+    if candidatos_codigo:
+        rubrica_ref = candidatos_exatos[0] if candidatos_exatos else candidatos_codigo[0]
+        if _historico_compativel(candidatos_codigo):
+            criterio = "codRubr+ideTabRubr_historico_compativel" if candidatos_exatos else "codRubr_historico_compativel"
+            return RubricaSelecionada(
+                rubrica=rubrica_ref,
+                criterio=criterio,
+                origem_validacao="S-1010 histórico compatível",
+                nivel_confianca="Médio",
+                status_auditoria="S1010_HISTORICO_COMPATIVEL",
+                observacao_validacao="Não havia vigência compatível, mas todas as versões conhecidas do mesmo codRubr possuem a mesma incidência CP. Usado como referência auditável.",
+                usar_incidencia=True,
+            )
+        return RubricaSelecionada(
+            rubrica=rubrica_ref,
+            criterio="codRubr_historico_divergente",
+            origem_validacao="S-1010 histórico divergente",
+            nivel_confianca="Revisar",
+            status_auditoria="S1010_HISTORICO_DIVERGENTE",
+            observacao_validacao="Existe S-1010 para o mesmo codRubr, mas as versões conhecidas possuem incidências diferentes ou incompletas. Não foi assumida incidência CP.",
+            usar_incidencia=False,
+        )
+
+    return RubricaSelecionada(
+        rubrica=None,
+        criterio="sem_correspondencia",
+        origem_validacao="Sem S-1010",
+        nivel_confianca="Baixo",
+        status_auditoria="SEM_S1010",
+        observacao_validacao="Código de rubrica não localizado na tabela S-1010 carregada.",
+        usar_incidencia=False,
+    )
 
 
 def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[RubricaInfo]], arquivo: str) -> List[RubricaPagamento]:
@@ -353,14 +445,16 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
                         ide_tab_rubr = first_text_by_localname(item, "ideTabRubr") or ""
                         vr_rubr = safe_float(first_text_by_localname(item, "vrRubr"))
 
-                        rubr = selecionar_rubrica_vigente(rubricas_map, cod_rubr, ide_tab_rubr, competencia_movimento)
+                        selecao = selecionar_rubrica_vigente(rubricas_map, cod_rubr, ide_tab_rubr, competencia_movimento)
+                        rubr = selecao.rubrica
                         nat_rubr = rubr.nat_rubr if rubr else ""
-                        cod_inc_cp = rubr.cod_inc_cp if rubr else ""
+                        cod_inc_cp = (rubr.cod_inc_cp if (rubr and selecao.usar_incidencia) else "")
                         dsc_rubr = rubr.dsc_rubr if rubr else ""
                         tp_rubr = rubr.tp_rubr if rubr else ""
                         ini_valid = rubr.ini_valid if rubr else ""
                         fim_valid = rubr.fim_valid if rubr else ""
                         origem_bloco_s1010 = rubr.origem_bloco if rubr else ""
+                        criterio_cruzamento_s1010 = selecao.criterio
 
                         if cod_rubr:
                             saida.append(
@@ -383,6 +477,11 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
                                     ini_valid=ini_valid,
                                     fim_valid=fim_valid,
                                     origem_bloco_s1010=origem_bloco_s1010,
+                                    criterio_cruzamento_s1010=criterio_cruzamento_s1010,
+                                    origem_validacao=selecao.origem_validacao,
+                                    nivel_confianca=selecao.nivel_confianca,
+                                    status_auditoria=selecao.status_auditoria,
+                                    observacao_validacao=selecao.observacao_validacao,
                                     nr_recibo_evento=nr_recibo_evento,
                                 )
                             )

@@ -13,16 +13,32 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 7.0: interface reorganizada, módulos separados e seleção de rubricas mais estável."
+    "Versão 7.3: módulo escolhido antes do upload e motor S-1010 hierárquico/auditável."
 )
 
+if "modulo_ativo" not in st.session_state:
+    st.session_state["modulo_ativo"] = "Relatório de Incidência CP"
+
 with st.sidebar:
-    st.header("Entrada")
-    modo_entrada = st.radio(
-        "Modo de entrada",
-        ["ZIP(s) do eSocial", "Excel consolidado / levantamento"],
-        help="Use Excel consolidado quando os XMLs forem grandes demais e você já tiver uma base exportada com 02_rubricas_cp e 03_movimentos_cp.",
+    st.header("Módulo de funcionamento")
+    modulo_ativo = st.radio(
+        "Escolha o que deseja fazer",
+        ["Relatório de Incidência CP", "Levantamento de Verbas"],
+        horizontal=False,
+        key="modulo_ativo",
     )
+
+    st.markdown("---")
+    st.header("Entrada")
+    if modulo_ativo == "Relatório de Incidência CP":
+        modo_entrada = "ZIP(s) do eSocial"
+        st.caption("O relatório de incidência usa XML/ZIP do eSocial como origem.")
+    else:
+        modo_entrada = st.radio(
+            "Modo de entrada",
+            ["ZIP(s) do eSocial", "Excel consolidado / levantamento"],
+            help="Use Excel consolidado quando os XMLs forem grandes demais e você já tiver uma base exportada com 02_rubricas_cp e 03_movimentos_cp.",
+        )
 
     arquivos_zip = []
     arquivo_excel = None
@@ -233,16 +249,8 @@ with st.spinner("Montando relatório de composição da incidência CP..."):
             df_bases_contribuicao=df_bases_contrib,
         )
 
-if "modulo_ativo" not in st.session_state:
-    st.session_state["modulo_ativo"] = "Relatório de Incidência CP"
-
 st.markdown("---")
-modulo_ativo = st.radio(
-    "Módulo do app",
-    ["Relatório de Incidência CP", "Levantamento de Verbas"],
-    horizontal=True,
-    key="modulo_ativo",
-)
+st.caption(f"Módulo ativo: {modulo_ativo}")
 
 df_levantamento_export = pd.DataFrame()
 
@@ -604,7 +612,7 @@ if modulo_ativo == "Levantamento de Verbas":
             st.download_button(
                 label="Baixar levantamento de verbas",
                 data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v7_0.xlsx",
+                file_name="levantamento_verbas_cp_v7_3.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_levantamento_verbas",
@@ -662,7 +670,7 @@ if modulo_ativo == "Relatório de Incidência CP":
     st.download_button(
         label="Baixar relatório de incidência CP",
         data=excel_bytes,
-        file_name="relatorio_incidencia_cp_esocial_v7_0.xlsx",
+        file_name="relatorio_incidencia_cp_esocial_v7_3.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
