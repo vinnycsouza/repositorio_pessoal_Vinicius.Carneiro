@@ -1,4 +1,5 @@
 import io
+import re
 import zipfile
 
 import pandas as pd
@@ -13,7 +14,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 7.3: módulo escolhido antes do upload e motor S-1010 hierárquico/auditável."
+    "Versão 7.4: módulo escolhido antes do upload, motor S-1010 hierárquico e busca múltipla no levantamento."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -106,6 +107,37 @@ def carregar_excel_consolidado(excel_bytes: bytes):
         "abas": pd.DataFrame({"aba_excel": xls.sheet_names}),
     }
 
+
+
+
+def _extrair_termos_busca(texto: str) -> list[str]:
+    """Separa termos colados do Excel por ;, vírgula, quebra de linha ou tabulação."""
+    if not texto:
+        return []
+    termos = [t.strip() for t in re.split(r"[;,.\n\r\t]+", str(texto)) if t.strip()]
+    # remove duplicados preservando a ordem
+    vistos = set()
+    unicos = []
+    for termo in termos:
+        chave = termo.lower()
+        if chave not in vistos:
+            vistos.add(chave)
+            unicos.append(termo)
+    return unicos
+
+
+def _filtrar_rubricas_por_multibusca(df: pd.DataFrame, texto_busca: str, colunas: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """Filtra rubricas por múltiplos termos usando lógica OU entre os termos e colunas."""
+    termos = _extrair_termos_busca(texto_busca)
+    if not termos or df.empty:
+        return df.copy(), termos
+
+    padrao = "|".join(re.escape(t.lower()) for t in termos)
+    mascara = pd.Series(False, index=df.index)
+    for coluna in colunas:
+        if coluna in df.columns:
+            mascara = mascara | df[coluna].fillna("").astype(str).str.lower().str.contains(padrao, regex=True, na=False)
+    return df[mascara].copy(), termos
 
 MAX_LINHAS_DADOS_EXCEL = 1_048_575
 
@@ -402,22 +434,25 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.session_state["lev_editor_versao"] = 0
 
             st.markdown("### Seleção de rubricas")
-            busca_lev = st.text_input(
-                "Buscar rubrica por código ou descrição",
+            busca_lev = st.text_area(
+                "Buscar rubricas por código ou descrição",
                 value="",
                 key="lev_busca_rubrica",
+                height=90,
+                help="Aceita múltiplos termos separados por ponto e vírgula, vírgula, tabulação ou quebra de linha. Você pode colar uma lista direto do Excel.",
+                placeholder="Ex.: 0324P; BONUS; MATERNIDADE\nou cole uma coluna do Excel aqui",
             )
 
-            df_opts_busca = df_opts.copy()
-            if busca_lev.strip():
-                termo = busca_lev.strip().lower()
-                mascara_busca = (
-                    df_opts_busca["cod_rubr"].fillna("").astype(str).str.lower().str.contains(termo, na=False)
-                    | df_opts_busca["dsc_rubr"].fillna("").astype(str).str.lower().str.contains(termo, na=False)
-                    | df_opts_busca["cod_inc_cp"].fillna("").astype(str).str.lower().str.contains(termo, na=False)
-                    | df_opts_busca["carater_verba"].fillna("").astype(str).str.lower().str.contains(termo, na=False)
+            df_opts_busca, termos_busca = _filtrar_rubricas_por_multibusca(
+                df_opts,
+                busca_lev,
+                ["cod_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"],
+            )
+            if termos_busca:
+                st.caption(
+                    f"Busca múltipla ativa: {len(termos_busca)} termo(s). "
+                    f"Rubricas encontradas: {len(df_opts_busca):,}.".replace(",", ".")
                 )
-                df_opts_busca = df_opts_busca[mascara_busca].copy()
 
             b1, b2, b3, b4 = st.columns([1.4, 1.4, 0.8, 1.4])
             chaves_resultado = set(df_opts_busca["chave_rubrica"].astype(str).tolist())
