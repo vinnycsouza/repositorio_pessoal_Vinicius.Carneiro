@@ -1,6 +1,7 @@
 import io
 import re
 import zipfile
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -14,7 +15,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 7.5: levantamento otimizado, gerando Excel somente após seleção das rubricas."
+    "Versão 7.6: melhoria visual da geração do levantamento, com status do arquivo e última geração."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -650,37 +651,64 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.caption("Para melhor performance, o Excel será gerado sem a aba detalhada 03_movimentos. Use os resumos por rubrica e competência para o levantamento.")
 
             if st.button("Preparar Excel do levantamento", use_container_width=True, key="btn_preparar_excel_levantamento"):
-                buffer_levantamento = io.BytesIO()
-                with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
-                    _to_excel_dividido_local(writer, df_empresa, "00_empresa")
-                    _to_excel_dividido_local(writer, df_parametros_lev, "01_resumo")
-                    _to_excel_dividido_local(writer, df_resumo_lev, "02_resumo_rubricas")
-                    if incluir_movimentos_detalhados:
-                        _to_excel_dividido_local(writer, df_levantamento, "03_movimentos")
-                    else:
-                        aviso_movimentos = pd.DataFrame({
-                            "Informação": [
-                                "A aba detalhada 03_movimentos não foi incluída nesta exportação.",
-                                "Para incluir os movimentos detalhados, marque a opção 'Incluir aba 03_movimentos detalhada no Excel' antes de preparar o arquivo.",
-                                "Os valores do levantamento estão preservados nas abas de resumo.",
-                            ],
-                            "Valor": [
-                                f"Movimentos detalhados disponíveis no recorte: {len(df_levantamento):,}".replace(",", "."),
-                                "Exportação otimizada para arquivos grandes",
-                                f"Total levantado: R$ {decimal_br(total_lev)}",
-                            ],
-                        })
-                        _to_excel_dividido_local(writer, aviso_movimentos, "03_movimentos")
-                    _to_excel_dividido_local(writer, df_resumo_competencia_lev, "04_resumo_competencia")
-                    _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
-                st.session_state["levantamento_excel_bytes"] = buffer_levantamento.getvalue()
-                st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v7_5.xlsx"
+                st.session_state["levantamento_status_geracao"] = "gerando"
+                with st.spinner("Gerando Excel do levantamento. Aguarde até aparecer a mensagem de conclusão antes de baixar..."):
+                    buffer_levantamento = io.BytesIO()
+                    with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
+                        _to_excel_dividido_local(writer, df_empresa, "00_empresa")
+                        _to_excel_dividido_local(writer, df_parametros_lev, "01_resumo")
+                        _to_excel_dividido_local(writer, df_resumo_lev, "02_resumo_rubricas")
+                        if incluir_movimentos_detalhados:
+                            _to_excel_dividido_local(writer, df_levantamento, "03_movimentos")
+                        else:
+                            aviso_movimentos = pd.DataFrame({
+                                "Informação": [
+                                    "A aba detalhada 03_movimentos não foi incluída nesta exportação.",
+                                    "Para incluir os movimentos detalhados, marque a opção 'Incluir aba 03_movimentos detalhada no Excel' antes de preparar o arquivo.",
+                                    "Os valores do levantamento estão preservados nas abas de resumo.",
+                                ],
+                                "Valor": [
+                                    f"Movimentos detalhados disponíveis no recorte: {len(df_levantamento):,}".replace(",", "."),
+                                    "Exportação otimizada para arquivos grandes",
+                                    f"Total levantado: R$ {decimal_br(total_lev)}",
+                                ],
+                            })
+                            _to_excel_dividido_local(writer, aviso_movimentos, "03_movimentos")
+                        _to_excel_dividido_local(writer, df_resumo_competencia_lev, "04_resumo_competencia")
+                        _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
+                    agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                    st.session_state["levantamento_excel_bytes"] = buffer_levantamento.getvalue()
+                    st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v7_6.xlsx"
+                    st.session_state["levantamento_status_geracao"] = "pronto"
+                    st.session_state["levantamento_ultima_geracao"] = {
+                        "data_hora": agora,
+                        "qtd_rubricas": int(qtd_rubricas_lev),
+                        "qtd_movimentos": int(len(df_levantamento)),
+                        "qtd_cpfs": int(qtd_cpfs_lev),
+                        "total_levantado": float(total_lev),
+                        "cpp_estimado": float(cpp_lev),
+                        "incluiu_movimentos": "Sim" if incluir_movimentos_detalhados else "Não",
+                    }
+                st.success("Levantamento atualizado. O botão de download abaixo corresponde à última geração concluída.")
+
+            if st.session_state.get("levantamento_status_geracao") == "gerando":
+                st.warning("Excel do levantamento em geração. Aguarde a conclusão antes de baixar.")
 
             if st.session_state.get("levantamento_excel_bytes"):
+                meta = st.session_state.get("levantamento_ultima_geracao", {})
+                if meta:
+                    st.info(
+                        "Último levantamento gerado: "
+                        f"{meta.get('data_hora', '')} | "
+                        f"Rubricas: {meta.get('qtd_rubricas', 0)} | "
+                        f"Movimentos: {meta.get('qtd_movimentos', 0):,} | "
+                        f"CPFs: {meta.get('qtd_cpfs', 0):,} | "
+                        f"03_movimentos detalhado: {meta.get('incluiu_movimentos', 'Não')}".replace(",", ".")
+                    )
                 st.download_button(
                     label="Baixar levantamento de verbas",
                     data=st.session_state["levantamento_excel_bytes"],
-                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v7_5.xlsx"),
+                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v7_6.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     key="download_levantamento_verbas",
@@ -738,7 +766,7 @@ if modulo_ativo == "Relatório de Incidência CP":
     st.download_button(
         label="Baixar relatório de incidência CP",
         data=excel_bytes,
-        file_name="relatorio_incidencia_cp_esocial_v7_3.xlsx",
+        file_name="relatorio_incidencia_cp_esocial_v7_6.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
