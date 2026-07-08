@@ -14,7 +14,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 7.4: módulo escolhido antes do upload, motor S-1010 hierárquico e busca múltipla no levantamento."
+    "Versão 7.5: levantamento otimizado, gerando Excel somente após seleção das rubricas."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -525,16 +525,21 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.rerun()
 
             chaves_selecionadas = set(st.session_state["lev_chaves_rubricas_selecionadas"])
-            st.caption(f"Rubricas selecionadas: {len(chaves_selecionadas)}. Se nenhuma rubrica for selecionada, o cálculo usa todas as rubricas filtradas.")
+            st.caption(f"Rubricas selecionadas: {len(chaves_selecionadas)}.")
 
+            if not chaves_selecionadas:
+                st.info("Selecione uma ou mais rubricas e clique em Aplicar seleção. O levantamento e o Excel só serão montados depois disso, para evitar processamento desnecessário em arquivos grandes.")
+                df_levantamento_export = pd.DataFrame()
+                st.stop()
+
+            # A partir deste ponto o app monta somente o recorte selecionado, e não todas as rubricas filtradas.
             df_levantamento = df_base_lev.copy()
             df_levantamento["chave_rubrica"] = (
                 df_levantamento["cod_rubr"].fillna("").astype(str)
                 + "||"
                 + df_levantamento["ide_tab_rubr"].fillna("").astype(str)
             )
-            if chaves_selecionadas:
-                df_levantamento = df_levantamento[df_levantamento["chave_rubrica"].astype(str).isin(chaves_selecionadas)].copy()
+            df_levantamento = df_levantamento[df_levantamento["chave_rubrica"].astype(str).isin(chaves_selecionadas)].copy()
             df_levantamento = df_levantamento.drop(columns=["chave_rubrica"], errors="ignore")
 
             total_lev = float(pd.to_numeric(df_levantamento["vr_rubr"], errors="coerce").fillna(0).sum())
@@ -630,28 +635,56 @@ if modulo_ativo == "Levantamento de Verbas":
             })
 
 
-            if len(df_levantamento) > MAX_LINHAS_DADOS_EXCEL:
+            st.markdown("### Exportação do levantamento")
+            incluir_movimentos_detalhados = st.checkbox(
+                "Incluir aba 03_movimentos detalhada no Excel",
+                value=False,
+                help="Desmarcado por padrão para arquivos grandes. Os resumos continuam sendo gerados normalmente. Marque apenas quando precisar auditar movimento a movimento.",
+                key="lev_incluir_movimentos_detalhados",
+            )
+            if incluir_movimentos_detalhados and len(df_levantamento) > MAX_LINHAS_DADOS_EXCEL:
                 st.warning(
                     f"A aba 03_movimentos do levantamento possui {len(df_levantamento):,} linhas e será dividida automaticamente em partes no Excel.".replace(",", ".")
                 )
+            elif not incluir_movimentos_detalhados:
+                st.caption("Para melhor performance, o Excel será gerado sem a aba detalhada 03_movimentos. Use os resumos por rubrica e competência para o levantamento.")
 
-            buffer_levantamento = io.BytesIO()
-            with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
-                _to_excel_dividido_local(writer, df_empresa, "00_empresa")
-                _to_excel_dividido_local(writer, df_parametros_lev, "01_resumo")
-                _to_excel_dividido_local(writer, df_resumo_lev, "02_resumo_rubricas")
-                _to_excel_dividido_local(writer, df_levantamento, "03_movimentos")
-                _to_excel_dividido_local(writer, df_resumo_competencia_lev, "04_resumo_competencia")
-                _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
+            if st.button("Preparar Excel do levantamento", use_container_width=True, key="btn_preparar_excel_levantamento"):
+                buffer_levantamento = io.BytesIO()
+                with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
+                    _to_excel_dividido_local(writer, df_empresa, "00_empresa")
+                    _to_excel_dividido_local(writer, df_parametros_lev, "01_resumo")
+                    _to_excel_dividido_local(writer, df_resumo_lev, "02_resumo_rubricas")
+                    if incluir_movimentos_detalhados:
+                        _to_excel_dividido_local(writer, df_levantamento, "03_movimentos")
+                    else:
+                        aviso_movimentos = pd.DataFrame({
+                            "Informação": [
+                                "A aba detalhada 03_movimentos não foi incluída nesta exportação.",
+                                "Para incluir os movimentos detalhados, marque a opção 'Incluir aba 03_movimentos detalhada no Excel' antes de preparar o arquivo.",
+                                "Os valores do levantamento estão preservados nas abas de resumo.",
+                            ],
+                            "Valor": [
+                                f"Movimentos detalhados disponíveis no recorte: {len(df_levantamento):,}".replace(",", "."),
+                                "Exportação otimizada para arquivos grandes",
+                                f"Total levantado: R$ {decimal_br(total_lev)}",
+                            ],
+                        })
+                        _to_excel_dividido_local(writer, aviso_movimentos, "03_movimentos")
+                    _to_excel_dividido_local(writer, df_resumo_competencia_lev, "04_resumo_competencia")
+                    _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
+                st.session_state["levantamento_excel_bytes"] = buffer_levantamento.getvalue()
+                st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v7_5.xlsx"
 
-            st.download_button(
-                label="Baixar levantamento de verbas",
-                data=buffer_levantamento.getvalue(),
-                file_name="levantamento_verbas_cp_v7_3.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="download_levantamento_verbas",
-            )
+            if st.session_state.get("levantamento_excel_bytes"):
+                st.download_button(
+                    label="Baixar levantamento de verbas",
+                    data=st.session_state["levantamento_excel_bytes"],
+                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v7_5.xlsx"),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="download_levantamento_verbas",
+                )
 
             df_levantamento_export = df_resumo_lev.copy()
 
