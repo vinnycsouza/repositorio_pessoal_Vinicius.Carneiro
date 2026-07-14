@@ -2,6 +2,7 @@ import io
 import sys
 import time
 import tempfile
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -212,18 +213,39 @@ if df_rubricas is None or df_rubricas.empty:
     st.warning("K150 vazio ou ausente. Você pode continuar, mas sem descrição de rubricas.")
     df_rubricas = pd.DataFrame(columns=["COD_RUBRICA", "DESC_RUBRICA"])
 
-busca = st.text_input("Buscar rubrica (código ou descrição)", value="", key="busca_rubricas")
+busca = st.text_area(
+    "Buscar rubrica (código, descrição ou cole uma lista do Excel)",
+    value="",
+    height=120,
+    key="busca_rubricas",
+)
+
+st.caption("Aceita busca normal ou listas copiadas do Excel (uma linha por código, TAB, vírgula ou ponto e vírgula).")
 
 df_view = df_rubricas.copy()
 df_view["COD_RUBRICA"] = df_view["COD_RUBRICA"].astype(str)
 df_view["DESC_RUBRICA"] = df_view["DESC_RUBRICA"].astype(str)
 
 if busca.strip():
-    b = busca.strip().lower()
-    df_view = df_view[
-        df_view["COD_RUBRICA"].str.lower().str.contains(b, na=False)
-        | df_view["DESC_RUBRICA"].str.lower().str.contains(b, na=False)
-    ].copy()
+
+    texto = busca.strip()
+
+    itens = [x.strip() for x in re.split(r"[\n\r\t,;]+", texto) if x.strip()]
+    itens = list(dict.fromkeys(itens))
+
+    if len(itens) == 1:
+        termo = itens[0].lower()
+        df_view = df_view[
+            df_view["COD_RUBRICA"].str.lower().str.contains(termo, na=False)
+            | df_view["DESC_RUBRICA"].str.lower().str.contains(termo, na=False)
+        ].copy()
+    else:
+        lista_lower = [x.lower() for x in itens]
+        filtro = (
+            df_view["COD_RUBRICA"].str.lower().isin(lista_lower)
+            | df_view["DESC_RUBRICA"].str.lower().isin(lista_lower)
+        )
+        df_view = df_view[filtro].copy()
 
 if df_view.empty:
     st.info("Nenhuma rubrica encontrada com esse filtro.")
