@@ -5,17 +5,21 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 from selenium import webdriver
 from selenium.common.exceptions import (
+    ElementClickInterceptedException,
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
     WebDriverException,
 )
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -24,21 +28,18 @@ from selenium.webdriver.support.ui import WebDriverWait
 # CONFIGURAÇÕES
 # ============================================================
 
-URL_BASE = "https://pje.tst.jus.br/consultaprocessual/detalhe-processo"
-
+URL_CONSULTA = "https://pje.tst.jus.br/consultaprocessual/"
 ARQUIVO_SAIDA = Path("status_processos_tst.xlsx")
-PASTA_DIAGNOSTICO = Path("erros_consulta_tst")
+PASTA_DIAGNOSTICO = Path("diagnosticos_tst")
 
-TEMPO_ESPERA = 25
+TEMPO_ESPERA = 30
 INTERVALO_ENTRE_PROCESSOS = 2
-
-# False: mostra o Chrome durante os testes.
-# True: executa sem mostrar a janela.
 EXECUTAR_EM_SEGUNDO_PLANO = False
+SALVAR_DIAGNOSTICO_DE_SUCESSO = False
 
 
 # ============================================================
-# LISTA DE PROCESSOS
+# PROCESSOS
 # ============================================================
 
 processos = [
@@ -119,30 +120,18 @@ processos = [
 ]
 
 
-# ============================================================
-# TERMOS DE ANÁLISE
-# ============================================================
-
-TERMOS_TRANSITO_CONFIRMADO = [
+TERMOS_TRANSITO = [
     "trânsito em julgado",
-    "transito em julgado",
-    "transitada em julgado",
-    "transitado em julgado",
-    "certificado o trânsito em julgado",
-    "certificado o transito em julgado",
     "certidão de trânsito em julgado",
-    "certidao de transito em julgado",
-    "certificado trânsito em julgado",
-    "certificado transito em julgado",
+    "transitado em julgado",
 ]
 
-TERMOS_BAIXA = [
-    "baixa definitiva",
-    "baixado definitivamente",
-    "arquivado definitivamente",
-    "arquivamento definitivo",
-    "remetidos os autos ao tribunal de origem",
-    "remessa dos autos ao tribunal de origem",
+TERMOS_CAPTCHA = [
+    "captcha",
+    "não sou um robô",
+    "nao sou um robo",
+    "verificação de segurança",
+    "verificacao de seguranca",
 ]
 
 TERMOS_NAO_ENCONTRADO = [
@@ -154,28 +143,15 @@ TERMOS_NAO_ENCONTRADO = [
     "nao foram encontrados processos",
 ]
 
-TERMOS_CAPTCHA = [
-    "captcha",
-    "não sou um robô",
-    "nao sou um robo",
-    "verificação de segurança",
-    "verificacao de seguranca",
-    "digite os caracteres",
-    "digite os números do áudio",
-    "digite os numeros do audio",
-]
-
 
 # ============================================================
-# FUNÇÕES GERAIS
+# UTILIDADES
 # ============================================================
 
 def criar_driver() -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
-
     if EXECUTAR_EM_SEGUNDO_PLANO:
         options.add_argument("--headless=new")
-
     options.add_argument("--start-maximized")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-notifications")
@@ -183,21 +159,14 @@ def criar_driver() -> webdriver.Chrome:
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-
-    options.add_experimental_option(
-        "excludeSwitches",
-        ["enable-logging"],
-    )
-
-    # Selenium Manager administra o ChromeDriver automaticamente.
+    options.add_experimental_option("excludeSwitches", ["enable-logging"])
     return webdriver.Chrome(options=options)
 
 
 def normalizar_texto(texto: str) -> str:
-    texto = texto or ""
-    texto = texto.replace("\xa0", " ")
+    texto = (texto or "").replace("\xa0", " ").lower()
     texto = re.sub(r"\s+", " ", texto)
-    return texto.strip().lower()
+    return texto.strip()
 
 
 def somente_digitos(valor: str) -> str:
@@ -205,589 +174,449 @@ def somente_digitos(valor: str) -> str:
 
 
 def validar_numero_processo(numero: str) -> bool:
-    padrao = r"^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$"
-    return bool(re.fullmatch(padrao, numero.strip()))
+    return bool(re.fullmatch(r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}", numero.strip()))
 
 
-def aguardar_pagina(driver: webdriver.Chrome) -> None:
+def aguardar_documento(driver: webdriver.Chrome) -> None:
     WebDriverWait(driver, TEMPO_ESPERA).until(
-        lambda navegador: navegador.execute_script(
-            "return document.readyState"
-        ) == "complete"
+        lambda d: d.execute_script("return document.readyState") == "complete"
     )
 
 
-def obter_texto_pagina(driver: webdriver.Chrome) -> str:
+def texto_completo(driver: webdriver.Chrome) -> str:
     corpo = WebDriverWait(driver, TEMPO_ESPERA).until(
         EC.presence_of_element_located((By.TAG_NAME, "body"))
     )
-
-    return corpo.text
-
-
-def contem_algum_termo(texto: str, termos: list[str]) -> bool:
-    texto_normalizado = normalizar_texto(texto)
-
-    return any(
-        normalizar_texto(termo) in texto_normalizado
-        for termo in termos
-    )
+    visivel = corpo.text or ""
+    dom = driver.execute_script("return document.body ? document.body.innerText : '';") or ""
+    return f"{visivel}\n{dom}"
 
 
-def detectar_captcha(texto: str) -> bool:
-    return contem_algum_termo(texto, TERMOS_CAPTCHA)
+def contem_termo(texto: str, termos: Iterable[str]) -> bool:
+    normalizado = normalizar_texto(texto)
+    return any(normalizar_texto(t) in normalizado for t in termos)
 
 
-def detectar_nao_encontrado(texto: str) -> bool:
-    return contem_algum_termo(texto, TERMOS_NAO_ENCONTRADO)
+def clicar(driver: webdriver.Chrome, elemento: WebElement) -> None:
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", elemento)
+    time.sleep(0.3)
+    try:
+        elemento.click()
+    except (ElementClickInterceptedException, WebDriverException):
+        driver.execute_script("arguments[0].click();", elemento)
 
 
-# ============================================================
-# IDENTIFICAÇÃO DO RESULTADO DO TST
-# ============================================================
-
-def url_consulta(numero_processo: str) -> str:
-    return f"{URL_BASE}/{numero_processo}"
-
-
-def url_tst_direta(numero_processo: str) -> str:
-    """
-    O sufixo /3 identifica a terceira instância quando a página
-    separa os resultados por grau.
-    """
-    return f"{URL_BASE}/{numero_processo}/3"
-
-
-def pagina_eh_detalhe_tst(
-    driver: webdriver.Chrome,
-    texto: str,
-) -> bool:
-    url_atual = driver.current_url.rstrip("/").lower()
-    texto_normalizado = normalizar_texto(texto)
-
-    if url_atual.endswith("/3"):
-        return True
-
-    indicadores_tst = [
-        "tribunal superior do trabalho",
-        "tst",
-        "órgão julgador",
-        "orgao julgador",
-        "ministro relator",
-        "ministra relatora",
-    ]
-
-    quantidade = sum(
-        indicador in texto_normalizado
-        for indicador in indicadores_tst
-    )
-
-    return quantidade >= 2
-
-
-def localizar_link_tst(
-    driver: webdriver.Chrome,
-    numero_processo: str,
-):
-    """
-    Localiza somente o resultado de terceira instância.
-
-    Prioridades:
-    1. Link cujo endereço termine em /3.
-    2. Elemento cujo texto contenha TST.
-    3. Bloco de resultado com TST e o número do processo.
-    """
-    numero_digitos = somente_digitos(numero_processo)
-
-    # Prioridade 1: endereço explicitamente terminado em /3.
-    links = driver.find_elements(By.TAG_NAME, "a")
-
-    for link in links:
+def primeiro_visivel(driver: webdriver.Chrome, seletores: list[tuple[str, str]], timeout: int = 6) -> WebElement | None:
+    for tipo, seletor in seletores:
         try:
-            href = (link.get_attribute("href") or "").rstrip("/")
-
-            if not href:
-                continue
-
-            if href.endswith("/3") and numero_digitos in somente_digitos(href):
-                if link.is_displayed():
-                    return link
-
-        except StaleElementReferenceException:
-            continue
-
-    # Prioridade 2: link ou botão identificado como TST.
-    candidatos = driver.find_elements(
-        By.XPATH,
-        (
-            "//a[contains("
-            "translate(normalize-space(.), "
-            "'abcdefghijklmnopqrstuvwxyz', "
-            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'TST')]"
-            " | "
-            "//button[contains("
-            "translate(normalize-space(.), "
-            "'abcdefghijklmnopqrstuvwxyz', "
-            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'TST')]"
-            " | "
-            "//*[@role='button' and contains("
-            "translate(normalize-space(.), "
-            "'abcdefghijklmnopqrstuvwxyz', "
-            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'TST')]"
-        ),
-    )
-
-    for candidato in candidatos:
-        try:
-            texto = candidato.text.strip()
-            href = candidato.get_attribute("href") or ""
-
-            numero_no_elemento = (
-                numero_digitos in somente_digitos(texto)
-                or numero_digitos in somente_digitos(href)
+            elemento = WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((tipo, seletor))
             )
-
-            if candidato.is_displayed() and (
-                numero_no_elemento or "TST" in texto.upper()
-            ):
-                return candidato
-
-        except StaleElementReferenceException:
+            if elemento.is_displayed():
+                return elemento
+        except (TimeoutException, NoSuchElementException, StaleElementReferenceException):
             continue
-
-    # Prioridade 3: procura um bloco que represente o resultado TST.
-    blocos = driver.find_elements(
-        By.XPATH,
-        "//*[contains("
-        "translate(normalize-space(.), "
-        "'abcdefghijklmnopqrstuvwxyz', "
-        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), 'TST')]",
-    )
-
-    for bloco in blocos:
-        try:
-            texto_bloco = bloco.text.strip()
-
-            if not texto_bloco:
-                continue
-
-            if numero_digitos not in somente_digitos(texto_bloco):
-                continue
-
-            clicaveis = bloco.find_elements(
-                By.XPATH,
-                ".//a | .//button | .//*[@role='button']",
-            )
-
-            for clicavel in clicaveis:
-                if clicavel.is_displayed():
-                    return clicavel
-
-        except (
-            StaleElementReferenceException,
-            NoSuchElementException,
-        ):
-            continue
-
     return None
 
 
-def abrir_resultado_tst(
-    driver: webdriver.Chrome,
-    numero_processo: str,
-) -> tuple[bool, str]:
-    """
-    Abre exclusivamente a terceira instância.
-
-    Retorna:
-        True, mensagem  -> TST aberto
-        False, mensagem -> processo sem resultado no TST
-    """
-    texto_atual = obter_texto_pagina(driver)
-
-    if pagina_eh_detalhe_tst(driver, texto_atual):
-        return True, "Detalhes do TST acessados diretamente"
-
-    link_tst = localizar_link_tst(driver, numero_processo)
-
-    if link_tst is not None:
-        url_anterior = driver.current_url
-
-        driver.execute_script(
-            "arguments[0].scrollIntoView({block: 'center'});",
-            link_tst,
-        )
-
-        time.sleep(0.5)
-
-        try:
-            link_tst.click()
-        except WebDriverException:
-            driver.execute_script(
-                "arguments[0].click();",
-                link_tst,
-            )
-
-        try:
-            WebDriverWait(driver, TEMPO_ESPERA).until(
-                lambda navegador: (
-                    navegador.current_url != url_anterior
-                    or navegador.current_url.rstrip("/").endswith("/3")
-                )
-            )
-        except TimeoutException:
-            pass
-
-        time.sleep(1)
-        aguardar_pagina(driver)
-
-        texto_detalhe = obter_texto_pagina(driver)
-
-        if pagina_eh_detalhe_tst(driver, texto_detalhe):
-            return True, "Resultado TST selecionado"
-
-    # Última tentativa: acesso direto ao sufixo da terceira instância.
-    driver.get(url_tst_direta(numero_processo))
-    aguardar_pagina(driver)
-    time.sleep(1)
-
-    texto_direto = obter_texto_pagina(driver)
-
-    if detectar_nao_encontrado(texto_direto):
-        return False, "Não há processo localizado no TST"
-
-    if pagina_eh_detalhe_tst(driver, texto_direto):
-        return True, "Terceira instância acessada por URL direta"
-
-    return False, "O número foi localizado, mas não há resultado TST"
+def salvar_diagnostico(driver: webdriver.Chrome, numero: str, texto: str = "") -> None:
+    PASTA_DIAGNOSTICO.mkdir(parents=True, exist_ok=True)
+    nome = numero.replace(".", "_").replace("-", "_")
+    try:
+        driver.save_screenshot(str(PASTA_DIAGNOSTICO / f"{nome}.png"))
+    except WebDriverException:
+        pass
+    try:
+        (PASTA_DIAGNOSTICO / f"{nome}.html").write_text(driver.page_source, encoding="utf-8")
+        if texto:
+            (PASTA_DIAGNOSTICO / f"{nome}.txt").write_text(texto, encoding="utf-8")
+    except OSError:
+        pass
 
 
 # ============================================================
-# ANÁLISE DO PROCESSO
+# PESQUISA E SELEÇÃO DO RESULTADO TST
 # ============================================================
 
-def analisar_transito(texto: str) -> tuple[str, str]:
-    texto_normalizado = normalizar_texto(texto)
-
-    for termo in TERMOS_TRANSITO_CONFIRMADO:
-        if normalizar_texto(termo) in texto_normalizado:
-            return "Sim", termo
-
-    for termo in TERMOS_BAIXA:
-        if normalizar_texto(termo) in texto_normalizado:
-            return "Possível", termo
-
-    return "Não localizado", ""
-
-
-def extrair_trecho_relevante(
-    texto: str,
-    termos: list[str],
-    margem: int = 300,
-) -> str:
-    texto_limpo = re.sub(r"\s+", " ", texto or "").strip()
-    texto_normalizado = normalizar_texto(texto_limpo)
-
-    for termo in termos:
-        termo_normalizado = normalizar_texto(termo)
-        posicao = texto_normalizado.find(termo_normalizado)
-
-        if posicao == -1:
-            continue
-
-        inicio = max(0, posicao - margem)
-        fim = min(
-            len(texto_limpo),
-            posicao + len(termo) + margem,
-        )
-
-        return texto_limpo[inicio:fim]
-
-    return ""
-
-
-def extrair_movimentacoes_com_data(texto: str) -> list[str]:
-    """
-    Localiza linhas que aparentam ser movimentações processuais
-    acompanhadas de data.
-    """
-    linhas = [
-        re.sub(r"\s+", " ", linha).strip()
-        for linha in (texto or "").splitlines()
-        if linha.strip()
+def localizar_campo_pesquisa(driver: webdriver.Chrome) -> WebElement:
+    seletores = [
+        (By.ID, "numeroProcesso"),
+        (By.NAME, "numeroProcesso"),
+        (By.CSS_SELECTOR, "input[placeholder*='processo' i]"),
+        (By.CSS_SELECTOR, "input[aria-label*='processo' i]"),
+        (By.CSS_SELECTOR, "input[type='text']"),
     ]
+    campo = primeiro_visivel(driver, seletores, timeout=8)
+    if campo is None:
+        raise TimeoutException("Campo de número do processo não localizado.")
+    return campo
 
-    padrao_data = re.compile(
-        r"\b\d{2}/\d{2}/\d{4}\b"
-        r"|"
-        r"\b\d{2}/\d{2}/\d{2}\b"
+
+def enviar_pesquisa(driver: webdriver.Chrome, campo: WebElement) -> None:
+    botoes = [
+        (By.CSS_SELECTOR, "button[type='submit']"),
+        (By.XPATH, "//button[contains(translate(normalize-space(.),'PESQUISARCONSULTARBUSCAR','pesquisarconsultarbuscar'),'pesquisar')]"),
+        (By.XPATH, "//button[contains(translate(normalize-space(.),'PESQUISARCONSULTARBUSCAR','pesquisarconsultarbuscar'),'consultar')]"),
+        (By.XPATH, "//button[contains(translate(normalize-space(.),'PESQUISARCONSULTARBUSCAR','pesquisarconsultarbuscar'),'buscar')]"),
+    ]
+    botao = primeiro_visivel(driver, botoes, timeout=3)
+    if botao is not None:
+        clicar(driver, botao)
+    else:
+        campo.send_keys(Keys.ENTER)
+
+
+def pesquisar_numero(driver: webdriver.Chrome, numero: str) -> str:
+    driver.get(URL_CONSULTA)
+    aguardar_documento(driver)
+    campo = localizar_campo_pesquisa(driver)
+    campo.click()
+    campo.send_keys(Keys.CONTROL, "a")
+    campo.send_keys(Keys.BACKSPACE)
+    campo.send_keys(numero)
+
+    html_antes = driver.page_source
+    enviar_pesquisa(driver, campo)
+
+    try:
+        WebDriverWait(driver, TEMPO_ESPERA).until(
+            lambda d: d.page_source != html_antes
+            or contem_termo(texto_completo(d), TERMOS_NAO_ENCONTRADO)
+        )
+    except TimeoutException:
+        pass
+    time.sleep(2)
+    return texto_completo(driver)
+
+
+def score_candidato_tst(elemento: WebElement, numero: str) -> int:
+    try:
+        texto = normalizar_texto(elemento.text)
+        href = normalizar_texto(elemento.get_attribute("href") or "")
+        combinado = f"{texto} {href}"
+        score = 0
+        if somente_digitos(numero) in somente_digitos(combinado):
+            score += 5
+        if "tribunal superior do trabalho" in combinado:
+            score += 8
+        if re.search(r"\btst\b", combinado):
+            score += 6
+        if "3º grau" in combinado or "3o grau" in combinado or "terceiro grau" in combinado:
+            score += 5
+        if "/3" in href:
+            score += 3
+        if elemento.is_displayed():
+            score += 1
+        return score
+    except (StaleElementReferenceException, WebDriverException):
+        return -1
+
+
+def abrir_resultado_tst(driver: webdriver.Chrome, numero: str) -> bool:
+    # Coleta links, botões e cards clicáveis. O resultado escolhido precisa
+    # conter indicação explícita de TST/Tribunal Superior do Trabalho.
+    candidatos = driver.find_elements(
+        By.XPATH,
+        "//a | //button | //*[@role='button'] | //*[@role='link']"
     )
+    pontuados = [(score_candidato_tst(e, numero), e) for e in candidatos]
+    pontuados = [(s, e) for s, e in pontuados if s >= 7]
+    pontuados.sort(key=lambda item: item[0], reverse=True)
 
-    movimentacoes = []
+    for _, elemento in pontuados[:10]:
+        try:
+            url_antes = driver.current_url
+            html_antes = driver.page_source
+            clicar(driver, elemento)
+            time.sleep(1.5)
+            aguardar_documento(driver)
+            if validar_pagina_detalhe_tst(driver, numero):
+                return True
+            # Se abriu em nova aba, muda para ela.
+            if len(driver.window_handles) > 1:
+                driver.switch_to.window(driver.window_handles[-1])
+                aguardar_documento(driver)
+                if validar_pagina_detalhe_tst(driver, numero):
+                    return True
+            # Volta ao resultado para tentar outro candidato.
+            if driver.current_url != url_antes or driver.page_source != html_antes:
+                driver.back()
+                aguardar_documento(driver)
+                time.sleep(1)
+        except (StaleElementReferenceException, WebDriverException, TimeoutException):
+            continue
+    return False
 
-    for linha in linhas:
-        if padrao_data.search(linha):
-            movimentacoes.append(linha)
 
-    return movimentacoes
+def validar_pagina_detalhe_tst(driver: webdriver.Chrome, numero: str) -> bool:
+    texto = normalizar_texto(texto_completo(driver))
+    numero_presente = somente_digitos(numero) in somente_digitos(texto)
+    indicador_tst = (
+        "tribunal superior do trabalho" in texto
+        or bool(re.search(r"\btst\b", texto))
+        or "movimentações processuais" in texto
+        or "movimentacoes processuais" in texto
+    )
+    # Evita o falso positivo observado: a página inicial contém “TST”, mas
+    # não contém o número pesquisado dentro de um detalhe processual real.
+    return numero_presente and indicador_tst
 
 
-def extrair_ultima_movimentacao(texto: str) -> str:
-    movimentacoes = extrair_movimentacoes_com_data(texto)
+# ============================================================
+# MOVIMENTAÇÕES PROCESSUAIS
+# ============================================================
 
-    if not movimentacoes:
+def abrir_aba_movimentacoes(driver: webdriver.Chrome) -> bool:
+    seletores = [
+        (By.XPATH, "//*[@role='tab' and contains(translate(normalize-space(.),'ÇÕÁÀÂÃÉÊÍÓÔÚ','çõáàâãéêíóôú'),'movimentações processuais')]"),
+        (By.XPATH, "//*[self::a or self::button][contains(translate(normalize-space(.),'ÇÕÁÀÂÃÉÊÍÓÔÚ','çõáàâãéêíóôú'),'movimentações processuais')]"),
+        (By.XPATH, "//*[@role='tab' and contains(translate(normalize-space(.),'ÇÕÁÀÂÃÉÊÍÓÔÚ','çõáàâãéêíóôú'),'movimentações')]"),
+        (By.XPATH, "//*[self::a or self::button][contains(translate(normalize-space(.),'ÇÕÁÀÂÃÉÊÍÓÔÚ','çõáàâãéêíóôú'),'movimentações')]"),
+    ]
+    aba = primeiro_visivel(driver, seletores, timeout=5)
+    if aba is None:
+        # Alguns layouts já exibem as movimentações sem aba separada.
+        texto = normalizar_texto(texto_completo(driver))
+        return "movimentações processuais" in texto or "movimentacoes processuais" in texto
+
+    html_antes = driver.page_source
+    clicar(driver, aba)
+    try:
+        WebDriverWait(driver, TEMPO_ESPERA).until(
+            lambda d: d.page_source != html_antes
+            or "movimenta" in normalizar_texto(texto_completo(d))
+        )
+    except TimeoutException:
+        pass
+    time.sleep(1.5)
+    return True
+
+
+def carregar_todas_movimentacoes(driver: webdriver.Chrome) -> None:
+    expressoes = [
+        "mostrar mais",
+        "ver mais",
+        "carregar mais",
+        "mais movimentações",
+        "mais movimentacoes",
+        "exibir todas",
+        "ver todas",
+    ]
+
+    for _ in range(20):
+        clicou = False
+        for expressao in expressoes:
+            elementos = driver.find_elements(
+                By.XPATH,
+                "//*[self::button or self::a or @role='button']"
+                f"[contains(translate(normalize-space(.),'ABCDEFGHIJKLMNOPQRSTUVWXYZÁÀÂÃÉÊÍÓÔÕÚÇ','abcdefghijklmnopqrstuvwxyzáàâãéêíóôõúç'),'{expressao}')]"
+            )
+            for elemento in elementos:
+                try:
+                    if elemento.is_displayed():
+                        clicar(driver, elemento)
+                        time.sleep(1)
+                        clicou = True
+                except (StaleElementReferenceException, WebDriverException):
+                    continue
+
+        altura_antes = driver.execute_script("return document.body.scrollHeight")
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(1)
+        altura_depois = driver.execute_script("return document.body.scrollHeight")
+        if not clicou and altura_depois == altura_antes:
+            break
+
+
+def extrair_blocos_movimentacao(driver: webdriver.Chrome) -> list[str]:
+    seletores = [
+        "//*[contains(@class,'moviment')]",
+        "//*[contains(@class,'timeline')]//*[(self::li or self::div)]",
+        "//*[contains(@class,'andamento')]",
+        "//*[@role='listitem']",
+        "//table//tr",
+    ]
+    textos: list[str] = []
+    vistos: set[str] = set()
+    for xpath in seletores:
+        for elemento in driver.find_elements(By.XPATH, xpath):
+            try:
+                texto = re.sub(r"\s+", " ", elemento.text or "").strip()
+                if len(texto) < 8:
+                    continue
+                chave = normalizar_texto(texto)
+                if chave not in vistos:
+                    vistos.add(chave)
+                    textos.append(texto)
+            except (StaleElementReferenceException, WebDriverException):
+                continue
+    return textos
+
+
+def analisar_movimentacoes(driver: webdriver.Chrome) -> tuple[str, str, str, str]:
+    abrir_aba_movimentacoes(driver)
+    carregar_todas_movimentacoes(driver)
+    blocos = extrair_blocos_movimentacao(driver)
+    texto_pagina = texto_completo(driver)
+    universo = "\n".join(blocos) if blocos else texto_pagina
+    universo_normalizado = normalizar_texto(universo)
+
+    for termo in TERMOS_TRANSITO:
+        termo_norm = normalizar_texto(termo)
+        if termo_norm in universo_normalizado:
+            trecho = next(
+                (b for b in blocos if termo_norm in normalizar_texto(b)),
+                extrair_trecho(universo, termo),
+            )
+            data = extrair_data(trecho)
+            ultima = extrair_ultima_movimentacao(blocos, texto_pagina)
+            return "Sim", termo, data, trecho or ultima
+
+    return "Não localizado", "", "", extrair_ultima_movimentacao(blocos, texto_pagina)
+
+
+def extrair_data(texto: str) -> str:
+    match = re.search(r"\b\d{2}/\d{2}/\d{4}\b", texto or "")
+    return match.group(0) if match else ""
+
+
+def extrair_trecho(texto: str, termo: str, margem: int = 250) -> str:
+    normal = normalizar_texto(texto)
+    pos = normal.find(normalizar_texto(termo))
+    if pos < 0:
         return ""
-
-    # O portal pode apresentar a movimentação mais recente
-    # no início ou no fim. Aqui preservamos a última linha exibida.
-    return movimentacoes[-1][:1500]
+    limpo = re.sub(r"\s+", " ", texto).strip()
+    return limpo[max(0, pos - margem): min(len(limpo), pos + len(termo) + margem)]
 
 
-def extrair_classe_processual(texto: str) -> str:
-    padroes = [
-        r"Classe\s+processual\s*:?\s*([^\n]+)",
-        r"Classe\s*:?\s*([^\n]+)",
-    ]
-
-    for padrao in padroes:
-        resultado = re.search(
-            padrao,
-            texto,
-            flags=re.IGNORECASE,
-        )
-
-        if resultado:
-            return resultado.group(1).strip()[:300]
-
-    return ""
+def extrair_ultima_movimentacao(blocos: list[str], texto_pagina: str) -> str:
+    padrao_data = re.compile(r"\b\d{2}/\d{2}/\d{4}\b")
+    candidatos = [b for b in blocos if padrao_data.search(b)]
+    if candidatos:
+        # Normalmente o PJe mostra a movimentação mais recente no topo.
+        return candidatos[0][:1500]
+    linhas = [re.sub(r"\s+", " ", l).strip() for l in texto_pagina.splitlines()]
+    linhas = [l for l in linhas if padrao_data.search(l)]
+    return linhas[0][:1500] if linhas else ""
 
 
-def extrair_orgao_julgador(texto: str) -> str:
-    padroes = [
-        r"Órgão\s+julgador\s*:?\s*([^\n]+)",
-        r"Orgao\s+julgador\s*:?\s*([^\n]+)",
-    ]
-
-    for padrao in padroes:
-        resultado = re.search(
-            padrao,
-            texto,
-            flags=re.IGNORECASE,
-        )
-
-        if resultado:
-            return resultado.group(1).strip()[:300]
-
-    return ""
-
-
-def extrair_relator(texto: str) -> str:
-    padroes = [
-        r"Relator(?:a)?\s*:?\s*([^\n]+)",
-        r"Ministro(?:a)?\s+Relator(?:a)?\s*:?\s*([^\n]+)",
-    ]
-
-    for padrao in padroes:
-        resultado = re.search(
-            padrao,
-            texto,
-            flags=re.IGNORECASE,
-        )
-
-        if resultado:
-            return resultado.group(1).strip()[:300]
-
+def extrair_rotulo(texto: str, rotulos: list[str]) -> str:
+    linhas = [re.sub(r"\s+", " ", l).strip() for l in (texto or "").splitlines() if l.strip()]
+    for i, linha in enumerate(linhas):
+        normal = normalizar_texto(linha)
+        for rotulo in rotulos:
+            r = normalizar_texto(rotulo)
+            if normal.startswith(r):
+                resto = re.sub(rf"^{re.escape(rotulo)}\s*:?-?\s*", "", linha, flags=re.I).strip()
+                if resto and normalizar_texto(resto) != r:
+                    return resto[:300]
+                if i + 1 < len(linhas):
+                    return linhas[i + 1][:300]
     return ""
 
 
 # ============================================================
-# RESULTADOS E DIAGNÓSTICO
+# RESULTADO
 # ============================================================
 
 def montar_resultado(
     processo: str,
-    possui_processo_tst: str,
+    possui_tst: str,
     transito: str,
     situacao: str,
     fundamento: str = "",
-    classe_processual: str = "",
-    orgao_julgador: str = "",
+    data_transito: str = "",
+    classe: str = "",
+    orgao: str = "",
     relator: str = "",
-    ultima_movimentacao: str = "",
-    trecho_relevante: str = "",
-    url_final: str = "",
+    ultima: str = "",
+    trecho: str = "",
+    url: str = "",
     erro: str = "",
 ) -> dict:
     return {
         "Processo": processo,
-        "Possui processo no TST": possui_processo_tst,
+        "Possui processo no TST": possui_tst,
         "Trânsito em julgado no TST": transito,
         "Fundamento encontrado": fundamento,
-        "Classe processual no TST": classe_processual,
-        "Órgão julgador": orgao_julgador,
+        "Data do trânsito em julgado": data_transito,
+        "Classe processual no TST": classe,
+        "Órgão julgador": orgao,
         "Relator": relator,
-        "Última movimentação identificada": ultima_movimentacao,
-        "Trecho relevante": trecho_relevante,
+        "Última movimentação identificada": ultima,
+        "Trecho relevante": trecho,
         "Situação da consulta": situacao,
-        "Data e hora da consulta": datetime.now().strftime(
-            "%d/%m/%Y %H:%M:%S"
-        ),
-        "URL consultada": url_final,
+        "Data e hora da consulta": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "URL consultada": url,
         "Detalhes do erro": erro,
     }
 
 
-def salvar_diagnostico(
-    driver: webdriver.Chrome,
-    numero_processo: str,
-) -> None:
-    PASTA_DIAGNOSTICO.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+def consultar_processo(driver: webdriver.Chrome, numero: str) -> dict:
+    numero = numero.strip()
+    if not validar_numero_processo(numero):
+        return montar_resultado(numero, "Não consultado", "Não consultado", "Número em formato inválido")
 
-    nome_seguro = (
-        numero_processo
-        .replace(".", "_")
-        .replace("-", "_")
-    )
+    texto_pesquisa = pesquisar_numero(driver, numero)
+    if contem_termo(texto_pesquisa, TERMOS_CAPTCHA):
+        return montar_resultado(numero, "Não consultado", "Não consultado", "CAPTCHA identificado", url=driver.current_url)
+    if contem_termo(texto_pesquisa, TERMOS_NAO_ENCONTRADO):
+        return montar_resultado(numero, "Não", "Não se aplica", "Processo não encontrado no portal", url=driver.current_url)
 
-    imagem = PASTA_DIAGNOSTICO / f"{nome_seguro}.png"
-    html = PASTA_DIAGNOSTICO / f"{nome_seguro}.html"
-
-    try:
-        driver.save_screenshot(str(imagem))
-    except WebDriverException:
-        pass
-
-    try:
-        html.write_text(
-            driver.page_source,
-            encoding="utf-8",
-        )
-    except (OSError, WebDriverException):
-        pass
-
-
-# ============================================================
-# CONSULTA INDIVIDUAL
-# ============================================================
-
-def consultar_processo_tst(
-    driver: webdriver.Chrome,
-    numero_processo: str,
-) -> dict:
-    numero_processo = numero_processo.strip()
-
-    if not validar_numero_processo(numero_processo):
+    if not abrir_resultado_tst(driver, numero):
+        salvar_diagnostico(driver, numero, texto_pesquisa)
         return montar_resultado(
-            processo=numero_processo,
-            possui_processo_tst="Não consultado",
-            transito="Não consultado",
-            situacao="Número em formato inválido",
-            erro=(
-                "Formato esperado: "
-                "0000000-00.0000.0.00.0000"
-            ),
+            numero, "Não", "Não se aplica", "Nenhum resultado de terceira instância/TST localizado",
+            url=driver.current_url,
         )
 
-    # Acessa diretamente a página do número CNJ.
-    driver.get(url_consulta(numero_processo))
-    aguardar_pagina(driver)
-    time.sleep(1)
-
-    texto_inicial = obter_texto_pagina(driver)
-
-    if detectar_captcha(texto_inicial):
+    if not validar_pagina_detalhe_tst(driver, numero):
+        texto = texto_completo(driver)
+        salvar_diagnostico(driver, numero, texto)
         return montar_resultado(
-            processo=numero_processo,
-            possui_processo_tst="Não consultado",
-            transito="Não consultado",
-            situacao="CAPTCHA identificado",
-            url_final=driver.current_url,
-            erro=(
-                "O portal apresentou verificação de segurança."
-            ),
+            numero, "Não confirmado", "Não analisado", "Página de detalhe do TST não confirmada",
+            url=driver.current_url,
         )
 
-    if detectar_nao_encontrado(texto_inicial):
-        return montar_resultado(
-            processo=numero_processo,
-            possui_processo_tst="Não",
-            transito="Não se aplica",
-            situacao="Processo não encontrado",
-            url_final=driver.current_url,
-        )
+    texto_detalhe = texto_completo(driver)
+    transito, fundamento, data_transito, trecho = analisar_movimentacoes(driver)
+    texto_final = texto_completo(driver)
+    ultima = extrair_ultima_movimentacao(extrair_blocos_movimentacao(driver), texto_final)
 
-    abriu_tst, mensagem_tst = abrir_resultado_tst(
-        driver,
-        numero_processo,
-    )
-
-    if not abriu_tst:
-        return montar_resultado(
-            processo=numero_processo,
-            possui_processo_tst="Não",
-            transito="Não se aplica",
-            situacao=mensagem_tst,
-            url_final=driver.current_url,
-        )
-
-    texto_tst = obter_texto_pagina(driver)
-
-    if detectar_captcha(texto_tst):
-        return montar_resultado(
-            processo=numero_processo,
-            possui_processo_tst="Não consultado",
-            transito="Não consultado",
-            situacao="CAPTCHA identificado no detalhe do TST",
-            url_final=driver.current_url,
-            erro=(
-                "O portal solicitou verificação humana ao abrir "
-                "a terceira instância."
-            ),
-        )
-
-    transito, fundamento = analisar_transito(texto_tst)
-
-    trecho = extrair_trecho_relevante(
-        texto_tst,
-        TERMOS_TRANSITO_CONFIRMADO + TERMOS_BAIXA,
-    )
+    if SALVAR_DIAGNOSTICO_DE_SUCESSO:
+        salvar_diagnostico(driver, numero, texto_final)
 
     return montar_resultado(
-        processo=numero_processo,
-        possui_processo_tst="Sim",
+        processo=numero,
+        possui_tst="Sim",
         transito=transito,
         fundamento=fundamento,
-        classe_processual=extrair_classe_processual(texto_tst),
-        orgao_julgador=extrair_orgao_julgador(texto_tst),
-        relator=extrair_relator(texto_tst),
-        ultima_movimentacao=extrair_ultima_movimentacao(
-            texto_tst
-        ),
-        trecho_relevante=trecho,
-        situacao=f"Consulta concluída — {mensagem_tst}",
-        url_final=driver.current_url,
+        data_transito=data_transito,
+        classe=extrair_rotulo(texto_detalhe, ["Classe processual", "Classe"]),
+        orgao=extrair_rotulo(texto_detalhe, ["Órgão julgador", "Orgao julgador"]),
+        relator=extrair_rotulo(texto_detalhe, ["Relator", "Relatora"]),
+        ultima=ultima,
+        trecho=trecho,
+        situacao="Consulta concluída — detalhe TST e movimentações analisados",
+        url=driver.current_url,
     )
 
 
 # ============================================================
-# GERAÇÃO DO EXCEL — SOMENTE NO FINAL
+# EXCEL — APENAS AO FINAL
 # ============================================================
 
 def salvar_excel_final(resultados: list[dict]) -> None:
     if not resultados:
-        print("Nenhum resultado disponível para gerar o Excel.")
+        print("Nenhum resultado para salvar.")
         return
-
-    df = pd.DataFrame(resultados)
 
     colunas = [
         "Processo",
         "Possui processo no TST",
         "Trânsito em julgado no TST",
         "Fundamento encontrado",
+        "Data do trânsito em julgado",
         "Classe processual no TST",
         "Órgão julgador",
         "Relator",
@@ -798,288 +627,116 @@ def salvar_excel_final(resultados: list[dict]) -> None:
         "URL consultada",
         "Detalhes do erro",
     ]
-
+    df = pd.DataFrame(resultados)
     for coluna in colunas:
         if coluna not in df.columns:
             df[coluna] = ""
-
     df = df[colunas]
 
-    resumo = pd.DataFrame(
-        {
-            "Indicador": [
-                "Total de números informados",
-                "Processos encontrados no TST",
-                "Processos sem resultado no TST",
-                "Trânsito em julgado confirmado",
-                "Possível trânsito ou baixa",
-                "Trânsito não localizado",
-                "Consultas com erro",
-            ],
-            "Quantidade": [
-                len(df),
-                int(
-                    (
-                        df["Possui processo no TST"] == "Sim"
-                    ).sum()
-                ),
-                int(
-                    (
-                        df["Possui processo no TST"] == "Não"
-                    ).sum()
-                ),
-                int(
-                    (
-                        df["Trânsito em julgado no TST"] == "Sim"
-                    ).sum()
-                ),
-                int(
-                    (
-                        df["Trânsito em julgado no TST"]
-                        == "Possível"
-                    ).sum()
-                ),
-                int(
-                    (
-                        df["Trânsito em julgado no TST"]
-                        == "Não localizado"
-                    ).sum()
-                ),
-                int(
-                    df["Situação da consulta"]
-                    .str.contains(
-                        "erro|captcha",
-                        case=False,
-                        na=False,
-                    )
-                    .sum()
-                ),
-            ],
-        }
-    )
+    resumo = pd.DataFrame({
+        "Indicador": [
+            "Total de números analisados",
+            "Processos encontrados no TST",
+            "Processos sem resultado no TST",
+            "Trânsito em julgado confirmado",
+            "Trânsito não localizado",
+            "Consultas com erro ou não confirmadas",
+        ],
+        "Quantidade": [
+            len(df),
+            int((df["Possui processo no TST"] == "Sim").sum()),
+            int((df["Possui processo no TST"] == "Não").sum()),
+            int((df["Trânsito em julgado no TST"] == "Sim").sum()),
+            int((df["Trânsito em julgado no TST"] == "Não localizado").sum()),
+            int(df["Situação da consulta"].str.contains("erro|captcha|não confirmada|não confirmado", case=False, na=False).sum()),
+        ],
+    })
 
-    with pd.ExcelWriter(
-        ARQUIVO_SAIDA,
-        engine="openpyxl",
-    ) as writer:
-        df.to_excel(
-            writer,
-            sheet_name="Resultados_TST",
-            index=False,
-        )
+    with pd.ExcelWriter(ARQUIVO_SAIDA, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Resultados_TST", index=False)
+        resumo.to_excel(writer, sheet_name="Resumo", index=False)
 
-        resumo.to_excel(
-            writer,
-            sheet_name="Resumo",
-            index=False,
-        )
+        cabecalho_fill = PatternFill(fill_type="solid", fgColor="1F4E78")
+        cabecalho_font = Font(color="FFFFFF", bold=True)
 
-        planilha = writer.book["Resultados_TST"]
-        planilha.freeze_panes = "A2"
-        planilha.auto_filter.ref = planilha.dimensions
-
-        preenchimento_cabecalho = PatternFill(
-            fill_type="solid",
-            fgColor="1F4E78",
-        )
-
-        fonte_cabecalho = Font(
-            color="FFFFFF",
-            bold=True,
-        )
-
-        for celula in planilha[1]:
-            celula.fill = preenchimento_cabecalho
-            celula.font = fonte_cabecalho
-            celula.alignment = Alignment(
-                horizontal="center",
-                vertical="center",
-                wrap_text=True,
-            )
+        ws = writer.book["Resultados_TST"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        for celula in ws[1]:
+            celula.fill = cabecalho_fill
+            celula.font = cabecalho_font
+            celula.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
         larguras = {
-            "A": 28,
-            "B": 23,
-            "C": 29,
-            "D": 32,
-            "E": 35,
-            "F": 35,
-            "G": 35,
-            "H": 75,
-            "I": 100,
-            "J": 45,
-            "K": 22,
-            "L": 75,
-            "M": 100,
+            "A": 28, "B": 23, "C": 29, "D": 32, "E": 24, "F": 35, "G": 35,
+            "H": 35, "I": 75, "J": 100, "K": 55, "L": 22, "M": 75, "N": 100,
         }
-
         for coluna, largura in larguras.items():
-            planilha.column_dimensions[coluna].width = largura
-
-        for linha in planilha.iter_rows(min_row=2):
+            ws.column_dimensions[coluna].width = largura
+        for linha in ws.iter_rows(min_row=2):
             for celula in linha:
-                celula.alignment = Alignment(
-                    vertical="top",
-                    wrap_text=True,
-                )
+                celula.alignment = Alignment(vertical="top", wrap_text=True)
 
-        planilha_resumo = writer.book["Resumo"]
-        planilha_resumo.freeze_panes = "A2"
-        planilha_resumo.column_dimensions["A"].width = 40
-        planilha_resumo.column_dimensions["B"].width = 15
-
-        for celula in planilha_resumo[1]:
-            celula.fill = preenchimento_cabecalho
-            celula.font = fonte_cabecalho
-            celula.alignment = Alignment(
-                horizontal="center",
-            )
+        ws_resumo = writer.book["Resumo"]
+        ws_resumo.freeze_panes = "A2"
+        ws_resumo.column_dimensions["A"].width = 45
+        ws_resumo.column_dimensions["B"].width = 15
+        for celula in ws_resumo[1]:
+            celula.fill = cabecalho_fill
+            celula.font = cabecalho_font
+            celula.alignment = Alignment(horizontal="center")
 
 
 # ============================================================
-# EXECUÇÃO PRINCIPAL
+# EXECUÇÃO
 # ============================================================
 
 def main() -> None:
     resultados: list[dict] = []
-    driver = None
-
-    # Remove números duplicados preservando a ordem.
+    driver: webdriver.Chrome | None = None
     processos_unicos = list(dict.fromkeys(processos))
 
-    quantidade_original = len(processos)
-    quantidade_unica = len(processos_unicos)
-    duplicados = quantidade_original - quantidade_unica
-
-    print("=" * 75)
-    print("CONSULTA DE PROCESSOS — SOMENTE TERCEIRA INSTÂNCIA/TST")
-    print(f"Números informados: {quantidade_original}")
-    print(f"Números únicos: {quantidade_unica}")
-    print(f"Duplicados removidos: {duplicados}")
-    print("=" * 75)
+    print("=" * 78)
+    print("CONSULTA TST — TERCEIRA INSTÂNCIA E MOVIMENTAÇÕES PROCESSUAIS")
+    print(f"Processos informados: {len(processos)}")
+    print(f"Processos únicos: {len(processos_unicos)}")
+    print(f"Duplicados removidos: {len(processos) - len(processos_unicos)}")
+    print("O Excel será criado somente no final.")
+    print("=" * 78)
 
     try:
         driver = criar_driver()
-
-        for indice, numero_processo in enumerate(
-            processos_unicos,
-            start=1,
-        ):
-            print(
-                f"\n[{indice}/{quantidade_unica}] "
-                f"Consultando no TST: {numero_processo}"
-            )
-
+        for indice, numero in enumerate(processos_unicos, start=1):
+            print(f"\n[{indice}/{len(processos_unicos)}] {numero}")
             try:
-                resultado = consultar_processo_tst(
-                    driver,
-                    numero_processo,
-                )
-
-                resultados.append(resultado)
-
-                print(
-                    "  Processo no TST:",
-                    resultado["Possui processo no TST"],
-                )
-
-                print(
-                    "  Trânsito em julgado:",
-                    resultado["Trânsito em julgado no TST"],
-                )
-
-                print(
-                    "  Situação:",
-                    resultado["Situação da consulta"],
-                )
-
-            except TimeoutException as erro:
-                salvar_diagnostico(
-                    driver,
-                    numero_processo,
-                )
-
-                resultados.append(
-                    montar_resultado(
-                        processo=numero_processo,
-                        possui_processo_tst="Não confirmado",
-                        transito="Não analisado",
-                        situacao="Tempo de espera excedido",
-                        url_final=driver.current_url,
-                        erro=str(erro) or "TimeoutException",
-                    )
-                )
-
-                print("  Erro: tempo de espera excedido.")
-
-            except WebDriverException as erro:
-                salvar_diagnostico(
-                    driver,
-                    numero_processo,
-                )
-
-                resultados.append(
-                    montar_resultado(
-                        processo=numero_processo,
-                        possui_processo_tst="Não confirmado",
-                        transito="Não analisado",
-                        situacao="Erro do navegador",
-                        url_final=(
-                            driver.current_url
-                            if driver
-                            else ""
-                        ),
-                        erro=str(erro),
-                    )
-                )
-
-                print("  Erro do navegador:", erro)
-
+                resultado = consultar_processo(driver, numero)
             except Exception as erro:
-                salvar_diagnostico(
-                    driver,
-                    numero_processo,
+                if driver is not None:
+                    salvar_diagnostico(driver, numero, texto_completo(driver) if driver.window_handles else "")
+                resultado = montar_resultado(
+                    numero,
+                    "Não confirmado",
+                    "Não analisado",
+                    "Erro inesperado",
+                    url=driver.current_url if driver else "",
+                    erro=f"{type(erro).__name__}: {erro}\n{traceback.format_exc()}",
                 )
-
-                resultados.append(
-                    montar_resultado(
-                        processo=numero_processo,
-                        possui_processo_tst="Não confirmado",
-                        transito="Não analisado",
-                        situacao="Erro inesperado",
-                        url_final=(
-                            driver.current_url
-                            if driver
-                            else ""
-                        ),
-                        erro=(
-                            f"{type(erro).__name__}: {erro}\n"
-                            f"{traceback.format_exc()}"
-                        ),
-                    )
-                )
-
-                print(
-                    "  Erro inesperado:",
-                    type(erro).__name__,
-                    erro,
-                )
-
-            if indice < quantidade_unica:
+            resultados.append(resultado)
+            print(f"  TST: {resultado['Possui processo no TST']}")
+            print(f"  Trânsito: {resultado['Trânsito em julgado no TST']}")
+            print(f"  Situação: {resultado['Situação da consulta']}")
+            if indice < len(processos_unicos):
                 time.sleep(INTERVALO_ENTRE_PROCESSOS)
-
     finally:
         if driver is not None:
             driver.quit()
 
-    # O Excel é criado somente aqui, depois de todo o processamento.
+    # ÚNICO ponto de criação do Excel.
     salvar_excel_final(resultados)
-
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 78)
     print("PROCESSAMENTO FINALIZADO")
-    print(f"Processos analisados: {len(resultados)}")
     print(f"Excel gerado: {ARQUIVO_SAIDA.resolve()}")
-    print("=" * 75)
+    print("=" * 78)
 
 
 if __name__ == "__main__":
