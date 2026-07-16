@@ -289,77 +289,201 @@ def pesquisar_numero(driver: webdriver.Chrome, numero: str) -> str:
     return texto_completo(driver)
 
 
+def obter_contexto_elemento(elemento: WebElement, niveis: int = 6) -> tuple[str, str]:
+    """Retorna texto e HTML do elemento junto com seus ancestrais próximos."""
+    textos: list[str] = []
+    htmls: list[str] = []
+    atual = elemento
+
+    for _ in range(niveis + 1):
+        try:
+            texto = re.sub(r"\s+", " ", atual.text or "").strip()
+            html = atual.get_attribute("outerHTML") or ""
+            if texto:
+                textos.append(texto)
+            if html:
+                htmls.append(html)
+            atual = atual.find_element(By.XPATH, "..")
+        except (NoSuchElementException, StaleElementReferenceException, WebDriverException):
+            break
+
+    return " ".join(textos), " ".join(htmls)
+
+
 def score_candidato_tst(elemento: WebElement, numero: str) -> int:
+    """
+    Pontua o elemento usando também o card/linha pai.
+
+    No portal, o botão pode conter apenas um ícone ou a palavra "Visualizar",
+    enquanto o número e a indicação TST ficam no elemento ancestral.
+    """
     try:
-        texto = normalizar_texto(elemento.text)
-        href = normalizar_texto(elemento.get_attribute("href") or "")
-        combinado = f"{texto} {href}"
+        texto_contexto, html_contexto = obter_contexto_elemento(elemento)
+        href = elemento.get_attribute("href") or ""
+        combinado = normalizar_texto(f"{texto_contexto} {html_contexto} {href}")
+        numero_digitos = somente_digitos(numero)
+        digitos_contexto = somente_digitos(combinado)
+
         score = 0
-        if somente_digitos(numero) in somente_digitos(combinado):
-            score += 5
+        if numero_digitos and numero_digitos in digitos_contexto:
+            score += 10
         if "tribunal superior do trabalho" in combinado:
-            score += 8
+            score += 10
         if re.search(r"\btst\b", combinado):
-            score += 6
-        if "3º grau" in combinado or "3o grau" in combinado or "terceiro grau" in combinado:
+            score += 8
+        if any(x in combinado for x in ("3º grau", "3o grau", "3° grau", "terceiro grau", "3ª instância", "3a instancia")):
+            score += 8
+        if "detalhe-processo" in combinado:
+            score += 4
+        if re.search(r"/3(?:/|$|\?|#)", href):
             score += 5
-        if "/3" in href:
-            score += 3
         if elemento.is_displayed():
             score += 1
+
         return score
     except (StaleElementReferenceException, WebDriverException):
         return -1
 
 
+def validar_pagina_detalhe_tst(driver: webdriver.Chrome, numero: str) -> bool:
+    """
+    Confirma um detalhe processual real.
+
+    Como o domínio já é o PJe do TST, a página de detalhe nem sempre repete a
+    sigla "TST" no texto. Por isso, validamos pelo número na URL/texto e por
+    elementos típicos do detalhe, sem exigir que a palavra TST esteja visível.
+    """
+    texto = normalizar_texto(texto_completo(driver))
+    url = normalizar_texto(driver.current_url)
+    numero_digitos = somente_digitos(numero)
+
+    numero_presente = (
+        numero_digitos in somente_digitos(texto)
+        or numero_digitos in somente_digitos(url)
+    )
+
+    indicadores_detalhe = [
+        "movimentações processuais",
+        "movimentacoes processuais",
+        "dados do processo",
+        "classe processual",
+        "órgão julgador",
+        "orgao julgador",
+        "relator",
+        "partes do processo",
+        "detalhe-processo",
+    ]
+    detalhe_presente = any(i in texto or i in url for i in indicadores_detalhe)
+
+    pagina_inicial = (
+        url.rstrip("/") == normalizar_texto(URL_CONSULTA).rstrip("/")
+        and not detalhe_presente
+    )
+
+    return numero_presente and detalhe_presente and not pagina_inicial
+
+
+def trocar_para_nova_aba(driver: webdriver.Chrome, abas_antes: set[str]) -> None:
+    novas = [h for h in driver.window_handles if h not in abas_antes]
+    if novas:
+        driver.switch_to.window(novas[-1])
+        aguardar_documento(driver)
+        time.sleep(1)
+
+
 def abrir_resultado_tst(driver: webdriver.Chrome, numero: str) -> bool:
-    # Coleta links, botões e cards clicáveis. O resultado escolhido precisa
-    # conter indicação explícita de TST/Tribunal Superior do Trabalho.
-    candidatos = driver.find_elements(
+    """
+    Localiza o resultado TST considerando o card inteiro, não apenas o texto
+    do botão. Faz tentativas por links diretos, cards e elementos clicáveis.
+    """
+    numero_digitos = somente_digitos(numero)
+
+    # Aguarda o número aparecer fora do campo de entrada ou surgir algum card.
+    try:
+        WebDriverWait(driver, TEMPO_ESPERA).until(
+            lambda d: (
+                len(d.find_elements(By.XPATH, "//a | //button | //*[@role='button'] | //*[@role='link']")) > 2
+                and numero_digitos in somente_digitos(texto_completo(d))
+            )
+            or contem_termo(texto_completo(d), TERMOS_NAO_ENCONTRADO)
+        )
+    except TimeoutException:
+        pass
+
+    # 1) Links diretos de detalhe têm prioridade.
+    links_detalhe = driver.find_elements(
+        By.XPATH,
+        "//a[contains(@href,'detalhe-processo')]"
+    )
+    candidatos: list[tuple[int, WebElement]] = []
+
+    for elemento in links_detalhe:
+        score = score_candidato_tst(elemento, numero)
+        if score >= 11:
+            candidatos.append((score + 5, elemento))
+
+    # 2) Demais botões/links, usando o contexto dos ancestrais.
+    elementos = driver.find_elements(
         By.XPATH,
         "//a | //button | //*[@role='button'] | //*[@role='link']"
     )
-    pontuados = [(score_candidato_tst(e, numero), e) for e in candidatos]
-    pontuados = [(s, e) for s, e in pontuados if s >= 7]
-    pontuados.sort(key=lambda item: item[0], reverse=True)
+    for elemento in elementos:
+        score = score_candidato_tst(elemento, numero)
+        if score >= 11:
+            candidatos.append((score, elemento))
 
-    for _, elemento in pontuados[:10]:
+    # Remove referências repetidas pelo HTML do elemento.
+    unicos: list[tuple[int, WebElement]] = []
+    vistos: set[str] = set()
+    for score, elemento in sorted(candidatos, key=lambda x: x[0], reverse=True):
+        try:
+            chave = (elemento.get_attribute("outerHTML") or "")[:1000]
+        except WebDriverException:
+            continue
+        if chave and chave not in vistos:
+            vistos.add(chave)
+            unicos.append((score, elemento))
+
+    for _, elemento in unicos[:20]:
         try:
             url_antes = driver.current_url
-            html_antes = driver.page_source
+            abas_antes = set(driver.window_handles)
             clicar(driver, elemento)
             time.sleep(1.5)
+            trocar_para_nova_aba(driver, abas_antes)
             aguardar_documento(driver)
+
             if validar_pagina_detalhe_tst(driver, numero):
                 return True
-            # Se abriu em nova aba, muda para ela.
-            if len(driver.window_handles) > 1:
-                driver.switch_to.window(driver.window_handles[-1])
-                aguardar_documento(driver)
-                if validar_pagina_detalhe_tst(driver, numero):
-                    return True
-            # Volta ao resultado para tentar outro candidato.
-            if driver.current_url != url_antes or driver.page_source != html_antes:
+
+            # Se o elemento clicado era um botão interno, tenta links no card pai.
+            try:
+                card = elemento
+                for _ in range(6):
+                    links = card.find_elements(By.XPATH, ".//a[@href]")
+                    for link in links:
+                        href = link.get_attribute("href") or ""
+                        if "detalhe-processo" in href and numero_digitos in somente_digitos(href + card.text):
+                            abas_antes = set(driver.window_handles)
+                            clicar(driver, link)
+                            time.sleep(1.5)
+                            trocar_para_nova_aba(driver, abas_antes)
+                            aguardar_documento(driver)
+                            if validar_pagina_detalhe_tst(driver, numero):
+                                return True
+                    card = card.find_element(By.XPATH, "..")
+            except (NoSuchElementException, StaleElementReferenceException, WebDriverException):
+                pass
+
+            # Volta para a página de resultados apenas se realmente navegou.
+            if driver.current_url != url_antes and len(driver.window_handles) == 1:
                 driver.back()
                 aguardar_documento(driver)
                 time.sleep(1)
         except (StaleElementReferenceException, WebDriverException, TimeoutException):
             continue
+
     return False
-
-
-def validar_pagina_detalhe_tst(driver: webdriver.Chrome, numero: str) -> bool:
-    texto = normalizar_texto(texto_completo(driver))
-    numero_presente = somente_digitos(numero) in somente_digitos(texto)
-    indicador_tst = (
-        "tribunal superior do trabalho" in texto
-        or bool(re.search(r"\btst\b", texto))
-        or "movimentações processuais" in texto
-        or "movimentacoes processuais" in texto
-    )
-    # Evita o falso positivo observado: a página inicial contém “TST”, mas
-    # não contém o número pesquisado dentro de um detalhe processual real.
-    return numero_presente and indicador_tst
 
 
 # ============================================================
