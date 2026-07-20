@@ -1,0 +1,12 @@
+{
+  "porta_cdp": 9222,
+  "timeout_ms": 20000,
+  "pausa_entre_codigos_seg": 0.8,
+  "seletores": {
+    "campo_codigo_rubrica": "",
+    "botao_pesquisar": "",
+    "linhas_resultado": "",
+    "botao_download_na_linha": "",
+    "texto_cnpj_ou_empregador": ""
+  }
+}
