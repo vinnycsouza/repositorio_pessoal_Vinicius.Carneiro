@@ -2,12 +2,13 @@ import io
 import re
 import zipfile
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from modules.auditoria import gerar_excel_saida, gerar_resumo_visual, preparar_pacote_analitico
-from modules.processador_zip import processar_zip_esocial
+from modules.processador_zip import processar_fontes_esocial
 from utils.helpers import decimal_br
 
 
@@ -15,7 +16,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 7.6: melhoria visual da geração do levantamento, com status do arquivo e última geração."
+    "Versão 8.0: processamento em duas passagens, suporte a arquivos locais grandes e uso de recibos S-1010 como complemento automático."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -43,14 +44,28 @@ with st.sidebar:
         )
 
     arquivos_zip = []
+    caminhos_locais = []
     arquivo_excel = None
     if modo_entrada == "ZIP(s) do eSocial":
-        arquivos_zip = st.file_uploader(
-            "Selecione um ou mais ZIPs do eSocial",
-            type=["zip"],
-            accept_multiple_files=True,
-            help="Pode enviar pacotes separados: S-1010, S-1200 e consolidado S-5001/S-5011.",
+        origem_zip = st.radio(
+            "Origem dos ZIPs",
+            ["Upload pelo navegador", "Arquivos/pasta local (recomendado para arquivos grandes)"],
+            help="O modo local evita copiar ZIPs de vários GB para a memória do navegador e é indicado para execução no próprio computador.",
         )
+        if origem_zip == "Upload pelo navegador":
+            arquivos_zip = st.file_uploader(
+                "Selecione um ou mais ZIPs do eSocial",
+                type=["zip"],
+                accept_multiple_files=True,
+                help="Pode enviar pacotes separados: S-1010, S-1200, S-5001/S-5011 e recibos de rubricas.",
+            )
+        else:
+            entrada_local = st.text_area(
+                "Caminhos locais",
+                placeholder="C:\\eSocial\\cliente\\downloads\\\nou\nC:\\eSocial\\cliente\\parte_01.zip",
+                help="Informe uma pasta ou vários arquivos ZIP, um por linha. Pastas são pesquisadas recursivamente.",
+            )
+            caminhos_locais = [linha.strip().strip('\"') for linha in entrada_local.splitlines() if linha.strip()]
     else:
         arquivo_excel = st.file_uploader(
             "Selecione o Excel consolidado",
@@ -73,13 +88,30 @@ with st.sidebar:
         st.rerun()
 
 
-@st.cache_data(show_spinner=False)
-def executar_processamento(pacotes: list[tuple[str, bytes]]):
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for nome, conteudo in pacotes:
-            zf.writestr(nome, conteudo)
-    return processar_zip_esocial(buffer.getvalue())
+def _resolver_fontes_zip(arquivos_upload, caminhos_informados):
+    fontes = []
+    erros = []
+    for arquivo in arquivos_upload or []:
+        # Não cria um ZIP agregado em memória; cada pacote é processado separadamente.
+        fontes.append((arquivo.name, arquivo.getvalue()))
+
+    for texto in caminhos_informados or []:
+        caminho = Path(texto).expanduser()
+        if caminho.is_dir():
+            encontrados = sorted(caminho.rglob("*.zip"))
+            if not encontrados:
+                erros.append(f"Nenhum ZIP encontrado em: {caminho}")
+            for item in encontrados:
+                fontes.append((item.name, str(item)))
+        elif caminho.is_file() and caminho.suffix.lower() == ".zip":
+            fontes.append((caminho.name, str(caminho)))
+        else:
+            erros.append(f"Caminho não localizado ou não é ZIP: {caminho}")
+    return fontes, erros
+
+
+def executar_processamento(fontes):
+    return processar_fontes_esocial(fontes)
 
 
 @st.cache_data(show_spinner=False)
@@ -180,9 +212,12 @@ def _to_excel_dividido_local(writer, df: pd.DataFrame | None, sheet_name: str, m
         parte += 1
 
 if modo_entrada == "ZIP(s) do eSocial":
-    if not arquivos_zip:
+    fontes_zip, erros_caminhos = _resolver_fontes_zip(arquivos_zip, caminhos_locais)
+    for erro_caminho in erros_caminhos:
+        st.warning(erro_caminho)
+    if not fontes_zip:
         st.info(
-            "Envie um ou mais ZIPs do eSocial. O app localiza automaticamente os XMLs relevantes, inclusive em subpastas e ZIP dentro de ZIP."
+            "Envie ZIPs pelo navegador ou informe uma pasta/arquivos locais. O app localiza XMLs relevantes, ZIP dentro de ZIP e recibos S-1010."
         )
         st.markdown(
             """
@@ -198,10 +233,8 @@ if modo_entrada == "ZIP(s) do eSocial":
         )
         st.stop()
 
-    pacotes = [(arquivo.name, arquivo.getvalue()) for arquivo in arquivos_zip]
-
-    with st.spinner("Processando ZIP(s) do eSocial..."):
-        resultado = executar_processamento(pacotes)
+    with st.spinner("Processando ZIP(s) em duas passagens. A primeira cataloga S-1010/recibos; a segunda processa movimentos e bases..."):
+        resultado = executar_processamento(fontes_zip)
 
     df_inventario = resultado.get("inventario", pd.DataFrame())
     df_rubricas = resultado.get("rubricas", pd.DataFrame())
@@ -284,6 +317,11 @@ with st.spinner("Montando relatório de composição da incidência CP..."):
 
 st.markdown("---")
 st.caption(f"Módulo ativo: {modulo_ativo}")
+
+if not df_rubricas.empty and "fonte_dados" in df_rubricas.columns:
+    qtd_s1010_recibos = int(df_rubricas["fonte_dados"].eq("Recibo S-1010").sum())
+    if qtd_s1010_recibos:
+        st.success(f"Foram incorporados {qtd_s1010_recibos:,} registros de rubricas provenientes de recibos S-1010.".replace(",", "."))
 
 df_levantamento_export = pd.DataFrame()
 
@@ -678,7 +716,7 @@ if modulo_ativo == "Levantamento de Verbas":
                         _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
                     agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                     st.session_state["levantamento_excel_bytes"] = buffer_levantamento.getvalue()
-                    st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v7_6.xlsx"
+                    st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v8_0.xlsx"
                     st.session_state["levantamento_status_geracao"] = "pronto"
                     st.session_state["levantamento_ultima_geracao"] = {
                         "data_hora": agora,
@@ -708,7 +746,7 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.download_button(
                     label="Baixar levantamento de verbas",
                     data=st.session_state["levantamento_excel_bytes"],
-                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v7_6.xlsx"),
+                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v8_0.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     key="download_levantamento_verbas",
@@ -766,7 +804,7 @@ if modulo_ativo == "Relatório de Incidência CP":
     st.download_button(
         label="Baixar relatório de incidência CP",
         data=excel_bytes,
-        file_name="relatorio_incidencia_cp_esocial_v7_6.xlsx",
+        file_name="relatorio_incidencia_cp_esocial_v8_0.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )

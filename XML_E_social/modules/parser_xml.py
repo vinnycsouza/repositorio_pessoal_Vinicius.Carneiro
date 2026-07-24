@@ -24,6 +24,8 @@ class RubricaInfo:
     origem_bloco: str
     ini_valid: str
     fim_valid: str
+    arquivo_origem: str = ""
+    fonte_dados: str = "Download principal"
 
 
 @dataclass
@@ -46,6 +48,8 @@ class RubricaPagamento:
     ini_valid: str
     fim_valid: str
     origem_bloco_s1010: str
+    fonte_s1010: str
+    arquivo_s1010: str
     criterio_cruzamento_s1010: str
     origem_validacao: str
     nivel_confianca: str
@@ -182,7 +186,7 @@ def parse_s3000(root: ET.Element) -> Dict[str, str]:
     }
 
 
-def parse_s1010(root: ET.Element) -> List[RubricaInfo]:
+def parse_s1010(root: ET.Element, arquivo: str = "", fonte_dados: str = "Download principal") -> List[RubricaInfo]:
     saida: List[RubricaInfo] = []
 
     blocos_origem = []
@@ -230,6 +234,8 @@ def parse_s1010(root: ET.Element) -> List[RubricaInfo]:
                     origem_bloco=origem,
                     ini_valid=ini_valid,
                     fim_valid=fim_valid,
+                    arquivo_origem=arquivo,
+                    fonte_dados=fonte_dados,
                 )
             )
 
@@ -285,7 +291,12 @@ def _rubrica_valida_na_competencia(rubrica: RubricaInfo, competencia: str) -> bo
 def _ordenar_rubricas_por_vigencia(rubricas: Sequence[RubricaInfo]) -> List[RubricaInfo]:
     return sorted(
         list(rubricas),
-        key=lambda r: (_competencia_para_chave(r.ini_valid), _competencia_para_chave(r.fim_valid), r.origem_bloco),
+        key=lambda r: (
+            _competencia_para_chave(r.ini_valid),
+            _competencia_para_chave(r.fim_valid),
+            1 if getattr(r, "fonte_dados", "") == "Download principal" else 0,
+            r.origem_bloco,
+        ),
         reverse=True,
     )
 
@@ -295,9 +306,9 @@ def _normalizar_chave(valor: str) -> str:
 
 
 def _deduplicar_rubricas(rubricas: Sequence[RubricaInfo]) -> List[RubricaInfo]:
-    unicos: Dict[Tuple[str, str, str, str, str, str], RubricaInfo] = {}
+    unicos: Dict[Tuple[str, str, str, str, str, str, str], RubricaInfo] = {}
     for r in rubricas:
-        unicos[(r.cod_rubr, r.ide_tab_rubr, r.ini_valid, r.fim_valid, r.cod_inc_cp, r.dsc_rubr)] = r
+        unicos[(r.cod_rubr, r.ide_tab_rubr, r.ini_valid, r.fim_valid, r.cod_inc_cp, r.dsc_rubr, r.fonte_dados)] = r
     return _ordenar_rubricas_por_vigencia(unicos.values())
 
 
@@ -334,7 +345,7 @@ def selecionar_rubrica_vigente(
 ) -> RubricaSelecionada:
     """Seleciona a rubrica S-1010 em camadas auditáveis.
 
-    Hierarquia da v7.3:
+    Hierarquia da v8.0 (prioriza o download principal quando houver empate):
       1) S-1010 válido: codRubr + ideTabRubr + competência dentro de iniValid/fimValid.
       2) S-1010 válido por código: codRubr + validade, quando ideTabRubr diverge/vem vazio.
       3) S-1010 histórico compatível: mesmo codRubr em outra vigência/tabela e mesma incidência CP conhecida.
@@ -454,6 +465,8 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
                         ini_valid = rubr.ini_valid if rubr else ""
                         fim_valid = rubr.fim_valid if rubr else ""
                         origem_bloco_s1010 = rubr.origem_bloco if rubr else ""
+                        fonte_s1010 = rubr.fonte_dados if rubr else ""
+                        arquivo_s1010 = rubr.arquivo_origem if rubr else ""
                         criterio_cruzamento_s1010 = selecao.criterio
 
                         if cod_rubr:
@@ -477,6 +490,8 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
                                     ini_valid=ini_valid,
                                     fim_valid=fim_valid,
                                     origem_bloco_s1010=origem_bloco_s1010,
+                                    fonte_s1010=fonte_s1010,
+                                    arquivo_s1010=arquivo_s1010,
                                     criterio_cruzamento_s1010=criterio_cruzamento_s1010,
                                     origem_validacao=selecao.origem_validacao,
                                     nivel_confianca=selecao.nivel_confianca,
