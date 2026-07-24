@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from modules.auditoria import gerar_excel_saida, gerar_resumo_visual, preparar_pacote_analitico
+from modules.auditoria import gerar_busca_recibos, gerar_excel_saida, gerar_resumo_visual, preparar_pacote_analitico
 from modules.processador_zip import processar_fontes_esocial
 from utils.helpers import decimal_br
 
@@ -16,7 +16,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 8.0: processamento em duas passagens, suporte a arquivos locais grandes e uso de recibos S-1010 como complemento automático."
+    "Versão 8.2 Engine V2: processamento econômico em RAM, entradas separadas e incorporação automática de recibos S-1010."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -35,78 +35,97 @@ with st.sidebar:
     st.header("Entrada")
     if modulo_ativo == "Relatório de Incidência CP":
         modo_entrada = "ZIP(s) do eSocial"
-        st.caption("O relatório de incidência usa XML/ZIP do eSocial como origem.")
     else:
         modo_entrada = st.radio(
             "Modo de entrada",
             ["ZIP(s) do eSocial", "Excel consolidado / levantamento"],
-            help="Use Excel consolidado quando os XMLs forem grandes demais e você já tiver uma base exportada com 02_rubricas_cp e 03_movimentos_cp.",
+            help="Use Excel consolidado quando você já tiver uma base exportada com 02_rubricas_cp e 03_movimentos_cp.",
         )
 
-    arquivos_zip = []
-    caminhos_locais = []
+    arquivos_principais = []
+    caminhos_principais = []
+    arquivos_recibos = []
+    caminhos_recibos = []
     arquivo_excel = None
+    gerar_relatorio = False
+
     if modo_entrada == "ZIP(s) do eSocial":
-        origem_zip = st.radio(
-            "Origem dos ZIPs",
-            ["Upload pelo navegador", "Arquivos/pasta local (recomendado para arquivos grandes)"],
-            help="O modo local evita copiar ZIPs de vários GB para a memória do navegador e é indicado para execução no próprio computador.",
+        st.subheader("1. Arquivos principais")
+        st.caption("Obrigatório: downloads normais do eSocial, como S-1010, S-1200, S-5001, S-5011 e S-3000.")
+        origem_principal = st.radio(
+            "Origem dos arquivos principais",
+            ["Upload pelo navegador", "Arquivos/pasta local"],
+            key="origem_principal",
         )
-        if origem_zip == "Upload pelo navegador":
-            arquivos_zip = st.file_uploader(
-                "Selecione um ou mais ZIPs do eSocial",
-                type=["zip"],
-                accept_multiple_files=True,
-                help="Pode enviar pacotes separados: S-1010, S-1200, S-5001/S-5011 e recibos de rubricas.",
+        if origem_principal == "Upload pelo navegador":
+            arquivos_principais = st.file_uploader(
+                "Selecione ZIP/XML principais",
+                type=["zip", "xml"], accept_multiple_files=True,
+                key="arquivos_principais",
             )
         else:
-            entrada_local = st.text_area(
-                "Caminhos locais",
-                placeholder="C:\\eSocial\\cliente\\downloads\\\nou\nC:\\eSocial\\cliente\\parte_01.zip",
-                help="Informe uma pasta ou vários arquivos ZIP, um por linha. Pastas são pesquisadas recursivamente.",
+            texto_principal = st.text_area(
+                "Caminhos dos arquivos principais",
+                placeholder="C:\\eSocial\\cliente\\downloads\\\\nou\nC:\\eSocial\\cliente\\parte_01.zip",
+                key="caminhos_principais",
             )
-            caminhos_locais = [linha.strip().strip('\"') for linha in entrada_local.splitlines() if linha.strip()]
+            caminhos_principais = [x.strip().strip('"') for x in texto_principal.splitlines() if x.strip()]
+
+        st.markdown("---")
+        st.subheader("2. Complementação opcional")
+        st.caption("Recibos S-1010. Deixe vazio no primeiro relatório e use somente depois de identificar rubricas sem S-1010.")
+        origem_recibos = st.radio(
+            "Origem dos recibos",
+            ["Upload pelo navegador", "Arquivos/pasta local"],
+            key="origem_recibos",
+        )
+        if origem_recibos == "Upload pelo navegador":
+            arquivos_recibos = st.file_uploader(
+                "Selecione ZIP/XML de recibos",
+                type=["zip", "xml"], accept_multiple_files=True,
+                key="arquivos_recibos",
+            )
+        else:
+            texto_recibos = st.text_area(
+                "Caminhos dos recibos",
+                placeholder="C:\\eSocial\\cliente\\recibos\\",
+                key="caminhos_recibos_v82",
+            )
+            caminhos_recibos = [x.strip().strip('"') for x in texto_recibos.splitlines() if x.strip()]
+
+        gerar_relatorio = st.button("Gerar Relatório", type="primary", use_container_width=True)
     else:
         arquivo_excel = st.file_uploader(
-            "Selecione o Excel consolidado",
-            type=["xlsx"],
-            accept_multiple_files=False,
-            help="Modelo esperado: abas 02_rubricas_cp e 03_movimentos_cp, como no relatório gerado pelo app ou base manual equivalente.",
+            "Selecione o Excel consolidado", type=["xlsx"], accept_multiple_files=False,
+            help="Modelo esperado: abas 02_rubricas_cp e 03_movimentos_cp.",
         )
-
-    st.markdown("---")
-    st.subheader("Conjunto recomendado")
-    st.write("- S-1010 — tabela de rubricas / codIncCP")
-    st.write("- S-1200 — movimentos de remuneração")
-    st.write("- S-5001 — conferência da base por trabalhador")
-    st.write("- S-5011 — apoio consolidado, quando existir")
-    st.write("- S-3000 — exclusões")
 
     st.markdown("---")
     if st.button("Resetar aplicação", use_container_width=True):
         st.cache_data.clear()
+        for chave in ["resultado_v82", "fontes_principais_v82", "fontes_recibos_v82"]:
+            st.session_state.pop(chave, None)
         st.rerun()
 
 
-def _resolver_fontes_zip(arquivos_upload, caminhos_informados):
+def _resolver_fontes_zip(arquivos_upload, caminhos_informados, prefixo=""):
     fontes = []
     erros = []
     for arquivo in arquivos_upload or []:
-        # Não cria um ZIP agregado em memória; cada pacote é processado separadamente.
-        fontes.append((arquivo.name, arquivo.getvalue()))
+        fontes.append((f"{prefixo}{arquivo.name}", arquivo.getvalue()))
 
     for texto in caminhos_informados or []:
         caminho = Path(texto).expanduser()
         if caminho.is_dir():
-            encontrados = sorted(caminho.rglob("*.zip"))
+            encontrados = sorted([p for p in caminho.rglob("*") if p.is_file() and p.suffix.lower() in {".zip", ".xml"}])
             if not encontrados:
-                erros.append(f"Nenhum ZIP encontrado em: {caminho}")
+                erros.append(f"Nenhum ZIP/XML encontrado em: {caminho}")
             for item in encontrados:
-                fontes.append((item.name, str(item)))
-        elif caminho.is_file() and caminho.suffix.lower() == ".zip":
-            fontes.append((caminho.name, str(caminho)))
+                fontes.append((f"{prefixo}{item.name}", str(item)))
+        elif caminho.is_file() and caminho.suffix.lower() in {".zip", ".xml"}:
+            fontes.append((f"{prefixo}{caminho.name}", str(caminho)))
         else:
-            erros.append(f"Caminho não localizado ou não é ZIP: {caminho}")
+            erros.append(f"Caminho não localizado ou não é ZIP/XML: {caminho}")
     return fontes, erros
 
 
@@ -212,30 +231,29 @@ def _to_excel_dividido_local(writer, df: pd.DataFrame | None, sheet_name: str, m
         parte += 1
 
 if modo_entrada == "ZIP(s) do eSocial":
-    fontes_zip, erros_caminhos = _resolver_fontes_zip(arquivos_zip, caminhos_locais)
-    for erro_caminho in erros_caminhos:
-        st.warning(erro_caminho)
-    if not fontes_zip:
-        st.info(
-            "Envie ZIPs pelo navegador ou informe uma pasta/arquivos locais. O app localiza XMLs relevantes, ZIP dentro de ZIP e recibos S-1010."
-        )
-        st.markdown(
-            """
-### O que esta versão entrega
-- relatório direto de rubricas com **incidência CP** e **sem incidência CP**;
-- classificação visual por caráter da verba: remuneratório, rescisório, férias, 13º, desconto ou informativo/técnico;
-- uma aba separada para **levantamento interativo de verbas**;
-- seleção múltipla, filtros e cálculo estimado de CPP;
-- base por trabalhador para confrontar S-1200 x S-5001;
-- aba específica para rubricas do S-1200 sem correspondência no S-1010;
-- aceita também Excel consolidado no padrão das abas 02_rubricas_cp e 03_movimentos_cp.
-            """
-        )
+    fontes_principais, erros_principais = _resolver_fontes_zip(
+        arquivos_principais, caminhos_principais, prefixo="[PRINCIPAL] "
+    )
+    fontes_recibos, erros_recibos = _resolver_fontes_zip(
+        arquivos_recibos, caminhos_recibos, prefixo="[RECIBOS] "
+    )
+    for erro in erros_principais + erros_recibos:
+        st.warning(erro)
+
+    if gerar_relatorio:
+        if not fontes_principais:
+            st.warning("Selecione pelo menos um ZIP/XML principal do eSocial.")
+            st.stop()
+        with st.spinner("Processando arquivos principais e incorporando automaticamente os recibos S-1010 informados..."):
+            st.session_state["resultado_v82"] = executar_processamento(fontes_principais + fontes_recibos)
+            st.session_state["fontes_principais_v82"] = len(fontes_principais)
+            st.session_state["fontes_recibos_v82"] = len(fontes_recibos)
+
+    if "resultado_v82" not in st.session_state:
+        st.info("Selecione os arquivos principais. Os recibos são opcionais. Depois clique em **Gerar Relatório**.")
         st.stop()
 
-    with st.spinner("Processando ZIP(s) em duas passagens. A primeira cataloga S-1010/recibos; a segunda processa movimentos e bases..."):
-        resultado = executar_processamento(fontes_zip)
-
+    resultado = st.session_state["resultado_v82"]
     df_inventario = resultado.get("inventario", pd.DataFrame())
     df_rubricas = resultado.get("rubricas", pd.DataFrame())
     df_exclusoes = resultado.get("exclusoes", pd.DataFrame())
@@ -246,6 +264,7 @@ if modo_entrada == "ZIP(s) do eSocial":
     df_layout = resultado.get("layout_check", pd.DataFrame())
     df_empresa = resultado.get("empresa", pd.DataFrame())
     modo_excel_consolidado = False
+
 else:
     if arquivo_excel is None:
         st.info("Envie um Excel consolidado com as abas 02_rubricas_cp e 03_movimentos_cp.")
@@ -314,6 +333,32 @@ with st.spinner("Montando relatório de composição da incidência CP..."):
             df_bases_trabalhador=df_bases_trab,
             df_bases_contribuicao=df_bases_contrib,
         )
+
+# Consolidação específica para orientar a busca dos recibos faltantes.
+df_busca_recibos = gerar_busca_recibos(df_sem_cadastro)
+
+# Resumo claro da complementação por recibos.
+if modo_entrada == "ZIP(s) do eSocial":
+    st.markdown("---")
+    st.markdown("## Conferência dos recibos")
+    if df_inventario.empty or "arquivo" not in df_inventario.columns:
+        st.caption("Nenhum recibo foi informado nesta execução.")
+    else:
+        inv_rec = df_inventario[df_inventario["arquivo"].fillna("").astype(str).str.startswith("[RECIBOS] ")].copy()
+        if inv_rec.empty:
+            st.caption("Nenhum recibo foi informado nesta execução.")
+        else:
+            total_xml_rec = len(inv_rec)
+            s1010_rec = int((inv_rec.get("tipo", "").astype(str).eq("S-1010") & inv_rec.get("envelope_recibo", "").astype(str).eq("Sim")).sum())
+            outros_rec = total_xml_rec - s1010_rec
+            c1, c2, c3 = st.columns(3)
+            c1.metric("XMLs nos arquivos de recibos", f"{total_xml_rec:,}".replace(",", "."))
+            c2.metric("Recibos S-1010 encontrados", f"{s1010_rec:,}".replace(",", "."))
+            c3.metric("Outros eventos ignorados", f"{outros_rec:,}".replace(",", "."))
+            if s1010_rec:
+                st.success("Os recibos S-1010 encontrados foram incorporados automaticamente ao catálogo antes da geração do relatório.")
+            else:
+                st.warning("Foram enviados arquivos na área de recibos, mas nenhum envelope de recibo S-1010 foi reconhecido.")
 
 st.markdown("---")
 st.caption(f"Módulo ativo: {modulo_ativo}")
@@ -716,7 +761,7 @@ if modulo_ativo == "Levantamento de Verbas":
                         _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
                     agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                     st.session_state["levantamento_excel_bytes"] = buffer_levantamento.getvalue()
-                    st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v8_0.xlsx"
+                    st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v8_1_engine_v2.xlsx"
                     st.session_state["levantamento_status_geracao"] = "pronto"
                     st.session_state["levantamento_ultima_geracao"] = {
                         "data_hora": agora,
@@ -746,7 +791,7 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.download_button(
                     label="Baixar levantamento de verbas",
                     data=st.session_state["levantamento_excel_bytes"],
-                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v8_0.xlsx"),
+                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v8_1_engine_v2.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     key="download_levantamento_verbas",
@@ -795,6 +840,7 @@ if modulo_ativo == "Relatório de Incidência CP":
         df_movimentos_cp=df_movimentos_cp,
         df_base_trabalhador=df_base_trabalhador,
         df_sem_cadastro=df_sem_cadastro,
+        df_busca_recibos=df_busca_recibos,
         df_s5001_resumo=df_s5001_resumo,
         df_levantamento=df_levantamento_export,
         df_empresa=df_empresa,
@@ -804,7 +850,7 @@ if modulo_ativo == "Relatório de Incidência CP":
     st.download_button(
         label="Baixar relatório de incidência CP",
         data=excel_bytes,
-        file_name="relatorio_incidencia_cp_esocial_v8_0.xlsx",
+        file_name="relatorio_incidencia_cp_esocial_v8_1_engine_v2.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )

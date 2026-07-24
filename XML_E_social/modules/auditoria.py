@@ -370,6 +370,34 @@ def _filtrar_movimentos_cp_exportacao(df: pd.DataFrame | None, modo: str = "todo
     return base[cod.isin(CODIGOS_CP_EXPORTACAO_PADRAO)].copy()
 
 
+
+
+def gerar_busca_recibos(df_sem_cadastro: pd.DataFrame) -> pd.DataFrame:
+    """Consolida as rubricas sem S-1010 para orientar o download de recibos."""
+    if df_sem_cadastro is None or df_sem_cadastro.empty:
+        return pd.DataFrame(columns=[
+            "cod_rubr", "ide_tab_rubr", "dsc_rubr", "primeira_competencia",
+            "ultima_competencia", "qtd_competencias", "qtd_lancamentos",
+            "qtd_cpfs", "valor_total", "acao_recomendada"
+        ])
+    base = df_sem_cadastro.copy()
+    for col in ["cod_rubr", "ide_tab_rubr", "dsc_rubr", "per_apur", "cpf"]:
+        if col not in base.columns:
+            base[col] = ""
+    if "vr_rubr" not in base.columns:
+        base["vr_rubr"] = 0.0
+    base["vr_rubr"] = pd.to_numeric(base["vr_rubr"], errors="coerce").fillna(0.0)
+    resumo = (base.groupby(["cod_rubr", "ide_tab_rubr", "dsc_rubr"], dropna=False, as_index=False)
+        .agg(primeira_competencia=("per_apur", "min"),
+             ultima_competencia=("per_apur", "max"),
+             qtd_competencias=("per_apur", "nunique"),
+             qtd_lancamentos=("vr_rubr", "size"),
+             qtd_cpfs=("cpf", "nunique"),
+             valor_total=("vr_rubr", "sum")))
+    resumo["acao_recomendada"] = "Baixar recibo S-1010 da rubrica e aplicar na complementação do relatório."
+    return resumo.sort_values(["qtd_lancamentos", "valor_total"], ascending=[False, False])
+
+
 def gerar_excel_saida(
     df_inventario: pd.DataFrame,
     df_rubricas: pd.DataFrame,
@@ -384,6 +412,7 @@ def gerar_excel_saida(
     df_movimentos_cp: pd.DataFrame,
     df_base_trabalhador: pd.DataFrame,
     df_sem_cadastro: pd.DataFrame,
+    df_busca_recibos: pd.DataFrame | None = None,
     df_s5001_resumo: pd.DataFrame | None = None,
     df_levantamento: pd.DataFrame | None = None,
     df_empresa: pd.DataFrame | None = None,
@@ -398,6 +427,7 @@ def gerar_excel_saida(
         _to_excel_dividido(writer, df_movimentos_cp_export, "03_movimentos_cp")
         _to_excel_dividido(writer, df_base_trabalhador, "04_base_trabalhador")
         _to_excel_dividido(writer, df_sem_cadastro, "05_sem_s1010")
+        _to_excel_dividido(writer, df_busca_recibos if df_busca_recibos is not None else gerar_busca_recibos(df_sem_cadastro), "05_busca_recibos")
         _to_excel_dividido(writer, df_s5001_resumo if df_s5001_resumo is not None else pd.DataFrame(), "06_s5001_tpvalor")
         _to_excel_dividido(writer, df_levantamento if df_levantamento is not None else pd.DataFrame(), "07_levantamento")
         _to_excel_dividido(writer, df_rubricas, "apoio_s1010")
