@@ -1,5 +1,6 @@
 import io
 import re
+from typing import Callable
 
 import pandas as pd
 
@@ -307,13 +308,23 @@ def gerar_resumo_visual(df_rubricas_cp: pd.DataFrame, df_movimentos_cp: pd.DataF
     return pd.DataFrame(linhas)
 
 
-def preparar_pacote_analitico(df_rubricas: pd.DataFrame, df_remun: pd.DataFrame, df_bases_trabalhador: pd.DataFrame, df_bases_contribuicao: pd.DataFrame, aliquota_cpp_padrao: float = 20.0):
+def preparar_pacote_analitico(df_rubricas: pd.DataFrame, df_remun: pd.DataFrame, df_bases_trabalhador: pd.DataFrame, df_bases_contribuicao: pd.DataFrame, aliquota_cpp_padrao: float = 20.0, progress_callback: Callable[[float, str], None] | None = None):
+    def progresso(valor, mensagem):
+        if progress_callback:
+            progress_callback(valor, mensagem)
+    progresso(0.08, "Classificando movimentos do S-1200...")
     df_movimentos_cp = preparar_movimentos_cp(df_remun)
+    progresso(0.28, "Consolidando relatório por rubrica...")
     df_rubricas_cp = gerar_relatorio_rubricas_cp(df_remun)
+    progresso(0.48, "Cruzando movimentos com bases do S-5001...")
     df_base_trabalhador = gerar_base_trabalhador_cp(df_remun, df_bases_trabalhador)
+    progresso(0.66, "Identificando rubricas sem cadastro S-1010...")
     df_sem_cadastro = preparar_rubricas_sem_cadastro(df_remun)
+    progresso(0.80, "Consolidando totalizadores S-5001...")
     df_s5001_resumo = gerar_resumo_s5001(df_bases_trabalhador)
+    progresso(0.94, "Montando indicadores do relatório...")
     df_resumo_visual = gerar_resumo_visual(df_rubricas_cp, df_movimentos_cp, df_sem_cadastro, df_bases_trabalhador)
+    progresso(1.0, "Relatório analítico concluído.")
     return df_resumo_visual, df_rubricas_cp, df_movimentos_cp, df_base_trabalhador, df_sem_cadastro, df_s5001_resumo
 
 
@@ -417,19 +428,32 @@ def gerar_excel_saida(
     df_levantamento: pd.DataFrame | None = None,
     df_empresa: pd.DataFrame | None = None,
     modo_exportacao_movimentos_cp: str = "todos",
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> bytes:
+    def progresso(valor, mensagem):
+        if progress_callback:
+            progress_callback(valor, mensagem)
     output = io.BytesIO()
+    progresso(0.02, "Abrindo arquivo Excel...")
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        progresso(0.06, "Exportando identificação da empresa...")
         _to_excel_dividido(writer, df_empresa if df_empresa is not None else pd.DataFrame(), "00_empresa")
+        progresso(0.12, "Exportando resumo...")
         _to_excel_dividido(writer, df_resumo_visual, "01_resumo")
+        progresso(0.20, "Exportando rubricas CP...")
         _to_excel_dividido(writer, df_rubricas_cp, "02_rubricas_cp")
         df_movimentos_cp_export = _filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp)
+        progresso(0.35, "Exportando movimentos CP...")
         _to_excel_dividido(writer, df_movimentos_cp_export, "03_movimentos_cp")
+        progresso(0.50, "Exportando base por trabalhador...")
         _to_excel_dividido(writer, df_base_trabalhador, "04_base_trabalhador")
+        progresso(0.58, "Exportando rubricas sem S-1010...")
         _to_excel_dividido(writer, df_sem_cadastro, "05_sem_s1010")
         _to_excel_dividido(writer, df_busca_recibos if df_busca_recibos is not None else gerar_busca_recibos(df_sem_cadastro), "05_busca_recibos")
+        progresso(0.70, "Exportando resumos complementares...")
         _to_excel_dividido(writer, df_s5001_resumo if df_s5001_resumo is not None else pd.DataFrame(), "06_s5001_tpvalor")
         _to_excel_dividido(writer, df_levantamento if df_levantamento is not None else pd.DataFrame(), "07_levantamento")
+        progresso(0.78, "Exportando abas de apoio...")
         _to_excel_dividido(writer, df_rubricas, "apoio_s1010")
         _to_excel_dividido(writer, df_remun, "apoio_s1200")
         _to_excel_dividido(writer, df_bases_trabalhador, "apoio_s5001")
@@ -438,5 +462,7 @@ def gerar_excel_saida(
         _to_excel_dividido(writer, df_layout, "checagem_layout")
         _to_excel_dividido(writer, df_inventario, "inventario")
         _to_excel_dividido(writer, df_erros, "erros_xml")
+        progresso(0.96, "Finalizando o arquivo Excel...")
     output.seek(0)
+    progresso(1.0, "Excel do relatório concluído.")
     return output.getvalue()

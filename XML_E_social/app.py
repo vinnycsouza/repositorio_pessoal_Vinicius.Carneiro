@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from modules.auditoria import gerar_busca_recibos, gerar_excel_saida, gerar_resumo_visual, preparar_pacote_analitico
-from modules.processador_zip import processar_fontes_esocial
+from modules.processador_zip import limpar_workspaces_temporarios_antigos, processar_fontes_esocial
 from utils.helpers import decimal_br
 
 
@@ -16,7 +16,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 8.2 Engine V2: processamento econômico em RAM, entradas separadas e incorporação automática de recibos S-1010."
+    "Versão 8.3 Engine V2: processamento econômico em RAM, entradas separadas e incorporação automática de recibos S-1010."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -101,6 +101,14 @@ with st.sidebar:
         )
 
     st.markdown("---")
+    if st.button("Limpar temporários antigos", use_container_width=True, help="Remove apenas pastas esocial_engine_v2_* deixadas no TEMP por execuções interrompidas."):
+        limpeza = limpar_workspaces_temporarios_antigos()
+        mb = limpeza["bytes_liberados"] / (1024 * 1024)
+        if limpeza["falhas"]:
+            st.warning(f"Foram removidas {limpeza['pastas_removidas']} pasta(s), liberando {mb:.1f} MB. Algumas pastas não puderam ser removidas.")
+        else:
+            st.success(f"Limpeza concluída: {limpeza['pastas_removidas']} pasta(s), {mb:.1f} MB liberados.")
+
     if st.button("Resetar aplicação", use_container_width=True):
         st.cache_data.clear()
         for chave in ["resultado_v82", "fontes_principais_v82", "fontes_recibos_v82"]:
@@ -129,8 +137,21 @@ def _resolver_fontes_zip(arquivos_upload, caminhos_informados, prefixo=""):
     return fontes, erros
 
 
-def executar_processamento(fontes):
-    return processar_fontes_esocial(fontes)
+def executar_processamento(fontes, progress_callback=None):
+    return processar_fontes_esocial(fontes, progress_callback=progress_callback)
+
+
+def _criar_progresso(titulo: str):
+    st.markdown(f"### {titulo}")
+    barra = st.progress(0, text="Iniciando...")
+    status = st.empty()
+
+    def atualizar(valor: float, mensagem: str):
+        percentual = max(0, min(100, int(round(float(valor) * 100))))
+        barra.progress(percentual, text=f"{percentual}% — {mensagem}")
+        status.caption(mensagem)
+
+    return atualizar, barra, status
 
 
 @st.cache_data(show_spinner=False)
@@ -244,10 +265,11 @@ if modo_entrada == "ZIP(s) do eSocial":
         if not fontes_principais:
             st.warning("Selecione pelo menos um ZIP/XML principal do eSocial.")
             st.stop()
-        with st.spinner("Processando arquivos principais e incorporando automaticamente os recibos S-1010 informados..."):
-            st.session_state["resultado_v82"] = executar_processamento(fontes_principais + fontes_recibos)
-            st.session_state["fontes_principais_v82"] = len(fontes_principais)
-            st.session_state["fontes_recibos_v82"] = len(fontes_recibos)
+        atualizar_progresso, barra_proc, status_proc = _criar_progresso("Progresso do processamento dos XMLs")
+        st.session_state["resultado_v82"] = executar_processamento(fontes_principais + fontes_recibos, progress_callback=atualizar_progresso)
+        st.session_state["fontes_principais_v82"] = len(fontes_principais)
+        st.session_state["fontes_recibos_v82"] = len(fontes_recibos)
+        status_proc.success("Processamento dos XMLs concluído.")
 
     if "resultado_v82" not in st.session_state:
         st.info("Selecione os arquivos principais. Os recibos são opcionais. Depois clique em **Gerar Relatório**.")
@@ -311,15 +333,17 @@ def empresa_principal(df: pd.DataFrame) -> tuple[str, str]:
 
 nome_empresa, cnpj_empresa = empresa_principal(df_empresa)
 
-with st.spinner("Montando relatório de composição da incidência CP..."):
-    if modo_excel_consolidado:
+atualizar_analise, barra_analise, status_analise = _criar_progresso("Progresso da preparação do relatório")
+if modo_excel_consolidado:
+        atualizar_analise(0.15, "Carregando dados consolidados do Excel...")
         df_rubricas_cp = df_rubricas_cp_excel.copy()
         df_movimentos_cp = df_movimentos_cp_excel.copy()
         df_base_trabalhador = pd.DataFrame()
         df_sem_cadastro = pd.DataFrame()
         df_s5001_resumo = pd.DataFrame()
         df_resumo_visual = gerar_resumo_visual(df_rubricas_cp, df_movimentos_cp, df_sem_cadastro, df_bases_trab)
-    else:
+        atualizar_analise(1.0, "Relatório consolidado carregado.")
+else:
         (
             df_resumo_visual,
             df_rubricas_cp,
@@ -332,7 +356,9 @@ with st.spinner("Montando relatório de composição da incidência CP..."):
             df_remun=df_remun,
             df_bases_trabalhador=df_bases_trab,
             df_bases_contribuicao=df_bases_contrib,
+            progress_callback=atualizar_analise,
         )
+status_analise.success("Preparação do relatório concluída.")
 
 # Consolidação específica para orientar a busca dos recibos faltantes.
 df_busca_recibos = gerar_busca_recibos(df_sem_cadastro)
@@ -735,13 +761,18 @@ if modulo_ativo == "Levantamento de Verbas":
 
             if st.button("Preparar Excel do levantamento", use_container_width=True, key="btn_preparar_excel_levantamento"):
                 st.session_state["levantamento_status_geracao"] = "gerando"
-                with st.spinner("Gerando Excel do levantamento. Aguarde até aparecer a mensagem de conclusão antes de baixar..."):
-                    buffer_levantamento = io.BytesIO()
-                    with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
+                atualizar_lev, barra_lev, status_lev_prog = _criar_progresso("Progresso da geração do levantamento")
+                atualizar_lev(0.03, "Preparando o arquivo Excel...")
+                buffer_levantamento = io.BytesIO()
+                with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
+                        atualizar_lev(0.10, "Exportando identificação da empresa...")
                         _to_excel_dividido_local(writer, df_empresa, "00_empresa")
+                        atualizar_lev(0.20, "Exportando parâmetros do levantamento...")
                         _to_excel_dividido_local(writer, df_parametros_lev, "01_resumo")
+                        atualizar_lev(0.35, "Exportando resumo por rubrica...")
                         _to_excel_dividido_local(writer, df_resumo_lev, "02_resumo_rubricas")
                         if incluir_movimentos_detalhados:
+                            atualizar_lev(0.55, "Exportando movimentos detalhados...")
                             _to_excel_dividido_local(writer, df_levantamento, "03_movimentos")
                         else:
                             aviso_movimentos = pd.DataFrame({
@@ -756,14 +787,18 @@ if modulo_ativo == "Levantamento de Verbas":
                                     f"Total levantado: R$ {decimal_br(total_lev)}",
                                 ],
                             })
+                            atualizar_lev(0.55, "Registrando opção de exportação otimizada...")
                             _to_excel_dividido_local(writer, aviso_movimentos, "03_movimentos")
+                        atualizar_lev(0.72, "Exportando resumo por competência...")
                         _to_excel_dividido_local(writer, df_resumo_competencia_lev, "04_resumo_competencia")
+                        atualizar_lev(0.88, "Exportando competência por rubrica...")
                         _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
-                    agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                    st.session_state["levantamento_excel_bytes"] = buffer_levantamento.getvalue()
-                    st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v8_1_engine_v2.xlsx"
-                    st.session_state["levantamento_status_geracao"] = "pronto"
-                    st.session_state["levantamento_ultima_geracao"] = {
+                atualizar_lev(0.97, "Finalizando arquivo do levantamento...")
+                agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                st.session_state["levantamento_excel_bytes"] = buffer_levantamento.getvalue()
+                st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v8_4_engine_v2.xlsx"
+                st.session_state["levantamento_status_geracao"] = "pronto"
+                st.session_state["levantamento_ultima_geracao"] = {
                         "data_hora": agora,
                         "qtd_rubricas": int(qtd_rubricas_lev),
                         "qtd_movimentos": int(len(df_levantamento)),
@@ -771,7 +806,9 @@ if modulo_ativo == "Levantamento de Verbas":
                         "total_levantado": float(total_lev),
                         "cpp_estimado": float(cpp_lev),
                         "incluiu_movimentos": "Sim" if incluir_movimentos_detalhados else "Não",
-                    }
+                }
+                atualizar_lev(1.0, "Levantamento concluído.")
+                status_lev_prog.success("Excel do levantamento pronto para download.")
                 st.success("Levantamento atualizado. O botão de download abaixo corresponde à última geração concluída.")
 
             if st.session_state.get("levantamento_status_geracao") == "gerando":
@@ -791,7 +828,7 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.download_button(
                     label="Baixar levantamento de verbas",
                     data=st.session_state["levantamento_excel_bytes"],
-                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v8_1_engine_v2.xlsx"),
+                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v8_4_engine_v2.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                     key="download_levantamento_verbas",
@@ -826,6 +863,7 @@ if modulo_ativo == "Relatório de Incidência CP":
         if not df_movimentos_cp.empty:
             st.caption("A aba 03_movimentos_cp cabe em uma única aba do Excel e será exportada no padrão completo.")
 
+    atualizar_excel_rel, barra_excel_rel, status_excel_rel = _criar_progresso("Progresso da geração do Excel do relatório")
     excel_bytes = gerar_excel_saida(
         df_inventario=df_inventario,
         df_rubricas=df_rubricas,
@@ -845,12 +883,14 @@ if modulo_ativo == "Relatório de Incidência CP":
         df_levantamento=df_levantamento_export,
         df_empresa=df_empresa,
         modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+        progress_callback=atualizar_excel_rel,
     )
+    status_excel_rel.success("Excel do relatório pronto para download.")
 
     st.download_button(
         label="Baixar relatório de incidência CP",
         data=excel_bytes,
-        file_name="relatorio_incidencia_cp_esocial_v8_1_engine_v2.xlsx",
+        file_name="relatorio_incidencia_cp_esocial_v8_4_engine_v2.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
