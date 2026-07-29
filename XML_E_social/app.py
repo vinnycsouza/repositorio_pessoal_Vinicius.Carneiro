@@ -7,7 +7,13 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from modules.auditoria import gerar_busca_recibos, gerar_excel_saida, gerar_resumo_visual, preparar_pacote_analitico
+from modules.auditoria import (
+    _filtrar_movimentos_cp_exportacao,
+    gerar_busca_recibos,
+    gerar_excel_saida,
+    gerar_resumo_visual,
+    preparar_pacote_analitico,
+)
 from modules.processador_zip import limpar_workspaces_temporarios_antigos, processar_fontes_esocial
 from utils.helpers import decimal_br
 
@@ -16,7 +22,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 9.0 Engine V3: SQLite persistente, checkpoint automático, retomada e processamento econômico em RAM."
+    "Versão 9.1 Engine V3: SQLite persistente, checkpoint, retomada e exportação segura para Excel."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -839,58 +845,98 @@ if modulo_ativo == "Levantamento de Verbas":
 if modulo_ativo == "Relatório de Incidência CP":
     st.markdown("## Exportação")
 
-    modo_exportacao_movimentos_cp = "todos"
+    total_movimentos_cp = len(df_movimentos_cp) if df_movimentos_cp is not None else 0
+    excede_limite_excel = total_movimentos_cp > MAX_LINHAS_DADOS_EXCEL
 
-    if not df_movimentos_cp.empty and len(df_movimentos_cp) > MAX_LINHAS_DADOS_EXCEL:
+    if excede_limite_excel:
         st.warning(
-            f"A aba 03_movimentos_cp possui {len(df_movimentos_cp):,} linhas e ultrapassa o limite de uma aba do Excel.".replace(",", ".")
+            f"A aba 03_movimentos_cp possui {total_movimentos_cp:,} linhas e ultrapassa o limite de uma aba do Excel.".replace(",", ".")
         )
-        escolha_movimentos_cp = st.radio(
-            "Como deseja exportar a aba 03_movimentos_cp?",
-            [
-                "Apenas incidências CP padrão (11, 12, 21 e 22)",
-                "Todos os movimentos, dividindo em abas",
-            ],
-            index=0,
-            help=(
-                "A opção de incidências CP mantém o mesmo padrão/colunas da aba 03_movimentos_cp, "
-                "mas reduz o volume para os códigos 11, 12, 21 e 22. Se ainda ultrapassar o limite, a aba será dividida automaticamente."
-            ),
+
+    escolha_movimentos_cp = st.radio(
+        "Como deseja exportar a aba 03_movimentos_cp?",
+        [
+            "Apenas movimentos com incidência CP padrão (11, 12, 21 e 22)",
+            "Todos os movimentos",
+        ],
+        index=0 if excede_limite_excel else 1,
+        help=(
+            "Faça esta escolha antes de preparar o Excel. A primeira opção mantém somente os movimentos "
+            "com codIncCP 11, 12, 21 e 22. A segunda mantém todos os movimentos. Em qualquer opção, "
+            "se a quantidade exceder o limite do Excel, a aba 03 será dividida automaticamente em partes."
+        ),
+        key="relatorio_modo_exportacao_movimentos_cp",
+    )
+
+    modo_exportacao_movimentos_cp = (
+        "incidencia_cp_padrao"
+        if escolha_movimentos_cp.startswith("Apenas")
+        else "todos"
+    )
+
+    if modo_exportacao_movimentos_cp == "incidencia_cp_padrao":
+        qtd_exportacao = len(_filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp))
+        st.caption(
+            f"A aba 03 será preparada com {qtd_exportacao:,} movimentos de incidência CP padrão.".replace(",", ".")
         )
-        if escolha_movimentos_cp.startswith("Apenas"):
-            modo_exportacao_movimentos_cp = "incidencia_cp_padrao"
     else:
-        if not df_movimentos_cp.empty:
-            st.caption("A aba 03_movimentos_cp cabe em uma única aba do Excel e será exportada no padrão completo.")
+        qtd_exportacao = total_movimentos_cp
+        st.caption(
+            f"A aba 03 será preparada com todos os {qtd_exportacao:,} movimentos.".replace(",", ".")
+        )
 
-    atualizar_excel_rel, barra_excel_rel, status_excel_rel = _criar_progresso("Progresso da geração do Excel do relatório")
-    excel_bytes = gerar_excel_saida(
-        df_inventario=df_inventario,
-        df_rubricas=df_rubricas,
-        df_exclusoes=df_exclusoes,
-        df_remun=df_remun,
-        df_bases_trabalhador=df_bases_trab,
-        df_bases_contribuicao=df_bases_contrib,
-        df_erros=df_erros,
-        df_layout=df_layout,
-        df_resumo_visual=df_resumo_visual,
-        df_rubricas_cp=df_rubricas_cp,
-        df_movimentos_cp=df_movimentos_cp,
-        df_base_trabalhador=df_base_trabalhador,
-        df_sem_cadastro=df_sem_cadastro,
-        df_busca_recibos=df_busca_recibos,
-        df_s5001_resumo=df_s5001_resumo,
-        df_levantamento=df_levantamento_export,
-        df_empresa=df_empresa,
-        modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
-        progress_callback=atualizar_excel_rel,
-    )
-    status_excel_rel.success("Excel do relatório pronto para download.")
+    if qtd_exportacao > MAX_LINHAS_DADOS_EXCEL:
+        qtd_partes = (qtd_exportacao + MAX_LINHAS_DADOS_EXCEL - 1) // MAX_LINHAS_DADOS_EXCEL
+        st.info(
+            f"A aba 03_movimentos_cp será dividida automaticamente em {qtd_partes} abas, sem perda de linhas."
+        )
 
-    st.download_button(
-        label="Baixar relatório de incidência CP",
-        data=excel_bytes,
-        file_name="relatorio_incidencia_cp_esocial_v8_4_engine_v2.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    assinatura_exportacao = f"{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}"
+    if st.session_state.get("relatorio_excel_assinatura") != assinatura_exportacao:
+        st.session_state.pop("relatorio_excel_bytes", None)
+        st.session_state.pop("relatorio_excel_nome", None)
+
+    preparar_excel_rel = st.button(
+        "Preparar Excel do relatório",
+        type="primary",
         use_container_width=True,
+        key="preparar_excel_relatorio_incidencia",
     )
+
+    if preparar_excel_rel:
+        atualizar_excel_rel, barra_excel_rel, status_excel_rel = _criar_progresso("Progresso da geração do Excel do relatório")
+        excel_bytes = gerar_excel_saida(
+            df_inventario=df_inventario,
+            df_rubricas=df_rubricas,
+            df_exclusoes=df_exclusoes,
+            df_remun=df_remun,
+            df_bases_trabalhador=df_bases_trab,
+            df_bases_contribuicao=df_bases_contrib,
+            df_erros=df_erros,
+            df_layout=df_layout,
+            df_resumo_visual=df_resumo_visual,
+            df_rubricas_cp=df_rubricas_cp,
+            df_movimentos_cp=df_movimentos_cp,
+            df_base_trabalhador=df_base_trabalhador,
+            df_sem_cadastro=df_sem_cadastro,
+            df_busca_recibos=df_busca_recibos,
+            df_s5001_resumo=df_s5001_resumo,
+            df_levantamento=df_levantamento_export,
+            df_empresa=df_empresa,
+            modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+            progress_callback=atualizar_excel_rel,
+        )
+        st.session_state["relatorio_excel_bytes"] = excel_bytes
+        st.session_state["relatorio_excel_nome"] = "relatorio_incidencia_cp_esocial_v9_1.xlsx"
+        st.session_state["relatorio_excel_assinatura"] = assinatura_exportacao
+        status_excel_rel.success("Excel do relatório pronto para download.")
+
+    if st.session_state.get("relatorio_excel_bytes"):
+        st.download_button(
+            label="Baixar relatório de incidência CP",
+            data=st.session_state["relatorio_excel_bytes"],
+            file_name=st.session_state.get("relatorio_excel_nome", "relatorio_incidencia_cp_esocial_v9_1.xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="download_relatorio_incidencia_cp",
+        )
