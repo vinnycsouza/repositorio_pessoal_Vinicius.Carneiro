@@ -1,5 +1,7 @@
 import io
+import os
 import re
+import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,7 @@ from modules.auditoria import (
     preparar_pacote_analitico,
 )
 from modules.processador_zip import limpar_workspaces_temporarios_antigos, processar_fontes_esocial
+from modules.sqlite_relatorio import gerar_excel_saida_sqlite
 from utils.helpers import decimal_br
 
 
@@ -22,7 +25,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 9.1 Engine V3: SQLite persistente, checkpoint, retomada e exportação segura para Excel."
+    "Versão 9.2 Engine V3: SQLite persistente, checkpoint, consolidação sem DataFrames gigantes e Excel em streaming."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -340,7 +343,19 @@ def empresa_principal(df: pd.DataFrame) -> tuple[str, str]:
 nome_empresa, cnpj_empresa = empresa_principal(df_empresa)
 
 atualizar_analise, barra_analise, status_analise = _criar_progresso("Progresso da preparação do relatório")
-if modo_excel_consolidado:
+modo_sqlite_seguro = bool(resultado.get("modo_sqlite_seguro", False)) if modo_entrada == "ZIP(s) do eSocial" else False
+pacote_sqlite = resultado.get("pacote_sqlite", {}) if modo_sqlite_seguro else {}
+db_path_sqlite = resultado.get("db_path", "") if modo_sqlite_seguro else ""
+if modo_sqlite_seguro:
+        atualizar_analise(0.20, "Carregando resumos consolidados diretamente do SQLite...")
+        df_resumo_visual = pacote_sqlite.get("resumo_visual", pd.DataFrame()).copy()
+        df_rubricas_cp = pacote_sqlite.get("rubricas_cp", pd.DataFrame()).copy()
+        df_movimentos_cp = pacote_sqlite.get("movimentos_cp", pd.DataFrame()).copy()
+        df_base_trabalhador = pacote_sqlite.get("base_trabalhador", pd.DataFrame()).copy()
+        df_sem_cadastro = pacote_sqlite.get("sem_cadastro", pd.DataFrame()).copy()
+        df_s5001_resumo = pacote_sqlite.get("s5001_resumo", pd.DataFrame()).copy()
+        atualizar_analise(1.0, "Relatório consolidado no SQLite carregado sem bases gigantes na memória.")
+elif modo_excel_consolidado:
         atualizar_analise(0.15, "Carregando dados consolidados do Excel...")
         df_rubricas_cp = df_rubricas_cp_excel.copy()
         df_movimentos_cp = df_movimentos_cp_excel.copy()
@@ -409,8 +424,12 @@ if modulo_ativo == "Relatório de Incidência CP":
     qtd_rubricas = len(df_rubricas_cp) if not df_rubricas_cp.empty else 0
     qtd_incide = int(df_rubricas_cp["status_cp"].eq("Incide CP").sum()) if not df_rubricas_cp.empty else 0
     qtd_nao_incide = int(df_rubricas_cp["status_cp"].eq("Não incide CP").sum()) if not df_rubricas_cp.empty else 0
-    qtd_sem_s1010 = len(df_sem_cadastro) if not df_sem_cadastro.empty else 0
-    valor_incide = float(pd.to_numeric(df_movimentos_cp.loc[df_movimentos_cp["considerado_cp"].eq("Sim"), "vr_rubr"], errors="coerce").fillna(0).sum()) if not df_movimentos_cp.empty else 0.0
+    qtd_sem_s1010 = int((df_rubricas_cp["status_cp"].eq("Sem S-1010")).sum()) if modo_sqlite_seguro and not df_rubricas_cp.empty else (len(df_sem_cadastro) if not df_sem_cadastro.empty else 0)
+    if modo_sqlite_seguro and not df_resumo_visual.empty:
+        linha_valor = df_resumo_visual[df_resumo_visual["indicador"].eq("Valor com incidência CP")]
+        valor_incide = float(linha_valor["valor"].iloc[0]) if not linha_valor.empty else 0.0
+    else:
+        valor_incide = float(pd.to_numeric(df_movimentos_cp.loc[df_movimentos_cp["considerado_cp"].eq("Sim"), "vr_rubr"], errors="coerce").fillna(0).sum()) if not df_movimentos_cp.empty else 0.0
 
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Rubricas únicas", f"{qtd_rubricas:,}".replace(",", "."))
@@ -471,6 +490,8 @@ if modulo_ativo == "Relatório de Incidência CP":
             "Erros",
         ])
         with tabs[0]:
+            if modo_sqlite_seguro:
+                st.caption("Prévia das primeiras 5.000 linhas. A base completa permanece no SQLite e será exportada integralmente em streaming.")
             st.dataframe(df_movimentos_cp, use_container_width=True, hide_index=True)
         with tabs[1]:
             st.dataframe(df_rubricas, use_container_width=True, hide_index=True)
@@ -490,6 +511,14 @@ if modulo_ativo == "Relatório de Incidência CP":
             st.dataframe(df_erros, use_container_width=True, hide_index=True)
 
 if modulo_ativo == "Levantamento de Verbas":
+    if modo_sqlite_seguro:
+        st.error(
+            "O processamento atual está no modo SQLite seguro por causa do volume. "
+            "Para preservar a integridade, o aplicativo não utilizará a prévia de 5.000 linhas como se fosse a base completa. "
+            "O Relatório de Incidência CP e o Excel integral continuam disponíveis em streaming."
+        )
+        st.info("O módulo de levantamento permanece integralmente disponível para bases abaixo do limite seguro de memória.")
+        st.stop()
     st.markdown("## Levantamento de verbas")
     st.caption("Selecione rubricas já lidas no S-1200 e cruzadas com o S-1010 para calcular valores e estimar CPP.")
 
@@ -845,7 +874,7 @@ if modulo_ativo == "Levantamento de Verbas":
 if modulo_ativo == "Relatório de Incidência CP":
     st.markdown("## Exportação")
 
-    total_movimentos_cp = len(df_movimentos_cp) if df_movimentos_cp is not None else 0
+    total_movimentos_cp = int(pacote_sqlite.get("total_movimentos_cp", 0)) if modo_sqlite_seguro else (len(df_movimentos_cp) if df_movimentos_cp is not None else 0)
     excede_limite_excel = total_movimentos_cp > MAX_LINHAS_DADOS_EXCEL
 
     if excede_limite_excel:
@@ -875,7 +904,7 @@ if modulo_ativo == "Relatório de Incidência CP":
     )
 
     if modo_exportacao_movimentos_cp == "incidencia_cp_padrao":
-        qtd_exportacao = len(_filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp))
+        qtd_exportacao = int(pacote_sqlite.get("total_movimentos_cp_padrao", 0)) if modo_sqlite_seguro else len(_filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp))
         st.caption(
             f"A aba 03 será preparada com {qtd_exportacao:,} movimentos de incidência CP padrão.".replace(",", ".")
         )
@@ -905,36 +934,67 @@ if modulo_ativo == "Relatório de Incidência CP":
 
     if preparar_excel_rel:
         atualizar_excel_rel, barra_excel_rel, status_excel_rel = _criar_progresso("Progresso da geração do Excel do relatório")
-        excel_bytes = gerar_excel_saida(
-            df_inventario=df_inventario,
-            df_rubricas=df_rubricas,
-            df_exclusoes=df_exclusoes,
-            df_remun=df_remun,
-            df_bases_trabalhador=df_bases_trab,
-            df_bases_contribuicao=df_bases_contrib,
-            df_erros=df_erros,
-            df_layout=df_layout,
-            df_resumo_visual=df_resumo_visual,
-            df_rubricas_cp=df_rubricas_cp,
-            df_movimentos_cp=df_movimentos_cp,
-            df_base_trabalhador=df_base_trabalhador,
-            df_sem_cadastro=df_sem_cadastro,
-            df_busca_recibos=df_busca_recibos,
-            df_s5001_resumo=df_s5001_resumo,
-            df_levantamento=df_levantamento_export,
-            df_empresa=df_empresa,
-            modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
-            progress_callback=atualizar_excel_rel,
-        )
-        st.session_state["relatorio_excel_bytes"] = excel_bytes
-        st.session_state["relatorio_excel_nome"] = "relatorio_incidencia_cp_esocial_v9_1.xlsx"
+        if modo_sqlite_seguro:
+            pasta_saida = Path(resultado.get("workspace_temporario", tempfile.gettempdir())) / "output"
+            pasta_saida.mkdir(parents=True, exist_ok=True)
+            caminho_excel = pasta_saida / "relatorio_incidencia_cp_esocial_v9_2_streaming.xlsx"
+            gerar_excel_saida_sqlite(
+                db_path=db_path_sqlite,
+                caminho_saida=caminho_excel,
+                df_empresa=df_empresa,
+                df_resumo_visual=df_resumo_visual,
+                df_rubricas_cp=df_rubricas_cp,
+                df_levantamento=df_levantamento_export,
+                modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+                progress_callback=atualizar_excel_rel,
+            )
+            st.session_state["relatorio_excel_path"] = str(caminho_excel)
+            st.session_state.pop("relatorio_excel_bytes", None)
+            st.session_state["relatorio_excel_nome"] = caminho_excel.name
+        else:
+            excel_bytes = gerar_excel_saida(
+                df_inventario=df_inventario,
+                df_rubricas=df_rubricas,
+                df_exclusoes=df_exclusoes,
+                df_remun=df_remun,
+                df_bases_trabalhador=df_bases_trab,
+                df_bases_contribuicao=df_bases_contrib,
+                df_erros=df_erros,
+                df_layout=df_layout,
+                df_resumo_visual=df_resumo_visual,
+                df_rubricas_cp=df_rubricas_cp,
+                df_movimentos_cp=df_movimentos_cp,
+                df_base_trabalhador=df_base_trabalhador,
+                df_sem_cadastro=df_sem_cadastro,
+                df_busca_recibos=df_busca_recibos,
+                df_s5001_resumo=df_s5001_resumo,
+                df_levantamento=df_levantamento_export,
+                df_empresa=df_empresa,
+                modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+                progress_callback=atualizar_excel_rel,
+            )
+            st.session_state["relatorio_excel_bytes"] = excel_bytes
+            st.session_state.pop("relatorio_excel_path", None)
+            st.session_state["relatorio_excel_nome"] = "relatorio_incidencia_cp_esocial_v9_1.xlsx"
         st.session_state["relatorio_excel_assinatura"] = assinatura_exportacao
         status_excel_rel.success("Excel do relatório pronto para download.")
 
-    if st.session_state.get("relatorio_excel_bytes"):
+    caminho_relatorio_pronto = st.session_state.get("relatorio_excel_path")
+    bytes_relatorio_pronto = st.session_state.get("relatorio_excel_bytes")
+    if caminho_relatorio_pronto and Path(caminho_relatorio_pronto).exists():
+        with open(caminho_relatorio_pronto, "rb") as arquivo_relatorio:
+            st.download_button(
+                label="Baixar relatório de incidência CP",
+                data=arquivo_relatorio,
+                file_name=st.session_state.get("relatorio_excel_nome", Path(caminho_relatorio_pronto).name),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_relatorio_incidencia_sqlite",
+            )
+    elif bytes_relatorio_pronto:
         st.download_button(
             label="Baixar relatório de incidência CP",
-            data=st.session_state["relatorio_excel_bytes"],
+            data=bytes_relatorio_pronto,
             file_name=st.session_state.get("relatorio_excel_nome", "relatorio_incidencia_cp_esocial_v9_1.xlsx"),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,

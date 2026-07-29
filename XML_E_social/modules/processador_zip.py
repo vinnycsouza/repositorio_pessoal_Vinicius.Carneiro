@@ -24,6 +24,7 @@ from modules.parser_xml import (
     parse_s5001, parse_s5011, parse_empresa_info,
 )
 from utils.helpers import localname
+from modules.sqlite_relatorio import materializar_tabelas_analiticas, carregar_pacote_resumido
 
 Fonte = Tuple[str, Union[bytes, bytearray, memoryview, str, os.PathLike]]
 ProgressCallback = Callable[[float, str], None]
@@ -644,10 +645,56 @@ def processar_fontes_esocial(
         _progresso(progress_callback, 0.55, "Iniciando ou retomando a segunda passagem...")
         _segunda_passagem(conn, progress_callback)
 
-        _meta_set(conn, "fase", "consolidacao")
+        _meta_set(conn, "fase", "consolidacao_sqlite")
         conn.commit()
-        _progresso(progress_callback, 0.94, "Aplicando exclusões S-3000 e montando os DataFrames...")
-        resultado = _finalizar_resultado(conn, workspace)
+        _progresso(progress_callback, 0.94, "Consolidando o relatório no SQLite sem carregar bases gigantes na memória...")
+        materializar_tabelas_analiticas(conn, progress_callback=progress_callback)
+        pacote = carregar_pacote_resumido(db_path)
+
+        # Apenas conjuntos pequenos e prévias seguem para a interface. As bases completas
+        # permanecem no SQLite e são exportadas em streaming.
+        empresas = _ler_objetos(conn, "empresa")
+        df_empresa = pd.DataFrame(empresas)
+        if not df_empresa.empty:
+            df_empresa = df_empresa.drop_duplicates().copy()
+            df_empresa["tem_nome"] = df_empresa["nome_empresa"].fillna("").astype(str).str.strip().ne("")
+            df_empresa = df_empresa.sort_values(["tem_nome", "cnpj_empregador"], ascending=[False, True]).drop(columns=["tem_nome"])
+        df_rubricas = pd.read_sql_query("SELECT * FROM dados_rubricas", conn)
+        df_exclusoes = pd.read_sql_query("SELECT * FROM dados_exclusoes", conn)
+        df_erros = pd.read_sql_query("SELECT arquivo, erro FROM erros ORDER BY id LIMIT 5000", conn)
+        df_inventario = pd.read_sql_query("SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id LIMIT 5000", conn)
+        df_layout = pd.read_sql_query("SELECT tipo, quantidade AS xml_localizados FROM contagem_eventos ORDER BY tipo", conn)
+        total_movimentos = int(pacote.get("total_movimentos_cp", 0))
+        limite_dataframe_integral = int(os.environ.get("ESOCIAL_LIMITE_DATAFRAME_INTEGRAL", "300000"))
+        modo_sqlite_seguro = total_movimentos > limite_dataframe_integral
+        if modo_sqlite_seguro:
+            df_remuneracoes_saida = pacote["movimentos_cp"]
+            df_bases_trabalhador_saida = pacote["s5001_resumo"]
+            df_bases_contribuicao_saida = pd.DataFrame()
+        else:
+            df_remuneracoes_saida = pd.read_sql_query("SELECT * FROM rel_movimentos_cp", conn)
+            df_bases_trabalhador_saida = pd.read_sql_query("SELECT * FROM dados_bases_trabalhador", conn)
+            df_bases_contribuicao_saida = pd.read_sql_query("SELECT * FROM dados_bases_contribuicao", conn)
+
+        resultado = {
+            "inventario": df_inventario,
+            "rubricas": df_rubricas,
+            "exclusoes": df_exclusoes,
+            "remuneracoes": df_remuneracoes_saida,
+            "bases_trabalhador": df_bases_trabalhador_saida,
+            "bases_contribuicao": df_bases_contribuicao_saida,
+            "erros_xml": df_erros,
+            "layout_check": df_layout,
+            "empresa": df_empresa,
+            "recibos_excluidos": set(),
+            "workspace_temporario": str(workspace),
+            "db_path": str(db_path),
+            "modo_sqlite_seguro": modo_sqlite_seguro,
+            "pacote_sqlite": pacote,
+            "quantidade_xml_spool": int(conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0]),
+            "workspace_removido": False,
+            "engine": "V3 SQLite + checkpoint + relatório streaming",
+        }
         _meta_set(conn, "fase", "concluido")
         _meta_set(conn, "status", "concluido")
         _meta_set(conn, "atualizado_em", time.time())
