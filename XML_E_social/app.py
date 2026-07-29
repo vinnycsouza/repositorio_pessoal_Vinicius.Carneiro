@@ -16,7 +16,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 8.3 Engine V2: processamento econômico em RAM, entradas separadas e incorporação automática de recibos S-1010."
+    "Versão 9.0 Engine V3: SQLite persistente, checkpoint automático, retomada e processamento econômico em RAM."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -101,7 +101,7 @@ with st.sidebar:
         )
 
     st.markdown("---")
-    if st.button("Limpar temporários antigos", use_container_width=True, help="Remove apenas pastas esocial_engine_v2_* deixadas no TEMP por execuções interrompidas."):
+    if st.button("Limpar temporários antigos", use_container_width=True, help="Remove temporários antigos concluídos. Processamentos V3 interrompidos são preservados para retomada."):
         limpeza = limpar_workspaces_temporarios_antigos()
         mb = limpeza["bytes_liberados"] / (1024 * 1024)
         if limpeza["falhas"]:
