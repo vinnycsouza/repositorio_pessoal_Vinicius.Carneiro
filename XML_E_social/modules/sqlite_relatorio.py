@@ -432,9 +432,35 @@ def gerar_excel_saida_sqlite(
 
 
 # ============================================================
-# V9.3 - Exportação segmentada em vários arquivos XLSX
+# V9.4.1 - Exportação segmentada com TEMP isolada e persistente
 # ============================================================
 MAX_LINHAS_ARQUIVO_SEGMENTADO = 200_000
+
+
+def _definir_temp_ativo(pasta_temp: Path) -> Path:
+    """Define uma pasta TEMP válida para SQLite, tempfile e openpyxl."""
+    pasta_temp = Path(pasta_temp).expanduser().resolve()
+    pasta_temp.mkdir(parents=True, exist_ok=True)
+    caminho = str(pasta_temp)
+    os.environ["TMP"] = caminho
+    os.environ["TEMP"] = caminho
+    os.environ["TMPDIR"] = caminho
+    tempfile.tempdir = caminho
+    return pasta_temp
+
+
+def _preparar_temp_sqlite(pasta_saida: Path) -> Path:
+    """Cria uma TEMP persistente para consultas SQLite durante toda a exportação."""
+    pasta_temp_sqlite = _definir_temp_ativo(pasta_saida / ".sqlite_temp")
+    teste = pasta_temp_sqlite / "teste_gravacao.tmp"
+    try:
+        teste.write_text("ok", encoding="utf-8")
+        teste.unlink(missing_ok=True)
+    except OSError as exc:
+        raise OSError(
+            f"A pasta temporária do SQLite não permite gravação: {pasta_temp_sqlite}"
+        ) from exc
+    return pasta_temp_sqlite
 
 
 def _limpar_temp_openpyxl(pasta_temp: Path) -> None:
@@ -444,26 +470,29 @@ def _limpar_temp_openpyxl(pasta_temp: Path) -> None:
 
 
 def _novo_workbook_em_temp(pasta_temp: Path) -> Workbook:
-    pasta_temp.mkdir(parents=True, exist_ok=True)
-    # openpyxl/et_xmlfile usa tempfile.NamedTemporaryFile internamente.
-    # Ao fixar tempfile.tempdir, os XMLs temporários ficam isolados e podem
-    # ser apagados com segurança após cada arquivo salvo.
-    tempfile.tempdir = str(pasta_temp)
-    os.environ["TMP"] = str(pasta_temp)
-    os.environ["TEMP"] = str(pasta_temp)
+    _definir_temp_ativo(pasta_temp)
     return Workbook(write_only=True)
 
 
-def _salvar_workbook_isolado(wb: Workbook, destino: Path, pasta_temp: Path) -> None:
+def _salvar_workbook_isolado(
+    wb: Workbook,
+    destino: Path,
+    pasta_temp_openpyxl: Path,
+    pasta_temp_sqlite: Path,
+) -> None:
+    """Salva o XLSX, remove sua TEMP e restaura a TEMP persistente do SQLite."""
     try:
+        destino.parent.mkdir(parents=True, exist_ok=True)
         wb.save(destino)
     finally:
-        _limpar_temp_openpyxl(pasta_temp)
+        _limpar_temp_openpyxl(pasta_temp_openpyxl)
+        _definir_temp_ativo(pasta_temp_sqlite)
 
 
 def _exportar_query_segmentada(
     conn: sqlite3.Connection,
     pasta_saida: Path,
+    pasta_temp_sqlite: Path,
     prefixo_arquivo: str,
     nome_aba: str,
     query: str,
@@ -473,7 +502,20 @@ def _exportar_query_segmentada(
     inicio: float = 0.0,
     fim: float = 1.0,
 ) -> list[dict]:
-    total = int(conn.execute(f"SELECT COUNT(*) FROM ({query}) q", params).fetchone()[0])
+    _definir_temp_ativo(pasta_temp_sqlite)
+    try:
+        resultado = conn.execute(
+            f"SELECT COUNT(*) FROM ({query}) AS q",
+            params,
+        ).fetchone()
+        total = int(resultado[0] if resultado else 0)
+    except sqlite3.OperationalError as exc:
+        raise sqlite3.OperationalError(
+            f"Falha ao consultar o conjunto '{prefixo_arquivo}'. "
+            f"Banco: {conn.execute('PRAGMA database_list').fetchone()[2]}. "
+            f"TEMP ativa: {pasta_temp_sqlite}. Erro original: {exc}"
+        ) from exc
+
     partes = max(1, math.ceil(total / max(1, linhas_por_arquivo)))
     exportados = 0
     controles: list[dict] = []
@@ -481,14 +523,27 @@ def _exportar_query_segmentada(
     for parte in range(1, partes + 1):
         offset = (parte - 1) * linhas_por_arquivo
         limite = min(linhas_por_arquivo, max(total - offset, 0))
-        nome_arq = f"{prefixo_arquivo}_parte_{parte:03d}.xlsx" if partes > 1 else f"{prefixo_arquivo}.xlsx"
+        nome_arq = (
+            f"{prefixo_arquivo}_parte_{parte:03d}.xlsx"
+            if partes > 1
+            else f"{prefixo_arquivo}.xlsx"
+        )
         destino = pasta_saida / nome_arq
-        pasta_temp = pasta_saida / ".openpyxl_temp" / f"{prefixo_arquivo}_{parte:03d}"
-        wb = _novo_workbook_em_temp(pasta_temp)
+        pasta_temp_openpyxl = (
+            pasta_saida / ".openpyxl_temp" / f"{prefixo_arquivo}_{parte:03d}"
+        )
+
+        wb = _novo_workbook_em_temp(pasta_temp_openpyxl)
         ws = wb.create_sheet(_nome_aba(nome_aba))
-        cur = conn.execute(query + " LIMIT ? OFFSET ?", params + (limite, offset))
+
+        _definir_temp_ativo(pasta_temp_sqlite)
+        cur = conn.execute(
+            query + " LIMIT ? OFFSET ?",
+            params + (limite, offset),
+        )
         cols = [d[0] for d in cur.description]
         ws.append(cols)
+
         qtd_parte = 0
         while True:
             rows = cur.fetchmany(CHUNK_EXPORT)
@@ -503,16 +558,26 @@ def _exportar_query_segmentada(
                 inicio + (fim - inicio) * exportados / max(total, 1),
                 f"Exportando {prefixo_arquivo}: {exportados:,} de {total:,}".replace(",", "."),
             )
-        _salvar_workbook_isolado(wb, destino, pasta_temp)
-        controles.append({
-            "arquivo": nome_arq,
-            "conjunto": prefixo_arquivo,
-            "parte": parte,
-            "quantidade_sqlite": total,
-            "quantidade_exportada_parte": qtd_parte,
-            "offset_inicial": offset,
-            "status": "OK",
-        })
+
+        cur.close()
+        _salvar_workbook_isolado(
+            wb,
+            destino,
+            pasta_temp_openpyxl,
+            pasta_temp_sqlite,
+        )
+        controles.append(
+            {
+                "arquivo": nome_arq,
+                "conjunto": prefixo_arquivo,
+                "parte": parte,
+                "quantidade_sqlite": total,
+                "quantidade_exportada_parte": qtd_parte,
+                "offset_inicial": offset,
+                "status": "OK",
+            }
+        )
+
     return controles
 
 
@@ -527,20 +592,32 @@ def gerar_pacote_excel_saida_sqlite(
     linhas_por_arquivo: int = MAX_LINHAS_ARQUIVO_SEGMENTADO,
     progress_callback: ProgressCallback | None = None,
 ) -> dict:
-    """Exporta o relatório integral em vários XLSX independentes.
-
-    A divisão por arquivo reduz drasticamente o pico de uso da pasta TEMP.
-    Cada workbook é finalizado e seus XMLs temporários são removidos antes
-    de iniciar o arquivo seguinte. Todos os dados continuam presentes.
-    """
-    saida = Path(pasta_saida)
+    """Exporta o relatório integral em vários XLSX independentes."""
+    saida = Path(str(pasta_saida).strip().strip('"').strip("'")).expanduser().resolve()
     saida.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+
+    banco = Path(str(db_path).strip().strip('"').strip("'")).expanduser().resolve()
+    if not banco.exists():
+        raise FileNotFoundError(f"Banco SQLite não localizado: {banco}")
+    if not banco.is_file():
+        raise ValueError(f"O caminho informado não é um arquivo SQLite: {banco}")
+
+    pasta_temp_sqlite = _preparar_temp_sqlite(saida)
+
+    conn = sqlite3.connect(
+        f"file:{banco.as_posix()}?mode=ro",
+        uri=True,
+        timeout=120,
+    )
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute("PRAGMA busy_timeout = 120000")
+    conn.execute("PRAGMA temp_store = FILE")
+    conn.execute("PRAGMA cache_size = -262144")
+
     controles: list[dict] = []
     try:
         _progresso(progress_callback, 0.01, "Preparando relatório segmentado...")
 
-        # Arquivo principal com as informações pequenas e de decisão.
         principal = saida / "00_relatorio_principal.xlsx"
         temp_principal = saida / ".openpyxl_temp" / "principal"
         wb = _novo_workbook_em_temp(temp_principal)
@@ -548,12 +625,29 @@ def gerar_pacote_excel_saida_sqlite(
             ("00_empresa", df_empresa),
             ("01_resumo", df_resumo_visual),
             ("02_rubricas_cp", df_rubricas_cp),
-            ("07_levantamento", df_levantamento if df_levantamento is not None else pd.DataFrame()),
+            (
+                "07_levantamento",
+                df_levantamento if df_levantamento is not None else pd.DataFrame(),
+            ),
         ]:
             ws = wb.create_sheet(nome)
             _escrever_dataframe(ws, df if df is not None else pd.DataFrame())
-        _salvar_workbook_isolado(wb, principal, temp_principal)
-        controles.append({"arquivo": principal.name, "conjunto": "principal", "parte": 1, "quantidade_exportada_parte": 0, "status": "OK"})
+
+        _salvar_workbook_isolado(
+            wb,
+            principal,
+            temp_principal,
+            pasta_temp_sqlite,
+        )
+        controles.append(
+            {
+                "arquivo": principal.name,
+                "conjunto": "principal",
+                "parte": 1,
+                "quantidade_exportada_parte": 0,
+                "status": "OK",
+            }
+        )
 
         filtro = _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp)
         consultas = [
@@ -571,21 +665,50 @@ def gerar_pacote_excel_saida_sqlite(
             ("inventario", "inventario", "SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id", 0.965, 0.985),
             ("erros_xml", "erros_xml", "SELECT arquivo,erro FROM erros ORDER BY id", 0.985, 0.992),
         ]
-        for prefixo, aba, sql, ini, fim in consultas:
-            controles.extend(_exportar_query_segmentada(
-                conn, saida, prefixo, aba, sql,
-                linhas_por_arquivo=linhas_por_arquivo,
-                progress_callback=progress_callback, inicio=ini, fim=fim,
-            ))
 
-        # Manifesto simples e verificável.
+        for prefixo, aba, sql, ini, fim in consultas:
+            controles.extend(
+                _exportar_query_segmentada(
+                    conn=conn,
+                    pasta_saida=saida,
+                    pasta_temp_sqlite=pasta_temp_sqlite,
+                    prefixo_arquivo=prefixo,
+                    nome_aba=aba,
+                    query=sql,
+                    linhas_por_arquivo=linhas_por_arquivo,
+                    progress_callback=progress_callback,
+                    inicio=ini,
+                    fim=fim,
+                )
+            )
+
         manifesto = pd.DataFrame(controles)
         manifesto_path = saida / "manifesto_exportacao.csv"
-        manifesto.to_csv(manifesto_path, index=False, sep=";", encoding="utf-8-sig")
-        banco_ctrl = pd.read_sql_query("SELECT * FROM rel_controle_integridade", conn)
-        banco_ctrl.to_csv(saida / "controle_integridade_banco.csv", index=False, sep=";", encoding="utf-8-sig")
+        manifesto.to_csv(
+            manifesto_path,
+            index=False,
+            sep=";",
+            encoding="utf-8-sig",
+        )
+
+        _definir_temp_ativo(pasta_temp_sqlite)
+        banco_ctrl = pd.read_sql_query(
+            "SELECT * FROM rel_controle_integridade",
+            conn,
+        )
+        banco_ctrl.to_csv(
+            saida / "controle_integridade_banco.csv",
+            index=False,
+            sep=";",
+            encoding="utf-8-sig",
+        )
+
         _limpar_temp_openpyxl(saida / ".openpyxl_temp")
-        _progresso(progress_callback, 1.0, "Relatório segmentado concluído sem perda de dados.")
+        _progresso(
+            progress_callback,
+            1.0,
+            "Relatório segmentado concluído sem perda de dados.",
+        )
         return {
             "pasta_saida": str(saida),
             "arquivos": [str(saida / c["arquivo"]) for c in controles],
@@ -595,3 +718,4 @@ def gerar_pacote_excel_saida_sqlite(
     finally:
         conn.close()
         _limpar_temp_openpyxl(saida / ".openpyxl_temp")
+
