@@ -712,3 +712,51 @@ def processar_fontes_esocial(
 
 def processar_zip_esocial(zip_bytes: bytes, progress_callback: ProgressCallback | None = None) -> Dict[str, object]:
     return processar_fontes_esocial([("upload.zip", zip_bytes)], progress_callback=progress_callback)
+
+
+def carregar_resultado_sqlite_existente(db_path: str | os.PathLike) -> Dict[str, object]:
+    """Carrega um processamento.db já concluído sem reler os XMLs."""
+    db_path = Path(db_path).expanduser().resolve()
+    if not db_path.is_file():
+        raise FileNotFoundError(f"Banco SQLite não localizado: {db_path}")
+    conn = _conectar(db_path)
+    try:
+        obrigatorias = {"eventos", "meta", "rel_movimentos_cp", "rel_rubricas_cp_base"}
+        existentes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        faltantes = sorted(obrigatorias - existentes)
+        if faltantes:
+            raise ValueError("Banco incompatível ou incompleto. Tabelas ausentes: " + ", ".join(faltantes))
+
+        pacote = carregar_pacote_resumido(db_path)
+        df_empresa = pd.read_sql_query("SELECT * FROM dados_empresa", conn) if "dados_empresa" in existentes else pd.DataFrame()
+        if not df_empresa.empty:
+            df_empresa = df_empresa.drop_duplicates().copy()
+        df_rubricas = pd.read_sql_query("SELECT * FROM dados_rubricas", conn) if "dados_rubricas" in existentes else pd.DataFrame()
+        df_exclusoes = pd.read_sql_query("SELECT * FROM dados_exclusoes", conn) if "dados_exclusoes" in existentes else pd.DataFrame()
+        df_erros = pd.read_sql_query("SELECT arquivo, erro FROM erros ORDER BY id LIMIT 5000", conn) if "erros" in existentes else pd.DataFrame()
+        df_inventario = pd.read_sql_query(
+            "SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id LIMIT 5000",
+            conn,
+        )
+        df_layout = pd.read_sql_query("SELECT tipo, quantidade AS xml_localizados FROM contagem_eventos ORDER BY tipo", conn) if "contagem_eventos" in existentes else pd.DataFrame()
+        return {
+            "inventario": df_inventario,
+            "rubricas": df_rubricas,
+            "exclusoes": df_exclusoes,
+            "remuneracoes": pacote["movimentos_cp"],
+            "bases_trabalhador": pacote["s5001_resumo"],
+            "bases_contribuicao": pd.DataFrame(),
+            "erros_xml": df_erros,
+            "layout_check": df_layout,
+            "empresa": df_empresa,
+            "recibos_excluidos": set(),
+            "workspace_temporario": str(db_path.parent),
+            "db_path": str(db_path),
+            "modo_sqlite_seguro": True,
+            "pacote_sqlite": pacote,
+            "quantidade_xml_spool": int(conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0]),
+            "workspace_removido": False,
+            "engine": "V3 SQLite existente",
+        }
+    finally:
+        conn.close()

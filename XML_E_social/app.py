@@ -16,8 +16,12 @@ from modules.auditoria import (
     gerar_resumo_visual,
     preparar_pacote_analitico,
 )
-from modules.processador_zip import limpar_workspaces_temporarios_antigos, processar_fontes_esocial
-from modules.sqlite_relatorio import gerar_excel_saida_sqlite
+from modules.processador_zip import (
+    carregar_resultado_sqlite_existente,
+    limpar_workspaces_temporarios_antigos,
+    processar_fontes_esocial,
+)
+from modules.sqlite_relatorio import gerar_excel_saida_sqlite, gerar_pacote_excel_saida_sqlite
 from utils.helpers import decimal_br
 
 
@@ -25,7 +29,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 9.2 Engine V3: SQLite persistente, checkpoint, consolidação sem DataFrames gigantes e Excel em streaming."
+    "Versão 9.3 Engine V3: SQLite persistente, retomada por banco existente e Excel integral segmentado com limpeza de temporários."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -43,7 +47,11 @@ with st.sidebar:
     st.markdown("---")
     st.header("Entrada")
     if modulo_ativo == "Relatório de Incidência CP":
-        modo_entrada = "ZIP(s) do eSocial"
+        modo_entrada = st.radio(
+            "Modo de entrada",
+            ["ZIP(s) do eSocial", "SQLite existente"],
+            help="Use SQLite existente para reaproveitar um processamento.db concluído sem reler os XMLs.",
+        )
     else:
         modo_entrada = st.radio(
             "Modo de entrada",
@@ -56,6 +64,7 @@ with st.sidebar:
     arquivos_recibos = []
     caminhos_recibos = []
     arquivo_excel = None
+    caminho_sqlite_existente = ""
     gerar_relatorio = False
 
     if modo_entrada == "ZIP(s) do eSocial":
@@ -103,6 +112,14 @@ with st.sidebar:
             caminhos_recibos = [x.strip().strip('"') for x in texto_recibos.splitlines() if x.strip()]
 
         gerar_relatorio = st.button("Gerar Relatório", type="primary", use_container_width=True)
+    elif modo_entrada == "SQLite existente":
+        st.subheader("Banco já processado")
+        caminho_sqlite_existente = st.text_input(
+            "Caminho completo do processamento.db",
+            placeholder=r"C:\Users\vinny\AppData\Local\XML_eSocial\workspaces\esocial_v3_...\processamento.db",
+            help="O banco será apenas lido. Os XMLs não serão processados novamente.",
+        )
+        gerar_relatorio = st.button("Carregar banco existente", type="primary", use_container_width=True)
     else:
         arquivo_excel = st.file_uploader(
             "Selecione o Excel consolidado", type=["xlsx"], accept_multiple_files=False,
@@ -296,6 +313,29 @@ if modo_entrada == "ZIP(s) do eSocial":
     df_empresa = resultado.get("empresa", pd.DataFrame())
     modo_excel_consolidado = False
 
+elif modo_entrada == "SQLite existente":
+    if gerar_relatorio:
+        try:
+            st.session_state["resultado_v82"] = carregar_resultado_sqlite_existente(caminho_sqlite_existente)
+            st.success("Banco SQLite carregado. O processamento dos XMLs não será repetido.")
+        except Exception as exc:
+            st.error(f"Não foi possível carregar o banco: {exc}")
+            st.stop()
+    if "resultado_v82" not in st.session_state:
+        st.info("Informe o caminho do processamento.db e clique em **Carregar banco existente**.")
+        st.stop()
+    resultado = st.session_state["resultado_v82"]
+    df_inventario = resultado.get("inventario", pd.DataFrame())
+    df_rubricas = resultado.get("rubricas", pd.DataFrame())
+    df_exclusoes = resultado.get("exclusoes", pd.DataFrame())
+    df_remun = resultado.get("remuneracoes", pd.DataFrame())
+    df_bases_trab = resultado.get("bases_trabalhador", pd.DataFrame())
+    df_bases_contrib = resultado.get("bases_contribuicao", pd.DataFrame())
+    df_erros = resultado.get("erros_xml", pd.DataFrame())
+    df_layout = resultado.get("layout_check", pd.DataFrame())
+    df_empresa = resultado.get("empresa", pd.DataFrame())
+    modo_excel_consolidado = False
+
 else:
     if arquivo_excel is None:
         st.info("Envie um Excel consolidado com as abas 02_rubricas_cp e 03_movimentos_cp.")
@@ -343,7 +383,7 @@ def empresa_principal(df: pd.DataFrame) -> tuple[str, str]:
 nome_empresa, cnpj_empresa = empresa_principal(df_empresa)
 
 atualizar_analise, barra_analise, status_analise = _criar_progresso("Progresso da preparação do relatório")
-modo_sqlite_seguro = bool(resultado.get("modo_sqlite_seguro", False)) if modo_entrada == "ZIP(s) do eSocial" else False
+modo_sqlite_seguro = bool(resultado.get("modo_sqlite_seguro", False)) if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente"} else False
 pacote_sqlite = resultado.get("pacote_sqlite", {}) if modo_sqlite_seguro else {}
 db_path_sqlite = resultado.get("db_path", "") if modo_sqlite_seguro else ""
 if modo_sqlite_seguro:
@@ -935,22 +975,22 @@ if modulo_ativo == "Relatório de Incidência CP":
     if preparar_excel_rel:
         atualizar_excel_rel, barra_excel_rel, status_excel_rel = _criar_progresso("Progresso da geração do Excel do relatório")
         if modo_sqlite_seguro:
-            pasta_saida = Path(resultado.get("workspace_temporario", tempfile.gettempdir())) / "output"
-            pasta_saida.mkdir(parents=True, exist_ok=True)
-            caminho_excel = pasta_saida / "relatorio_incidencia_cp_esocial_v9_2_streaming.xlsx"
-            gerar_excel_saida_sqlite(
+            pasta_saida = Path(resultado.get("workspace_temporario", tempfile.gettempdir())) / "output_segmentado_v9_3"
+            pacote_exportado = gerar_pacote_excel_saida_sqlite(
                 db_path=db_path_sqlite,
-                caminho_saida=caminho_excel,
+                pasta_saida=pasta_saida,
                 df_empresa=df_empresa,
                 df_resumo_visual=df_resumo_visual,
                 df_rubricas_cp=df_rubricas_cp,
                 df_levantamento=df_levantamento_export,
                 modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+                linhas_por_arquivo=200_000,
                 progress_callback=atualizar_excel_rel,
             )
-            st.session_state["relatorio_excel_path"] = str(caminho_excel)
+            st.session_state["relatorio_pacote_saida"] = pacote_exportado
+            st.session_state.pop("relatorio_excel_path", None)
             st.session_state.pop("relatorio_excel_bytes", None)
-            st.session_state["relatorio_excel_nome"] = caminho_excel.name
+            st.session_state["relatorio_excel_nome"] = "pacote_segmentado_v9_3"
         else:
             excel_bytes = gerar_excel_saida(
                 df_inventario=df_inventario,
@@ -977,7 +1017,27 @@ if modulo_ativo == "Relatório de Incidência CP":
             st.session_state.pop("relatorio_excel_path", None)
             st.session_state["relatorio_excel_nome"] = "relatorio_incidencia_cp_esocial_v9_1.xlsx"
         st.session_state["relatorio_excel_assinatura"] = assinatura_exportacao
-        status_excel_rel.success("Excel do relatório pronto para download.")
+        status_excel_rel.success("Relatório integral segmentado concluído.")
+
+    pacote_relatorio_pronto = st.session_state.get("relatorio_pacote_saida")
+    if pacote_relatorio_pronto:
+        pasta_pacote = Path(pacote_relatorio_pronto.get("pasta_saida", ""))
+        st.success(
+            f"Pacote integral concluído em: {pasta_pacote} — "
+            f"{pacote_relatorio_pronto.get('quantidade_arquivos', 0)} arquivo(s)."
+        )
+        st.caption("Cada arquivo é finalizado separadamente; assim os temporários do openpyxl são removidos antes da próxima parte.")
+        manifesto = Path(pacote_relatorio_pronto.get("manifesto", ""))
+        if manifesto.exists():
+            with open(manifesto, "rb") as fp_manifesto:
+                st.download_button(
+                    "Baixar manifesto da exportação",
+                    data=fp_manifesto,
+                    file_name=manifesto.name,
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="download_manifesto_v93",
+                )
 
     caminho_relatorio_pronto = st.session_state.get("relatorio_excel_path")
     bytes_relatorio_pronto = st.session_state.get("relatorio_excel_bytes")

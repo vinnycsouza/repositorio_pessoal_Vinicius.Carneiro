@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
 import pickle
+import shutil
+import tempfile
 import sqlite3
 import time
 import zlib
@@ -411,3 +414,169 @@ def gerar_excel_saida_sqlite(
         return str(destino)
     finally:
         conn.close()
+
+
+# ============================================================
+# V9.3 - Exportação segmentada em vários arquivos XLSX
+# ============================================================
+MAX_LINHAS_ARQUIVO_SEGMENTADO = 200_000
+
+
+def _limpar_temp_openpyxl(pasta_temp: Path) -> None:
+    """Remove somente os temporários criados pela exportação atual."""
+    if pasta_temp.exists():
+        shutil.rmtree(pasta_temp, ignore_errors=True)
+
+
+def _novo_workbook_em_temp(pasta_temp: Path) -> Workbook:
+    pasta_temp.mkdir(parents=True, exist_ok=True)
+    # openpyxl/et_xmlfile usa tempfile.NamedTemporaryFile internamente.
+    # Ao fixar tempfile.tempdir, os XMLs temporários ficam isolados e podem
+    # ser apagados com segurança após cada arquivo salvo.
+    tempfile.tempdir = str(pasta_temp)
+    os.environ["TMP"] = str(pasta_temp)
+    os.environ["TEMP"] = str(pasta_temp)
+    return Workbook(write_only=True)
+
+
+def _salvar_workbook_isolado(wb: Workbook, destino: Path, pasta_temp: Path) -> None:
+    try:
+        wb.save(destino)
+    finally:
+        _limpar_temp_openpyxl(pasta_temp)
+
+
+def _exportar_query_segmentada(
+    conn: sqlite3.Connection,
+    pasta_saida: Path,
+    prefixo_arquivo: str,
+    nome_aba: str,
+    query: str,
+    params: tuple = (),
+    linhas_por_arquivo: int = MAX_LINHAS_ARQUIVO_SEGMENTADO,
+    progress_callback: ProgressCallback | None = None,
+    inicio: float = 0.0,
+    fim: float = 1.0,
+) -> list[dict]:
+    total = int(conn.execute(f"SELECT COUNT(*) FROM ({query}) q", params).fetchone()[0])
+    partes = max(1, math.ceil(total / max(1, linhas_por_arquivo)))
+    exportados = 0
+    controles: list[dict] = []
+
+    for parte in range(1, partes + 1):
+        offset = (parte - 1) * linhas_por_arquivo
+        limite = min(linhas_por_arquivo, max(total - offset, 0))
+        nome_arq = f"{prefixo_arquivo}_parte_{parte:03d}.xlsx" if partes > 1 else f"{prefixo_arquivo}.xlsx"
+        destino = pasta_saida / nome_arq
+        pasta_temp = pasta_saida / ".openpyxl_temp" / f"{prefixo_arquivo}_{parte:03d}"
+        wb = _novo_workbook_em_temp(pasta_temp)
+        ws = wb.create_sheet(_nome_aba(nome_aba))
+        cur = conn.execute(query + " LIMIT ? OFFSET ?", params + (limite, offset))
+        cols = [d[0] for d in cur.description]
+        ws.append(cols)
+        qtd_parte = 0
+        while True:
+            rows = cur.fetchmany(CHUNK_EXPORT)
+            if not rows:
+                break
+            for row in rows:
+                ws.append(list(row))
+            qtd_parte += len(rows)
+            exportados += len(rows)
+            _progresso(
+                progress_callback,
+                inicio + (fim - inicio) * exportados / max(total, 1),
+                f"Exportando {prefixo_arquivo}: {exportados:,} de {total:,}".replace(",", "."),
+            )
+        _salvar_workbook_isolado(wb, destino, pasta_temp)
+        controles.append({
+            "arquivo": nome_arq,
+            "conjunto": prefixo_arquivo,
+            "parte": parte,
+            "quantidade_sqlite": total,
+            "quantidade_exportada_parte": qtd_parte,
+            "offset_inicial": offset,
+            "status": "OK",
+        })
+    return controles
+
+
+def gerar_pacote_excel_saida_sqlite(
+    db_path: str | Path,
+    pasta_saida: str | Path,
+    df_empresa: pd.DataFrame,
+    df_resumo_visual: pd.DataFrame,
+    df_rubricas_cp: pd.DataFrame,
+    df_levantamento: pd.DataFrame | None = None,
+    modo_exportacao_movimentos_cp: str = "todos",
+    linhas_por_arquivo: int = MAX_LINHAS_ARQUIVO_SEGMENTADO,
+    progress_callback: ProgressCallback | None = None,
+) -> dict:
+    """Exporta o relatório integral em vários XLSX independentes.
+
+    A divisão por arquivo reduz drasticamente o pico de uso da pasta TEMP.
+    Cada workbook é finalizado e seus XMLs temporários são removidos antes
+    de iniciar o arquivo seguinte. Todos os dados continuam presentes.
+    """
+    saida = Path(pasta_saida)
+    saida.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    controles: list[dict] = []
+    try:
+        _progresso(progress_callback, 0.01, "Preparando relatório segmentado...")
+
+        # Arquivo principal com as informações pequenas e de decisão.
+        principal = saida / "00_relatorio_principal.xlsx"
+        temp_principal = saida / ".openpyxl_temp" / "principal"
+        wb = _novo_workbook_em_temp(temp_principal)
+        for nome, df in [
+            ("00_empresa", df_empresa),
+            ("01_resumo", df_resumo_visual),
+            ("02_rubricas_cp", df_rubricas_cp),
+            ("07_levantamento", df_levantamento if df_levantamento is not None else pd.DataFrame()),
+        ]:
+            ws = wb.create_sheet(nome)
+            _escrever_dataframe(ws, df if df is not None else pd.DataFrame())
+        _salvar_workbook_isolado(wb, principal, temp_principal)
+        controles.append({"arquivo": principal.name, "conjunto": "principal", "parte": 1, "quantidade_exportada_parte": 0, "status": "OK"})
+
+        filtro = " WHERE cod_inc_cp IN ('11','12','21','22')" if modo_exportacao_movimentos_cp == "incidencia_cp_padrao" else ""
+        consultas = [
+            ("03_movimentos_cp", "03_movimentos_cp", "SELECT * FROM rel_movimentos_cp" + filtro, 0.05, 0.48),
+            ("04_base_trabalhador", "04_base_trabalhador", "SELECT * FROM rel_base_trabalhador ORDER BY status_conferencia DESC, per_apur, cpf, matricula", 0.48, 0.60),
+            ("05_sem_s1010", "05_sem_s1010", "SELECT * FROM rel_sem_s1010 ORDER BY per_apur, valor_rubrica DESC", 0.60, 0.66),
+            ("05_busca_recibos", "05_busca_recibos", "SELECT cod_rubr,ide_tab_rubr,MAX(dsc_rubr) dsc_rubr,MIN(per_apur) primeira_competencia,MAX(per_apur) ultima_competencia,COUNT(DISTINCT per_apur) qtd_competencias,SUM(qtd_lancamentos) qtd_lancamentos,COUNT(DISTINCT cpf) qtd_cpfs,SUM(valor_rubrica) valor_total,'Baixar recibo S-1010 da rubrica e aplicar na complementação do relatório.' acao_recomendada FROM rel_sem_s1010 GROUP BY cod_rubr,ide_tab_rubr", 0.66, 0.69),
+            ("06_s5001_tpvalor", "06_s5001_tpvalor", "SELECT * FROM rel_s5001_resumo", 0.69, 0.73),
+            ("apoio_s1010", "apoio_s1010", "SELECT * FROM dados_rubricas", 0.73, 0.77),
+            ("apoio_s1200", "apoio_s1200", "SELECT * FROM rel_movimentos_cp", 0.77, 0.86),
+            ("apoio_s5001", "apoio_s5001", "SELECT * FROM dados_bases_trabalhador", 0.86, 0.91),
+            ("apoio_s5011", "apoio_s5011", "SELECT * FROM dados_bases_contribuicao", 0.91, 0.94),
+            ("apoio_s3000", "apoio_s3000", "SELECT * FROM dados_exclusoes", 0.94, 0.955),
+            ("checagem_layout", "checagem_layout", "SELECT c.tipo,c.quantidade xml_localizados,CASE WHEN c.tipo IN ('S-1200','S-5001','S-5011') THEN (SELECT COUNT(*) FROM eventos e WHERE e.tipo=c.tipo AND e.processado_segunda=1) ELSE c.quantidade END xml_parseados,0 nao_parseados FROM contagem_eventos c", 0.955, 0.965),
+            ("inventario", "inventario", "SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id", 0.965, 0.985),
+            ("erros_xml", "erros_xml", "SELECT arquivo,erro FROM erros ORDER BY id", 0.985, 0.992),
+        ]
+        for prefixo, aba, sql, ini, fim in consultas:
+            controles.extend(_exportar_query_segmentada(
+                conn, saida, prefixo, aba, sql,
+                linhas_por_arquivo=linhas_por_arquivo,
+                progress_callback=progress_callback, inicio=ini, fim=fim,
+            ))
+
+        # Manifesto simples e verificável.
+        manifesto = pd.DataFrame(controles)
+        manifesto_path = saida / "manifesto_exportacao.csv"
+        manifesto.to_csv(manifesto_path, index=False, sep=";", encoding="utf-8-sig")
+        banco_ctrl = pd.read_sql_query("SELECT * FROM rel_controle_integridade", conn)
+        banco_ctrl.to_csv(saida / "controle_integridade_banco.csv", index=False, sep=";", encoding="utf-8-sig")
+        _limpar_temp_openpyxl(saida / ".openpyxl_temp")
+        _progresso(progress_callback, 1.0, "Relatório segmentado concluído sem perda de dados.")
+        return {
+            "pasta_saida": str(saida),
+            "arquivos": [str(saida / c["arquivo"]) for c in controles],
+            "manifesto": str(manifesto_path),
+            "quantidade_arquivos": len(controles),
+        }
+    finally:
+        conn.close()
+        _limpar_temp_openpyxl(saida / ".openpyxl_temp")
