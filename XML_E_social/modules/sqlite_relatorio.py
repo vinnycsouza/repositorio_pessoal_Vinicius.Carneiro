@@ -311,7 +311,10 @@ def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) ->
             "s5001_resumo": pd.read_sql_query(f"SELECT * FROM rel_s5001_resumo LIMIT {int(limite_previa)}", conn),
             "controle_integridade": pd.read_sql_query("SELECT * FROM rel_controle_integridade", conn),
             "total_movimentos_cp": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp")),
-            "total_movimentos_cp_padrao": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE cod_inc_cp IN ('11','12','21','22')")),
+            "total_movimentos_cp_padrao": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE status_cp='Incide CP'")),
+            "total_movimentos_analise_prioritaria": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE status_cp IN ('Incide CP','Revisar codIncCP')")),
+            "total_movimentos_classificados": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE status_cp IN ('Incide CP','Não incide CP','Revisar codIncCP')")),
+            "total_movimentos_sem_s1010": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE status_cp='Sem S-1010'")),
         }
     finally:
         conn.close()
@@ -355,6 +358,18 @@ def _exportar_query(wb: Workbook, conn: sqlite3.Connection, nome: str, query: st
     return {"aba": nome, "quantidade_sqlite": total, "quantidade_exportada": exportados, "partes": partes, "status": "OK" if total == exportados else "REVISAR"}
 
 
+
+
+def _filtro_sql_movimentos_exportacao(modo: str) -> str:
+    """Retorna o WHERE da aba 03; Sem S-1010 permanece no relatório 05."""
+    if modo == "incidencia_cp_padrao":
+        return " WHERE status_cp='Incide CP'"
+    if modo == "analise_prioritaria":
+        return " WHERE status_cp IN ('Incide CP','Revisar codIncCP')"
+    if modo == "classificados":
+        return " WHERE status_cp IN ('Incide CP','Não incide CP','Revisar codIncCP')"
+    return ""
+
 def gerar_excel_saida_sqlite(
     db_path: str | Path,
     caminho_saida: str | Path,
@@ -378,7 +393,7 @@ def gerar_excel_saida_sqlite(
             _escrever_dataframe(ws, df if df is not None else pd.DataFrame())
             controles.append({"aba":nome,"quantidade_sqlite":len(df) if df is not None else 0,"quantidade_exportada":len(df) if df is not None else 0,"partes":1,"status":"OK"})
 
-        filtro = " WHERE cod_inc_cp IN ('11','12','21','22')" if modo_exportacao_movimentos_cp == "incidencia_cp_padrao" else ""
+        filtro = _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp)
         controles.append(_exportar_query(wb, conn, "03_movimentos_cp", "SELECT * FROM rel_movimentos_cp" + filtro, cb=progress_callback, inicio=0.10, fim=0.52))
         controles.append(_exportar_query(wb, conn, "04_base_trabalhador", "SELECT * FROM rel_base_trabalhador ORDER BY status_conferencia DESC, per_apur, cpf, matricula", cb=progress_callback, inicio=0.52, fim=0.64))
         controles.append(_exportar_query(wb, conn, "05_sem_s1010", "SELECT * FROM rel_sem_s1010 ORDER BY per_apur, valor_rubrica DESC", cb=progress_callback, inicio=0.64, fim=0.68))
@@ -540,7 +555,7 @@ def gerar_pacote_excel_saida_sqlite(
         _salvar_workbook_isolado(wb, principal, temp_principal)
         controles.append({"arquivo": principal.name, "conjunto": "principal", "parte": 1, "quantidade_exportada_parte": 0, "status": "OK"})
 
-        filtro = " WHERE cod_inc_cp IN ('11','12','21','22')" if modo_exportacao_movimentos_cp == "incidencia_cp_padrao" else ""
+        filtro = _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp)
         consultas = [
             ("03_movimentos_cp", "03_movimentos_cp", "SELECT * FROM rel_movimentos_cp" + filtro, 0.05, 0.48),
             ("04_base_trabalhador", "04_base_trabalhador", "SELECT * FROM rel_base_trabalhador ORDER BY status_conferencia DESC, per_apur, cpf, matricula", 0.48, 0.60),

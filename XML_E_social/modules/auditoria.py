@@ -367,18 +367,40 @@ def _to_excel_dividido(writer, df: pd.DataFrame | None, sheet_name: str, max_lin
 
 
 def _filtrar_movimentos_cp_exportacao(df: pd.DataFrame | None, modo: str = "todos") -> pd.DataFrame:
-    """Filtra a aba 03_movimentos_cp apenas na exportação, preservando layout/colunas.
+    """Filtra a aba 03_movimentos_cp somente na exportação.
 
-    modo="todos": mantém todos os movimentos.
-    modo="incidencia_cp_padrao": mantém apenas codIncCP 11, 12, 21 e 22.
+    A ausência de S-1010 é tratada separadamente na aba/arquivo 05_sem_s1010.
+
+    Modos:
+    - ``incidencia_cp_padrao``: somente Incide CP (11, 12, 21 e 22);
+    - ``analise_prioritaria``: Incide CP + Revisar codIncCP;
+    - ``classificados``: Incide CP + Não incide CP + Revisar codIncCP;
+    - ``todos``: todos os movimentos, inclusive Sem S-1010.
     """
     base = df if df is not None else pd.DataFrame()
-    if base.empty or modo != "incidencia_cp_padrao":
+    if base.empty or modo == "todos":
         return base
+
+    if "status_cp" in base.columns:
+        status = base["status_cp"].fillna("").astype(str).str.strip()
+        if modo == "analise_prioritaria":
+            return base[status.isin(["Incide CP", "Revisar codIncCP"])].copy()
+        if modo == "classificados":
+            return base[status.isin(["Incide CP", "Não incide CP", "Revisar codIncCP"])].copy()
+        if modo == "incidencia_cp_padrao":
+            return base[status.eq("Incide CP")].copy()
+
+    # Compatibilidade com relatórios antigos sem a coluna status_cp.
     if "cod_inc_cp" not in base.columns:
         return base
     cod = base["cod_inc_cp"].fillna("").astype(str).str.strip()
-    return base[cod.isin(CODIGOS_CP_EXPORTACAO_PADRAO)].copy()
+    if modo == "incidencia_cp_padrao":
+        return base[cod.isin(CODIGOS_CP_EXPORTACAO_PADRAO)].copy()
+    if modo == "analise_prioritaria":
+        return base[~cod.isin(["", "00"])].copy()
+    if modo == "classificados":
+        return base[cod.ne("")].copy()
+    return base
 
 
 

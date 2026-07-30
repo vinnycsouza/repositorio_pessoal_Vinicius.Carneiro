@@ -29,7 +29,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 9.3 Engine V3: SQLite persistente, retomada por banco existente e Excel integral segmentado com limpeza de temporários."
+    "Versão 9.4 Engine V3: SQLite persistente, retomada por banco existente e Excel integral segmentado com limpeza de temporários."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -925,34 +925,54 @@ if modulo_ativo == "Relatório de Incidência CP":
     escolha_movimentos_cp = st.radio(
         "Como deseja exportar a aba 03_movimentos_cp?",
         [
-            "Apenas movimentos com incidência CP padrão (11, 12, 21 e 22)",
-            "Todos os movimentos",
+            "Análise prioritária: Incide CP + Revisar codIncCP",
+            "Apenas Incide CP",
+            "Todos os classificados: Incide + Não incide + Revisar",
+            "Todos os movimentos, inclusive Sem S-1010",
         ],
-        index=0 if excede_limite_excel else 1,
+        index=0,
         help=(
-            "Faça esta escolha antes de preparar o Excel. A primeira opção mantém somente os movimentos "
-            "com codIncCP 11, 12, 21 e 22. A segunda mantém todos os movimentos. Em qualquer opção, "
-            "se a quantidade exceder o limite do Excel, a aba 03 será dividida automaticamente em partes."
+            "A opção recomendada exporta Incide CP e Revisar codIncCP na aba 03, reduzindo o tamanho sem esconder pendências. "
+            "Os movimentos Sem S-1010 são sempre exportados separadamente no arquivo/aba 05_sem_s1010, exceto na opção "
+            "'Todos os movimentos', em que também aparecem na aba 03."
         ),
         key="relatorio_modo_exportacao_movimentos_cp",
     )
 
-    modo_exportacao_movimentos_cp = (
-        "incidencia_cp_padrao"
-        if escolha_movimentos_cp.startswith("Apenas")
-        else "todos"
-    )
-
-    if modo_exportacao_movimentos_cp == "incidencia_cp_padrao":
-        qtd_exportacao = int(pacote_sqlite.get("total_movimentos_cp_padrao", 0)) if modo_sqlite_seguro else len(_filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp))
-        st.caption(
-            f"A aba 03 será preparada com {qtd_exportacao:,} movimentos de incidência CP padrão.".replace(",", ".")
-        )
+    if escolha_movimentos_cp.startswith("Análise prioritária"):
+        modo_exportacao_movimentos_cp = "analise_prioritaria"
+    elif escolha_movimentos_cp.startswith("Apenas Incide"):
+        modo_exportacao_movimentos_cp = "incidencia_cp_padrao"
+    elif escolha_movimentos_cp.startswith("Todos os classificados"):
+        modo_exportacao_movimentos_cp = "classificados"
     else:
-        qtd_exportacao = total_movimentos_cp
-        st.caption(
-            f"A aba 03 será preparada com todos os {qtd_exportacao:,} movimentos.".replace(",", ".")
-        )
+        modo_exportacao_movimentos_cp = "todos"
+
+    if modo_sqlite_seguro:
+        totais_modo = {
+            "incidencia_cp_padrao": int(pacote_sqlite.get("total_movimentos_cp_padrao", 0)),
+            "analise_prioritaria": int(pacote_sqlite.get("total_movimentos_analise_prioritaria", 0)),
+            "classificados": int(pacote_sqlite.get("total_movimentos_classificados", 0)),
+            "todos": total_movimentos_cp,
+        }
+        qtd_exportacao = totais_modo[modo_exportacao_movimentos_cp]
+        qtd_sem_s1010 = int(pacote_sqlite.get("total_movimentos_sem_s1010", 0))
+    else:
+        qtd_exportacao = len(_filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp))
+        qtd_sem_s1010 = int(df_movimentos_cp["status_cp"].eq("Sem S-1010").sum()) if not df_movimentos_cp.empty and "status_cp" in df_movimentos_cp.columns else len(df_sem_cadastro)
+
+    descricoes_modo = {
+        "incidencia_cp_padrao": "somente movimentos classificados como Incide CP",
+        "analise_prioritaria": "movimentos Incide CP e Revisar codIncCP",
+        "classificados": "todos os movimentos classificados (Incide, Não incide e Revisar)",
+        "todos": "todos os movimentos, inclusive Sem S-1010",
+    }
+    st.caption(
+        f"A aba 03 será preparada com {qtd_exportacao:,} linhas: {descricoes_modo[modo_exportacao_movimentos_cp]}.".replace(",", ".")
+    )
+    st.info(
+        f"Segurança da auditoria: {qtd_sem_s1010:,} movimento(s) Sem S-1010 serão mantidos separadamente em 05_sem_s1010.".replace(",", ".")
+    )
 
     if qtd_exportacao > MAX_LINHAS_DADOS_EXCEL:
         qtd_partes = (qtd_exportacao + MAX_LINHAS_DADOS_EXCEL - 1) // MAX_LINHAS_DADOS_EXCEL
@@ -960,7 +980,7 @@ if modulo_ativo == "Relatório de Incidência CP":
             f"A aba 03_movimentos_cp será dividida automaticamente em {qtd_partes} abas, sem perda de linhas."
         )
 
-    assinatura_exportacao = f"{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}"
+    assinatura_exportacao = f"v9_4:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}"
     if st.session_state.get("relatorio_excel_assinatura") != assinatura_exportacao:
         st.session_state.pop("relatorio_excel_bytes", None)
         st.session_state.pop("relatorio_excel_nome", None)
@@ -975,7 +995,7 @@ if modulo_ativo == "Relatório de Incidência CP":
     if preparar_excel_rel:
         atualizar_excel_rel, barra_excel_rel, status_excel_rel = _criar_progresso("Progresso da geração do Excel do relatório")
         if modo_sqlite_seguro:
-            pasta_saida = Path(resultado.get("workspace_temporario", tempfile.gettempdir())) / "output_segmentado_v9_3"
+            pasta_saida = Path(resultado.get("workspace_temporario", tempfile.gettempdir())) / "output_segmentado_v9_4"
             pacote_exportado = gerar_pacote_excel_saida_sqlite(
                 db_path=db_path_sqlite,
                 pasta_saida=pasta_saida,
@@ -990,7 +1010,7 @@ if modulo_ativo == "Relatório de Incidência CP":
             st.session_state["relatorio_pacote_saida"] = pacote_exportado
             st.session_state.pop("relatorio_excel_path", None)
             st.session_state.pop("relatorio_excel_bytes", None)
-            st.session_state["relatorio_excel_nome"] = "pacote_segmentado_v9_3"
+            st.session_state["relatorio_excel_nome"] = "pacote_segmentado_v9_4"
         else:
             excel_bytes = gerar_excel_saida(
                 df_inventario=df_inventario,

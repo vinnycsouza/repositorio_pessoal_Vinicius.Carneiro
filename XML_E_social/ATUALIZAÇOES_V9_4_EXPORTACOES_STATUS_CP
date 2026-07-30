@@ -1,0 +1,20 @@
+# V9.4 — Exportação organizada por Status CP
+
+## Novo padrão recomendado
+A aba/arquivo `03_movimentos_cp` pode ser exportada em quatro modos:
+
+1. **Análise prioritária (padrão):** `Incide CP` + `Revisar codIncCP`;
+2. **Apenas Incide CP**;
+3. **Todos os classificados:** `Incide CP` + `Não incide CP` + `Revisar codIncCP`;
+4. **Todos os movimentos**, inclusive `Sem S-1010`.
+
+## Segurança documental
+Os movimentos com `status_cp = Sem S-1010` continuam sendo exportados separadamente em `05_sem_s1010`, independentemente do filtro da aba 03. Assim, a redução do tamanho da aba 03 não oculta rubricas sem tabela S-1010.
+
+## Recomendação para arquivos grandes
+Use **Análise prioritária**. Ela mantém no relatório operacional:
+- movimentos com incidência CP;
+- movimentos cujo código de incidência precisa de revisão;
+- e preserva os Sem S-1010 no relatório separado.
+
+Os movimentos classificados como `Não incide CP` permanecem no SQLite e podem ser exportados pelo modo “Todos os classificados”.
