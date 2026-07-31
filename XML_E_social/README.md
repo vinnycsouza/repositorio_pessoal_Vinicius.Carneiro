@@ -19,6 +19,8 @@ eSocial, com processamento persistente em SQLite e relatorio Excel consolidado.
 - workspaces, SQLite, XMLs e checkpoints preservados.
 - gerenciamento do Workspace atual, com abertura no Explorador e envio seguro
   para a Lixeira.
+- reutilização do Workspace no módulo de Levantamento, sem reprocessar XML;
+- consultas filtradas e exportação detalhada diretamente pelo SQLite.
 
 ## Execucao
 
@@ -32,6 +34,14 @@ streamlit run app.py
 ```text
 XML/ZIP -> Parser -> SQLite/checkpoint -> consultas -> Excel Builder -> validacao -> download
 ```
+
+No módulo de Levantamento, as origens disponíveis são ZIP, Excel e Workspace.
+Quando existe um Workspace válido na sessão, ele é reutilizado automaticamente.
+Também é possível informar a pasta do Workspace ou seu `processamento.db`.
+
+Para bases SQLite, somente opções, rubricas agrupadas, métricas e prévias são
+carregadas em DataFrames. Os movimentos detalhados são exportados por cursor,
+sem materializar a tabela integral em memória.
 
 A interface Streamlit apenas coleta opcoes, acompanha o progresso e oferece o
 arquivo concluido. A escrita do workbook fica centralizada em
@@ -58,4 +68,5 @@ ou enviar todo o Workspace para a Lixeira, sempre com confirmação. Não existe
 exclusão definitiva nessa ação.
 
 Consulte `PLANO_V9_5.md`, `ATUALIZACOES_V9_5_ENGINE_V3.md` e
-`ATUALIZACOES_V9_5_2_ENGINE_V3.md`.
+`ATUALIZACOES_V9_5_2_ENGINE_V3.md`. Consulte também
+`ATUALIZACOES_INTEGRACAO_WORKSPACE_LEVANTAMENTO.md`.

@@ -16,6 +16,14 @@ from modules.auditoria import (
     preparar_pacote_analitico,
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
+from modules.data_source import SQLiteDataSource, WorkspaceContext
+from modules.levantamento_sqlite import (
+    FiltrosLevantamento,
+    consultar_levantamento,
+    consultar_rubricas,
+    gerar_excel_levantamento_sqlite,
+    obter_opcoes_filtros,
+)
 from modules.processador_zip import (
     carregar_resultado_sqlite_existente,
     processar_fontes_esocial,
@@ -60,8 +68,12 @@ with st.sidebar:
     else:
         modo_entrada = st.radio(
             "Modo de entrada",
-            ["ZIP(s) do eSocial", "Excel consolidado / levantamento"],
-            help="Use Excel consolidado quando você já tiver uma base exportada com 02_rubricas_cp e 03_movimentos_cp.",
+            [
+                "ZIP(s) do eSocial",
+                "Excel consolidado / levantamento",
+                "Workspace (SQLite existente)",
+            ],
+            help="O Workspace reutiliza processamento.db sem reler XML ou planilhas gigantes.",
         )
 
     arquivos_principais = []
@@ -71,8 +83,20 @@ with st.sidebar:
     arquivo_excel = None
     caminho_sqlite_existente = ""
     gerar_relatorio = False
+    workspace_levantamento_reutilizavel = None
+    if (
+        modulo_ativo == "Levantamento de Verbas"
+        and modo_entrada == "ZIP(s) do eSocial"
+        and st.session_state.get("resultado_v82")
+    ):
+        try:
+            workspace_levantamento_reutilizavel = WorkspaceContext.from_resultado(
+                st.session_state["resultado_v82"]
+            )
+        except (OSError, ValueError):
+            workspace_levantamento_reutilizavel = None
 
-    if modo_entrada == "ZIP(s) do eSocial":
+    if modo_entrada == "ZIP(s) do eSocial" and workspace_levantamento_reutilizavel is None:
         st.subheader("1. Arquivos principais")
         st.caption("Obrigatório: downloads normais do eSocial, como S-1010, S-1200, S-5001, S-5011 e S-3000.")
         origem_principal = st.radio(
@@ -117,14 +141,43 @@ with st.sidebar:
             caminhos_recibos = [x.strip().strip('"') for x in texto_recibos.splitlines() if x.strip()]
 
         gerar_relatorio = st.button("Gerar Relatório", type="primary", use_container_width=True)
-    elif modo_entrada == "SQLite existente":
-        st.subheader("Banco já processado")
-        caminho_sqlite_existente = st.text_input(
-            "Caminho completo do processamento.db",
-            placeholder=r"C:\Users\vinny\AppData\Local\XML_eSocial\workspaces\esocial_v3_...\processamento.db",
-            help="O banco será apenas lido. Os XMLs não serão processados novamente.",
+    elif modo_entrada == "ZIP(s) do eSocial":
+        st.success(
+            "Workspace atual reutilizado automaticamente. Os XMLs não serão processados novamente."
         )
-        gerar_relatorio = st.button("Carregar banco existente", type="primary", use_container_width=True)
+        st.caption(f"SQLite: {workspace_levantamento_reutilizavel.db_path}")
+    elif modo_entrada in {"SQLite existente", "Workspace (SQLite existente)"}:
+        st.subheader("Banco já processado")
+        contexto_ativo = None
+        if modo_entrada == "Workspace (SQLite existente)" and st.session_state.get("resultado_v82"):
+            try:
+                contexto_ativo = WorkspaceContext.from_resultado(
+                    st.session_state["resultado_v82"]
+                )
+            except (OSError, ValueError):
+                contexto_ativo = None
+        if contexto_ativo is not None:
+            caminho_sqlite_existente = str(contexto_ativo.db_path)
+            st.success("Workspace atual da sessão selecionado automaticamente.")
+            try:
+                info_ativo = obter_info_workspace(st.session_state["resultado_v82"])
+                st.markdown(f"**Empresa:** {info_ativo.nome_empresa}")
+                st.markdown(f"**CNPJ:** {info_ativo.cnpj}")
+                st.markdown("**SQLite:** `processamento.db`")
+                st.markdown("**Status:** Pronto")
+            except (OSError, ValueError):
+                st.caption(f"SQLite: {contexto_ativo.db_path}")
+        else:
+            caminho_sqlite_existente = st.text_input(
+                "Caminho do processamento.db ou da pasta do Workspace",
+                placeholder=r"C:\Users\vinny\AppData\Local\XML_eSocial\workspaces\esocial_v3_...",
+                help="Informe a pasta ou o banco. Os XMLs não serão processados novamente.",
+            )
+            gerar_relatorio = st.button(
+                "Carregar Workspace" if modo_entrada == "Workspace (SQLite existente)" else "Carregar banco existente",
+                type="primary",
+                use_container_width=True,
+            )
     else:
         arquivo_excel = st.file_uploader(
             "Selecione o Excel consolidado", type=["xlsx"], accept_multiple_files=False,
@@ -138,7 +191,7 @@ with st.sidebar:
 
     resultado_workspace = (
         st.session_state.get("resultado_v82")
-        if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente"}
+        if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente", "Workspace (SQLite existente)"}
         else None
     )
     if st.button(
@@ -381,10 +434,13 @@ if modo_entrada == "ZIP(s) do eSocial":
     df_empresa = resultado.get("empresa", pd.DataFrame())
     modo_excel_consolidado = False
 
-elif modo_entrada == "SQLite existente":
+elif modo_entrada in {"SQLite existente", "Workspace (SQLite existente)"}:
     if gerar_relatorio:
         try:
-            st.session_state["resultado_v82"] = carregar_resultado_sqlite_existente(caminho_sqlite_existente)
+            contexto_carregado = WorkspaceContext.from_path(caminho_sqlite_existente)
+            st.session_state["resultado_v82"] = carregar_resultado_sqlite_existente(
+                contexto_carregado.db_path
+            )
             st.success("Banco SQLite carregado. O processamento dos XMLs não será repetido.")
         except Exception as exc:
             st.error(f"Não foi possível carregar o banco: {exc}")
@@ -451,9 +507,9 @@ def empresa_principal(df: pd.DataFrame) -> tuple[str, str]:
 nome_empresa, cnpj_empresa = empresa_principal(df_empresa)
 
 atualizar_analise, barra_analise, status_analise = _criar_progresso("Progresso da preparação do relatório")
-modo_sqlite_seguro = bool(resultado.get("modo_sqlite_seguro", False)) if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente"} else False
-pacote_sqlite = resultado.get("pacote_sqlite", {}) if modo_sqlite_seguro else {}
-db_path_sqlite = resultado.get("db_path", "") if modo_sqlite_seguro else ""
+modo_sqlite_seguro = bool(resultado.get("modo_sqlite_seguro", False)) if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente", "Workspace (SQLite existente)"} else False
+pacote_sqlite = resultado.get("pacote_sqlite", {}) if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente", "Workspace (SQLite existente)"} else {}
+db_path_sqlite = resultado.get("db_path", "") if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente", "Workspace (SQLite existente)"} else ""
 if modo_sqlite_seguro:
         atualizar_analise(0.20, "Carregando resumos consolidados diretamente do SQLite...")
         df_resumo_visual = pacote_sqlite.get("resumo_visual", pd.DataFrame()).copy()
@@ -619,25 +675,54 @@ if modulo_ativo == "Relatório de Incidência CP":
             st.dataframe(df_erros, use_container_width=True, hide_index=True)
 
 if modulo_ativo == "Levantamento de Verbas":
-    if modo_sqlite_seguro:
-        st.error(
-            "O processamento atual está no modo SQLite seguro por causa do volume. "
-            "Para preservar a integridade, o aplicativo não utilizará a prévia de 5.000 linhas como se fosse a base completa. "
-            "O Relatório de Incidência CP e o Excel integral continuam disponíveis em streaming."
+    levantamento_sqlite = bool(db_path_sqlite)
+    identificador_fonte_levantamento = (
+        f"sqlite:{Path(db_path_sqlite).resolve()}"
+        if levantamento_sqlite
+        else f"{modo_entrada}:{getattr(arquivo_excel, 'name', '')}"
+    )
+    if st.session_state.get("lev_fonte_assinatura") != identificador_fonte_levantamento:
+        st.session_state["lev_fonte_assinatura"] = identificador_fonte_levantamento
+        st.session_state.pop("lev_chaves_rubricas_selecionadas", None)
+        st.session_state.pop("lev_editor_versao", None)
+        st.session_state.pop("levantamento_excel_path", None)
+        st.session_state.pop("levantamento_ultima_geracao", None)
+    fonte_levantamento_sqlite = None
+    opcoes_sqlite = None
+    if levantamento_sqlite:
+        contexto_levantamento = WorkspaceContext.from_path(
+            db_path_sqlite, origem="sessao"
         )
-        st.info("O módulo de levantamento permanece integralmente disponível para bases abaixo do limite seguro de memória.")
-        st.stop()
+        fonte_levantamento_sqlite = SQLiteDataSource(contexto_levantamento)
+        opcoes_sqlite = obter_opcoes_filtros(fonte_levantamento_sqlite)
+        st.success(
+            "Levantamento conectado diretamente ao SQLite do Workspace. "
+            "Nenhum XML será reprocessado."
+        )
     st.markdown("## Levantamento de verbas")
     st.caption("Selecione rubricas já lidas no S-1200 e cruzadas com o S-1010 para calcular valores e estimar CPP.")
 
-    if df_movimentos_cp.empty:
+    total_movimentos_levantamento = (
+        int(pacote_sqlite.get("total_movimentos_cp", 0))
+        if levantamento_sqlite
+        else len(df_movimentos_cp)
+    )
+    if total_movimentos_levantamento == 0:
         st.warning("Sem movimentos do S-1200 para montar levantamento de verbas.")
     else:
         l1, l2, l3, l4 = st.columns(4)
-        status_ops = ["Todos"] + sorted(df_movimentos_cp["status_cp"].dropna().unique().tolist())
-        carater_ops = ["Todos"] + sorted(df_movimentos_cp["carater_verba"].dropna().unique().tolist())
-        tipo_ops = ["Todos"] + sorted(df_movimentos_cp["tipo_verba"].dropna().unique().tolist())
-        cp_ops = ["Todos"] + sorted(df_movimentos_cp["cod_inc_cp"].fillna("").astype(str).replace("", "Sem S-1010").unique().tolist())
+        if levantamento_sqlite:
+            status_ops = ["Todos"] + opcoes_sqlite["status_cp"]
+            carater_ops = ["Todos"] + opcoes_sqlite["carater"]
+            tipo_ops = ["Todos"] + opcoes_sqlite["tipo"]
+            cp_ops = ["Todos"] + opcoes_sqlite["cod_inc_cp"]
+            competencias = opcoes_sqlite["competencias"]
+        else:
+            status_ops = ["Todos"] + sorted(df_movimentos_cp["status_cp"].dropna().unique().tolist())
+            carater_ops = ["Todos"] + sorted(df_movimentos_cp["carater_verba"].dropna().unique().tolist())
+            tipo_ops = ["Todos"] + sorted(df_movimentos_cp["tipo_verba"].dropna().unique().tolist())
+            cp_ops = ["Todos"] + sorted(df_movimentos_cp["cod_inc_cp"].fillna("").astype(str).replace("", "Sem S-1010").unique().tolist())
+            competencias = sorted(df_movimentos_cp["per_apur"].dropna().astype(str).unique().tolist()) if "per_apur" in df_movimentos_cp.columns else []
 
         status_lev = l1.selectbox("Status CP", status_ops, index=status_ops.index("Incide CP") if "Incide CP" in status_ops else 0, key="lev_status_cp")
         carater_lev = l2.selectbox("Caráter", carater_ops, key="lev_carater")
@@ -645,41 +730,55 @@ if modulo_ativo == "Levantamento de Verbas":
         cp_lev = l4.selectbox("codIncCP", cp_ops, key="lev_codinc")
 
         l5, l6, l7 = st.columns(3)
-        competencias = sorted(df_movimentos_cp["per_apur"].dropna().astype(str).unique().tolist()) if "per_apur" in df_movimentos_cp.columns else []
         comp_lev = l5.multiselect("Competências", options=competencias, default=[], key="lev_comp")
         aliquota_lev = l6.number_input("Alíquota estimada CPP (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.5, key="lev_aliquota")
         positivos_lev = l7.checkbox("Apenas valores positivos", value=True, key="lev_positivos")
 
-        df_base_lev = df_movimentos_cp.copy()
-        if status_lev != "Todos":
-            df_base_lev = df_base_lev[df_base_lev["status_cp"].eq(status_lev)]
-        if carater_lev != "Todos":
-            df_base_lev = df_base_lev[df_base_lev["carater_verba"].eq(carater_lev)]
-        if tipo_lev != "Todos":
-            df_base_lev = df_base_lev[df_base_lev["tipo_verba"].eq(tipo_lev)]
-        if cp_lev != "Todos":
-            if cp_lev == "Sem S-1010":
-                df_base_lev = df_base_lev[df_base_lev["cod_inc_cp"].fillna("").astype(str).eq("")]
-            else:
-                df_base_lev = df_base_lev[df_base_lev["cod_inc_cp"].astype(str).eq(cp_lev)]
-        if comp_lev:
-            df_base_lev = df_base_lev[df_base_lev["per_apur"].astype(str).isin(comp_lev)]
-        if positivos_lev:
-            df_base_lev = df_base_lev[pd.to_numeric(df_base_lev["vr_rubr"], errors="coerce").fillna(0) > 0]
+        filtros_levantamento = FiltrosLevantamento(
+            status_cp=status_lev,
+            carater=carater_lev,
+            tipo=tipo_lev,
+            cod_inc_cp=cp_lev,
+            competencias=tuple(comp_lev),
+            apenas_positivos=positivos_lev,
+        )
+        if levantamento_sqlite:
+            df_base_lev = pd.DataFrame()
+            df_opts = consultar_rubricas(
+                fonte_levantamento_sqlite, filtros_levantamento
+            )
+        else:
+            df_base_lev = df_movimentos_cp.copy()
+            if status_lev != "Todos":
+                df_base_lev = df_base_lev[df_base_lev["status_cp"].eq(status_lev)]
+            if carater_lev != "Todos":
+                df_base_lev = df_base_lev[df_base_lev["carater_verba"].eq(carater_lev)]
+            if tipo_lev != "Todos":
+                df_base_lev = df_base_lev[df_base_lev["tipo_verba"].eq(tipo_lev)]
+            if cp_lev != "Todos":
+                if cp_lev == "Sem S-1010":
+                    df_base_lev = df_base_lev[df_base_lev["cod_inc_cp"].fillna("").astype(str).eq("")]
+                else:
+                    df_base_lev = df_base_lev[df_base_lev["cod_inc_cp"].astype(str).eq(cp_lev)]
+            if comp_lev:
+                df_base_lev = df_base_lev[df_base_lev["per_apur"].astype(str).isin(comp_lev)]
+            if positivos_lev:
+                df_base_lev = df_base_lev[pd.to_numeric(df_base_lev["vr_rubr"], errors="coerce").fillna(0) > 0]
 
-        if df_base_lev.empty:
+        if (levantamento_sqlite and df_opts.empty) or (not levantamento_sqlite and df_base_lev.empty):
             st.warning("Nenhuma rubrica encontrada com os filtros selecionados.")
         else:
-            df_opts = (
-                df_base_lev.groupby(["cod_rubr", "ide_tab_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
-                .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"))
-                .sort_values(["dsc_rubr", "cod_rubr"], ascending=[True, True])
-            )
-            df_opts["chave_rubrica"] = (
-                df_opts["cod_rubr"].fillna("").astype(str)
-                + "||"
-                + df_opts["ide_tab_rubr"].fillna("").astype(str)
-            )
+            if not levantamento_sqlite:
+                df_opts = (
+                    df_base_lev.groupby(["cod_rubr", "ide_tab_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
+                    .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"))
+                    .sort_values(["dsc_rubr", "cod_rubr"], ascending=[True, True])
+                )
+                df_opts["chave_rubrica"] = (
+                    df_opts["cod_rubr"].fillna("").astype(str)
+                    + "||"
+                    + df_opts["ide_tab_rubr"].fillna("").astype(str)
+                )
 
             if "lev_chaves_rubricas_selecionadas" not in st.session_state:
                 st.session_state["lev_chaves_rubricas_selecionadas"] = []
@@ -785,20 +884,39 @@ if modulo_ativo == "Levantamento de Verbas":
                 df_levantamento_export = pd.DataFrame()
                 st.stop()
 
-            # A partir deste ponto o app monta somente o recorte selecionado, e não todas as rubricas filtradas.
-            df_levantamento = df_base_lev.copy()
-            df_levantamento["chave_rubrica"] = (
-                df_levantamento["cod_rubr"].fillna("").astype(str)
-                + "||"
-                + df_levantamento["ide_tab_rubr"].fillna("").astype(str)
-            )
-            df_levantamento = df_levantamento[df_levantamento["chave_rubrica"].astype(str).isin(chaves_selecionadas)].copy()
-            df_levantamento = df_levantamento.drop(columns=["chave_rubrica"], errors="ignore")
-
-            total_lev = float(pd.to_numeric(df_levantamento["vr_rubr"], errors="coerce").fillna(0).sum())
-            cpp_lev = total_lev * (float(aliquota_lev) / 100.0)
-            qtd_rubricas_lev = df_levantamento["cod_rubr"].nunique()
-            qtd_cpfs_lev = df_levantamento["cpf"].nunique() if "cpf" in df_levantamento.columns else 0
+            # A partir deste ponto apenas o recorte selecionado é consultado.
+            if levantamento_sqlite:
+                resultado_lev_sqlite = consultar_levantamento(
+                    fonte_levantamento_sqlite,
+                    filtros_levantamento,
+                    chaves_selecionadas,
+                    float(aliquota_lev),
+                )
+                df_levantamento = resultado_lev_sqlite.movimentos_previa
+                total_movimentos_lev = resultado_lev_sqlite.qtd_movimentos
+                total_lev = resultado_lev_sqlite.total
+                cpp_lev = resultado_lev_sqlite.cpp
+                qtd_rubricas_lev = resultado_lev_sqlite.qtd_rubricas
+                qtd_cpfs_lev = resultado_lev_sqlite.qtd_cpfs
+                df_resumo_lev = resultado_lev_sqlite.resumo_rubricas
+                df_resumo_competencia_rubrica_lev = (
+                    resultado_lev_sqlite.resumo_competencia_rubrica
+                )
+                df_resumo_competencia_lev = resultado_lev_sqlite.resumo_competencia
+            else:
+                df_levantamento = df_base_lev.copy()
+                df_levantamento["chave_rubrica"] = (
+                    df_levantamento["cod_rubr"].fillna("").astype(str)
+                    + "||"
+                    + df_levantamento["ide_tab_rubr"].fillna("").astype(str)
+                )
+                df_levantamento = df_levantamento[df_levantamento["chave_rubrica"].astype(str).isin(chaves_selecionadas)].copy()
+                df_levantamento = df_levantamento.drop(columns=["chave_rubrica"], errors="ignore")
+                total_movimentos_lev = len(df_levantamento)
+                total_lev = float(pd.to_numeric(df_levantamento["vr_rubr"], errors="coerce").fillna(0).sum())
+                cpp_lev = total_lev * (float(aliquota_lev) / 100.0)
+                qtd_rubricas_lev = df_levantamento["cod_rubr"].nunique()
+                qtd_cpfs_lev = df_levantamento["cpf"].nunique() if "cpf" in df_levantamento.columns else 0
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total levantado", f"R$ {decimal_br(total_lev)}")
@@ -806,47 +924,34 @@ if modulo_ativo == "Levantamento de Verbas":
             m3.metric("Rubricas", f"{qtd_rubricas_lev:,}".replace(",", "."))
             m4.metric("CPFs", f"{qtd_cpfs_lev:,}".replace(",", "."))
 
-            df_resumo_lev = (
-                df_levantamento.groupby(["cod_rubr", "dsc_rubr", "nat_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
-                .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"), primeira_competencia=("per_apur", "min"), ultima_competencia=("per_apur", "max"))
-                .sort_values("valor_total", ascending=False)
-            )
-            df_resumo_lev["cpp_estimado"] = pd.to_numeric(df_resumo_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
-
-            df_resumo_competencia_rubrica_lev = (
-                df_levantamento.groupby(["per_apur", "cod_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
-                .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"))
-                .sort_values(["per_apur", "valor_total"], ascending=[True, False])
-            )
-            df_resumo_competencia_rubrica_lev["cpp_estimado"] = pd.to_numeric(df_resumo_competencia_rubrica_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
-
-            # Resumo em matriz: período de apuração na coluna A e uma coluna para cada rubrica selecionada.
-            # Esse é o formato usado para facilitar conferência mensal e copiar para planilhas de levantamento.
-            df_matriz_competencia = df_levantamento.copy()
-            df_matriz_competencia["rubrica_resumo"] = (
-                df_matriz_competencia["cod_rubr"].fillna("").astype(str).str.strip()
-                + " - "
-                + df_matriz_competencia["dsc_rubr"].fillna("").astype(str).str.strip()
-            ).str.strip(" -")
-            df_resumo_competencia_lev = (
-                df_matriz_competencia.pivot_table(
-                    index="per_apur",
-                    columns="rubrica_resumo",
-                    values="vr_rubr",
-                    aggfunc="sum",
-                    fill_value=0,
+            if not levantamento_sqlite:
+                df_resumo_lev = (
+                    df_levantamento.groupby(["cod_rubr", "dsc_rubr", "nat_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
+                    .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"), primeira_competencia=("per_apur", "min"), ultima_competencia=("per_apur", "max"))
+                    .sort_values("valor_total", ascending=False)
                 )
-                .reset_index()
-                .rename(columns={"per_apur": "Periodo de apuracao"})
-            )
-            colunas_rubricas = [col for col in df_resumo_competencia_lev.columns if col != "Periodo de apuracao"]
-            if colunas_rubricas:
-                df_resumo_competencia_lev["Total"] = df_resumo_competencia_lev[colunas_rubricas].sum(axis=1)
+                df_resumo_lev["cpp_estimado"] = pd.to_numeric(df_resumo_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
+                df_resumo_competencia_rubrica_lev = (
+                    df_levantamento.groupby(["per_apur", "cod_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"], dropna=False, as_index=False)
+                    .agg(valor_total=("vr_rubr", "sum"), qtd_lancamentos=("vr_rubr", "size"), qtd_cpfs=("cpf", "nunique"))
+                    .sort_values(["per_apur", "valor_total"], ascending=[True, False])
+                )
+                df_resumo_competencia_rubrica_lev["cpp_estimado"] = pd.to_numeric(df_resumo_competencia_rubrica_lev["valor_total"], errors="coerce").fillna(0) * (float(aliquota_lev) / 100.0)
+                df_matriz_competencia = df_levantamento.copy()
+                df_matriz_competencia["rubrica_resumo"] = (
+                    df_matriz_competencia["cod_rubr"].fillna("").astype(str).str.strip()
+                    + " - "
+                    + df_matriz_competencia["dsc_rubr"].fillna("").astype(str).str.strip()
+                ).str.strip(" -")
+                df_resumo_competencia_lev = (
+                    df_matriz_competencia.pivot_table(index="per_apur", columns="rubrica_resumo", values="vr_rubr", aggfunc="sum", fill_value=0)
+                    .reset_index()
+                    .rename(columns={"per_apur": "Periodo de apuracao"})
+                )
+                colunas_rubricas = [col for col in df_resumo_competencia_lev.columns if col != "Periodo de apuracao"]
+                df_resumo_competencia_lev["Total"] = df_resumo_competencia_lev[colunas_rubricas].sum(axis=1) if colunas_rubricas else 0.0
                 df_resumo_competencia_lev["CPP estimada"] = df_resumo_competencia_lev["Total"] * (float(aliquota_lev) / 100.0)
-            else:
-                df_resumo_competencia_lev["Total"] = 0.0
-                df_resumo_competencia_lev["CPP estimada"] = 0.0
-            df_resumo_competencia_lev = df_resumo_competencia_lev.sort_values("Periodo de apuracao")
+                df_resumo_competencia_lev = df_resumo_competencia_lev.sort_values("Periodo de apuracao")
 
             st.markdown("### Resumo das rubricas levantadas")
             st.dataframe(df_resumo_lev, use_container_width=True, hide_index=True)
@@ -856,6 +961,11 @@ if modulo_ativo == "Levantamento de Verbas":
             st.dataframe(df_resumo_competencia_lev, use_container_width=True, hide_index=True)
 
             with st.expander("Ver movimentos detalhados do levantamento"):
+                if levantamento_sqlite and total_movimentos_lev > len(df_levantamento):
+                    st.caption(
+                        f"Prévia das primeiras {len(df_levantamento):,} de {total_movimentos_lev:,} linhas. "
+                        "O conjunto completo permanece no SQLite."
+                    )
                 st.dataframe(df_levantamento, use_container_width=True, hide_index=True)
 
             df_parametros_lev = pd.DataFrame({
@@ -895,9 +1005,9 @@ if modulo_ativo == "Levantamento de Verbas":
                 help="Desmarcado por padrão para arquivos grandes. Os resumos continuam sendo gerados normalmente. Marque apenas quando precisar auditar movimento a movimento.",
                 key="lev_incluir_movimentos_detalhados",
             )
-            if incluir_movimentos_detalhados and len(df_levantamento) > MAX_LINHAS_DADOS_EXCEL:
+            if incluir_movimentos_detalhados and total_movimentos_lev > MAX_LINHAS_DADOS_EXCEL:
                 st.warning(
-                    f"A aba 03_movimentos do levantamento possui {len(df_levantamento):,} linhas e será dividida automaticamente em partes no Excel.".replace(",", ".")
+                    f"A aba 03_movimentos do levantamento possui {total_movimentos_lev:,} linhas e será dividida automaticamente em partes no Excel.".replace(",", ".")
                 )
             elif not incluir_movimentos_detalhados:
                 st.caption("Para melhor performance, o Excel será gerado sem a aba detalhada 03_movimentos. Use os resumos por rubrica e competência para o levantamento.")
@@ -906,37 +1016,52 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.session_state["levantamento_status_geracao"] = "gerando"
                 atualizar_lev, barra_lev, status_lev_prog = _criar_progresso("Progresso da geração do levantamento")
                 atualizar_lev(0.03, "Preparando o arquivo Excel...")
-                if incluir_movimentos_detalhados:
-                    movimentos_levantamento = df_levantamento
-                else:
-                    movimentos_levantamento = pd.DataFrame({
-                        "Informação": [
-                            "A aba detalhada 03_movimentos não foi incluída nesta exportação.",
-                            "Para incluir os movimentos detalhados, marque a opção correspondente antes de preparar o arquivo.",
-                            "Os valores do levantamento estão preservados nas abas de resumo.",
-                        ],
-                        "Valor": [
-                            f"Movimentos detalhados disponíveis no recorte: {len(df_levantamento):,}".replace(",", "."),
-                            "Exportação otimizada para arquivos grandes",
-                            f"Total levantado: R$ {decimal_br(total_lev)}",
-                        ],
-                    })
-                pasta_levantamento = (
+                pasta_base_levantamento = (
                     Path(resultado.get("workspace_temporario", tempfile.gettempdir()))
-                    / "output"
+                    if modo_entrada != "Excel consolidado / levantamento"
+                    else Path(tempfile.gettempdir()) / "XML_eSocial" / "levantamentos"
                 )
-                resultado_levantamento = gerar_workbook(
-                    pasta_levantamento / "levantamento_verbas_cp_v9_5.xlsx",
-                    [
-                        FontePlanilha("00_empresa", dataframe=df_empresa),
-                        FontePlanilha("01_resumo", dataframe=df_parametros_lev),
-                        FontePlanilha("02_resumo_rubricas", dataframe=df_resumo_lev),
-                        FontePlanilha("03_movimentos", dataframe=movimentos_levantamento),
-                        FontePlanilha("04_resumo_competencia", dataframe=df_resumo_competencia_lev),
-                        FontePlanilha("05_competencia_rubrica", dataframe=df_resumo_competencia_rubrica_lev),
-                    ],
-                    progress_callback=atualizar_lev,
-                )
+                pasta_levantamento = pasta_base_levantamento / "output"
+                if levantamento_sqlite:
+                    resultado_levantamento = gerar_excel_levantamento_sqlite(
+                        fonte_levantamento_sqlite,
+                        pasta_levantamento / "levantamento_verbas_cp_v9_5.xlsx",
+                        filtros_levantamento,
+                        chaves_selecionadas,
+                        resultado_lev_sqlite,
+                        df_empresa,
+                        df_parametros_lev,
+                        incluir_movimentos_detalhados,
+                        progress_callback=atualizar_lev,
+                    )
+                else:
+                    if incluir_movimentos_detalhados:
+                        movimentos_levantamento = df_levantamento
+                    else:
+                        movimentos_levantamento = pd.DataFrame({
+                            "Informação": [
+                                "A aba detalhada 03_movimentos não foi incluída nesta exportação.",
+                                "Para incluir os movimentos detalhados, marque a opção correspondente antes de preparar o arquivo.",
+                                "Os valores do levantamento estão preservados nas abas de resumo.",
+                            ],
+                            "Valor": [
+                                f"Movimentos detalhados disponíveis no recorte: {total_movimentos_lev:,}".replace(",", "."),
+                                "Exportação otimizada para arquivos grandes",
+                                f"Total levantado: R$ {decimal_br(total_lev)}",
+                            ],
+                        })
+                    resultado_levantamento = gerar_workbook(
+                        pasta_levantamento / "levantamento_verbas_cp_v9_5.xlsx",
+                        [
+                            FontePlanilha("00_empresa", dataframe=df_empresa),
+                            FontePlanilha("01_resumo", dataframe=df_parametros_lev),
+                            FontePlanilha("02_resumo_rubricas", dataframe=df_resumo_lev),
+                            FontePlanilha("03_movimentos", dataframe=movimentos_levantamento),
+                            FontePlanilha("04_resumo_competencia", dataframe=df_resumo_competencia_lev),
+                            FontePlanilha("05_competencia_rubrica", dataframe=df_resumo_competencia_rubrica_lev),
+                        ],
+                        progress_callback=atualizar_lev,
+                    )
                 agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                 st.session_state["levantamento_excel_path"] = resultado_levantamento.caminho
                 st.session_state.pop("levantamento_excel_bytes", None)
@@ -945,7 +1070,7 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.session_state["levantamento_ultima_geracao"] = {
                         "data_hora": agora,
                         "qtd_rubricas": int(qtd_rubricas_lev),
-                        "qtd_movimentos": int(len(df_levantamento)),
+                        "qtd_movimentos": int(total_movimentos_lev),
                         "qtd_cpfs": int(qtd_cpfs_lev),
                         "total_levantado": float(total_lev),
                         "cpp_estimado": float(cpp_lev),
