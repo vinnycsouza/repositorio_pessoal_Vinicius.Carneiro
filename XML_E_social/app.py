@@ -18,10 +18,15 @@ from modules.auditoria import (
 from modules.excel_builder import FontePlanilha, gerar_workbook
 from modules.processador_zip import (
     carregar_resultado_sqlite_existente,
-    limpar_workspaces_temporarios_antigos,
     processar_fontes_esocial,
 )
 from modules.sqlite_relatorio import gerar_excel_saida_sqlite
+from modules.workspace_manager import (
+    abrir_workspace,
+    enviar_workspace_para_lixeira,
+    formatar_tamanho,
+    obter_info_workspace,
+)
 from utils.helpers import decimal_br
 
 
@@ -29,7 +34,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 9.5 Engine V3: SQLite persistente, retomada por checkpoint e um único Excel consolidado validado."
+    "Versão 9.5.2 Engine V3: SQLite persistente, Excel consolidado e gerenciamento seguro do Workspace atual."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -127,13 +132,112 @@ with st.sidebar:
         )
 
     st.markdown("---")
-    if st.button("Limpar temporários antigos", use_container_width=True, help="Remove temporários antigos concluídos. Processamentos V3 interrompidos são preservados para retomada."):
-        limpeza = limpar_workspaces_temporarios_antigos()
-        mb = limpeza["bytes_liberados"] / (1024 * 1024)
-        if limpeza["falhas"]:
-            st.warning(f"Foram removidas {limpeza['pastas_removidas']} pasta(s), liberando {mb:.1f} MB. Algumas pastas não puderam ser removidas.")
+    mensagem_workspace = st.session_state.pop("mensagem_workspace_v952", None)
+    if mensagem_workspace:
+        st.success(mensagem_workspace)
+
+    resultado_workspace = (
+        st.session_state.get("resultado_v82")
+        if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente"}
+        else None
+    )
+    if st.button(
+        "Gerenciar Workspace Atual",
+        use_container_width=True,
+        help="Exibe e gerencia somente o Workspace atualmente carregado.",
+    ):
+        st.session_state["exibir_workspace_v952"] = True
+
+    if resultado_workspace is None:
+        st.caption("Carregue ou processe um Workspace para habilitar o gerenciamento.")
+        st.session_state.pop("exibir_workspace_v952", None)
+        st.session_state.pop("confirmar_lixeira_workspace_v952", None)
+    elif st.session_state.get("exibir_workspace_v952"):
+        try:
+            info_workspace = obter_info_workspace(resultado_workspace)
+        except (OSError, ValueError) as exc:
+            st.error(str(exc))
         else:
-            st.success(f"Limpeza concluída: {limpeza['pastas_removidas']} pasta(s), {mb:.1f} MB liberados.")
+            with st.expander("Workspace atualmente em uso", expanded=True):
+                st.markdown(f"**Empresa:** {info_workspace.nome_empresa}")
+                st.markdown(f"**CNPJ:** {info_workspace.cnpj}")
+                st.markdown(f"**Workspace:** `{info_workspace.nome_workspace}`")
+                st.markdown(f"**Caminho:** `{info_workspace.caminho}`")
+                st.markdown(f"**Status:** {info_workspace.status}")
+                st.markdown(
+                    f"**Espaço ocupado:** {formatar_tamanho(info_workspace.tamanho_total)}"
+                )
+                st.markdown(
+                    f"**Banco SQLite:** {formatar_tamanho(info_workspace.tamanho_sqlite)}"
+                )
+
+                if st.button(
+                    "📂 Abrir Workspace",
+                    use_container_width=True,
+                    key="abrir_workspace_v952",
+                ):
+                    try:
+                        abrir_workspace(info_workspace.caminho)
+                    except OSError as exc:
+                        st.error(f"Não foi possível abrir o Workspace: {exc}")
+
+                if not st.session_state.get("confirmar_lixeira_workspace_v952"):
+                    if st.button(
+                        "🗑 Enviar Workspace para a Lixeira",
+                        use_container_width=True,
+                        disabled=info_workspace.status == "Em processamento",
+                        key="solicitar_lixeira_workspace_v952",
+                    ):
+                        st.session_state["confirmar_lixeira_workspace_v952"] = True
+                        st.rerun()
+                    if info_workspace.status == "Em processamento":
+                        st.warning(
+                            "O Workspace não pode ser movido enquanto está em processamento."
+                        )
+                else:
+                    st.warning(
+                        "Deseja realmente enviar este Workspace para a Lixeira?\n\n"
+                        f"**Workspace:** {info_workspace.nome_workspace}\n\n"
+                        f"**Empresa:** {info_workspace.nome_empresa}\n\n"
+                        f"**Espaço ocupado:** {formatar_tamanho(info_workspace.tamanho_total)}"
+                    )
+                    coluna_cancelar, coluna_enviar = st.columns(2)
+                    with coluna_cancelar:
+                        if st.button(
+                            "Cancelar",
+                            use_container_width=True,
+                            key="cancelar_lixeira_workspace_v952",
+                        ):
+                            st.session_state.pop(
+                                "confirmar_lixeira_workspace_v952", None
+                            )
+                            st.rerun()
+                    with coluna_enviar:
+                        if st.button(
+                            "Enviar para Lixeira",
+                            type="primary",
+                            use_container_width=True,
+                            key="confirmar_lixeira_workspace_v952",
+                        ):
+                            try:
+                                enviar_workspace_para_lixeira(info_workspace.caminho)
+                            except (OSError, ValueError) as exc:
+                                st.error(
+                                    f"Não foi possível enviar o Workspace para a Lixeira: {exc}"
+                                )
+                            else:
+                                for chave in [
+                                    "resultado_v82",
+                                    "fontes_principais_v82",
+                                    "fontes_recibos_v82",
+                                    "exibir_workspace_v952",
+                                    "confirmar_lixeira_workspace_v952",
+                                ]:
+                                    st.session_state.pop(chave, None)
+                                st.session_state["mensagem_workspace_v952"] = (
+                                    "Workspace enviado para a Lixeira com segurança."
+                                )
+                                st.rerun()
 
     if st.button("Resetar aplicação", use_container_width=True):
         st.cache_data.clear()

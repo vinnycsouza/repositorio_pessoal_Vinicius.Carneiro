@@ -1,4 +1,4 @@
-# XML eSocial V9.5 - Engine V3
+# XML eSocial V9.5.2 - Engine V3
 
 Aplicacao Streamlit para leitura, auditoria e levantamento de eventos do
 eSocial, com processamento persistente em SQLite e relatorio Excel consolidado.
@@ -17,6 +17,8 @@ eSocial, com processamento persistente em SQLite e relatorio Excel consolidado.
 - aba `controle_integridade` incluida no relatorio;
 - manifesto CSV opcional;
 - workspaces, SQLite, XMLs e checkpoints preservados.
+- gerenciamento do Workspace atual, com abertura no Explorador e envio seguro
+  para a Lixeira.
 
 ## Execucao
 
@@ -47,7 +49,13 @@ na interface, ele e gerado ao lado do XLSX.
 ## Preservacao
 
 O processamento nao apaga automaticamente workspaces, bancos SQLite, XMLs,
-logs ou checkpoints. A limpeza disponivel na interface depende de acao explicita
-do usuario.
+logs ou checkpoints. A remoção do Workspace atual depende de confirmação
+explícita do usuário e utiliza a Lixeira do sistema operacional.
 
-Consulte `PLANO_V9_5.md` e `ATUALIZACOES_V9_5_ENGINE_V3.md`.
+Na V9.5.2, o antigo botão de limpeza foi substituido por **Gerenciar Workspace
+Atual**. O painel mostra empresa, CNPJ, status e tamanhos e permite abrir a pasta
+ou enviar todo o Workspace para a Lixeira, sempre com confirmação. Não existe
+exclusão definitiva nessa ação.
+
+Consulte `PLANO_V9_5.md`, `ATUALIZACOES_V9_5_ENGINE_V3.md` e
+`ATUALIZACOES_V9_5_2_ENGINE_V3.md`.
