@@ -24,6 +24,7 @@ from modules.auditoria import (
     classificar_tipo_verba,
     entra_base_cp,
 )
+from modules.excel_builder import FontePlanilha, gerar_workbook
 
 ProgressCallback = Callable[[float, str], None]
 MAX_DADOS_ABA = 1_048_575
@@ -379,54 +380,80 @@ def gerar_excel_saida_sqlite(
     df_levantamento: pd.DataFrame | None = None,
     modo_exportacao_movimentos_cp: str = "todos",
     progress_callback: ProgressCallback | None = None,
+    gerar_manifesto: bool = False,
 ) -> str:
-    """Gera o mesmo relatório em modo streaming, com conferência linha a linha por aba."""
+    """Gera um unico relatório V9.5 em streaming e valida antes da entrega."""
     destino = Path(caminho_saida)
     destino.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
-    wb = Workbook(write_only=True)
-    controles: list[dict] = []
+    conn = sqlite3.connect(
+        f"file:{Path(db_path).resolve().as_posix()}?mode=ro",
+        uri=True,
+        timeout=120,
+    )
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute("PRAGMA busy_timeout = 120000")
+    conn.execute("PRAGMA temp_store = FILE")
+    conn.execute("PRAGMA cache_size = -262144")
     try:
-        _progresso(progress_callback, 0.01, "Abrindo Excel em modo streaming...")
-        for nome, df in [("00_empresa", df_empresa), ("01_resumo", df_resumo_visual), ("02_rubricas_cp", df_rubricas_cp)]:
-            ws = wb.create_sheet(nome)
-            _escrever_dataframe(ws, df if df is not None else pd.DataFrame())
-            controles.append({"aba":nome,"quantidade_sqlite":len(df) if df is not None else 0,"quantidade_exportada":len(df) if df is not None else 0,"partes":1,"status":"OK"})
-
         filtro = _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp)
-        controles.append(_exportar_query(wb, conn, "03_movimentos_cp", "SELECT * FROM rel_movimentos_cp" + filtro, cb=progress_callback, inicio=0.10, fim=0.52))
-        controles.append(_exportar_query(wb, conn, "04_base_trabalhador", "SELECT * FROM rel_base_trabalhador ORDER BY status_conferencia DESC, per_apur, cpf, matricula", cb=progress_callback, inicio=0.52, fim=0.64))
-        controles.append(_exportar_query(wb, conn, "05_sem_s1010", "SELECT * FROM rel_sem_s1010 ORDER BY per_apur, valor_rubrica DESC", cb=progress_callback, inicio=0.64, fim=0.68))
-        controles.append(_exportar_query(wb, conn, "05_busca_recibos", "SELECT cod_rubr,ide_tab_rubr,MAX(dsc_rubr) dsc_rubr,MIN(per_apur) primeira_competencia,MAX(per_apur) ultima_competencia,COUNT(DISTINCT per_apur) qtd_competencias,SUM(qtd_lancamentos) qtd_lancamentos,COUNT(DISTINCT cpf) qtd_cpfs,SUM(valor_rubrica) valor_total,'Baixar recibo S-1010 da rubrica e aplicar na complementação do relatório.' acao_recomendada FROM rel_sem_s1010 GROUP BY cod_rubr,ide_tab_rubr", cb=progress_callback, inicio=0.68, fim=0.71))
-        controles.append(_exportar_query(wb, conn, "06_s5001_tpvalor", "SELECT * FROM rel_s5001_resumo", cb=progress_callback, inicio=0.71, fim=0.75))
-
-        ws = wb.create_sheet("07_levantamento")
-        _escrever_dataframe(ws, df_levantamento if df_levantamento is not None else pd.DataFrame())
-
-        consultas_apoio = [
-            ("apoio_s1010", "SELECT * FROM dados_rubricas"),
-            ("apoio_s1200", "SELECT * FROM rel_movimentos_cp"),
-            ("apoio_s5001", "SELECT * FROM dados_bases_trabalhador"),
-            ("apoio_s5011", "SELECT * FROM dados_bases_contribuicao"),
-            ("apoio_s3000", "SELECT * FROM dados_exclusoes"),
-            ("checagem_layout", "SELECT c.tipo,c.quantidade xml_localizados,CASE WHEN c.tipo IN ('S-1200','S-5001','S-5011') THEN (SELECT COUNT(*) FROM eventos e WHERE e.tipo=c.tipo AND e.processado_segunda=1) ELSE c.quantidade END xml_parseados,0 nao_parseados FROM contagem_eventos c"),
-            ("inventario", "SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id"),
-            ("erros_xml", "SELECT arquivo,erro FROM erros ORDER BY id"),
+        fontes = [
+            FontePlanilha("00_empresa", dataframe=df_empresa),
+            FontePlanilha("01_resumo", dataframe=df_resumo_visual),
+            FontePlanilha("02_rubricas_cp", dataframe=df_rubricas_cp),
+            FontePlanilha(
+                "03_movimentos_cp",
+                query="SELECT * FROM rel_movimentos_cp" + filtro,
+            ),
+            FontePlanilha(
+                "04_base_trabalhador",
+                query="SELECT * FROM rel_base_trabalhador ORDER BY status_conferencia DESC, per_apur, cpf, matricula",
+            ),
+            FontePlanilha(
+                "05_sem_s1010",
+                query="SELECT * FROM rel_sem_s1010 ORDER BY per_apur, valor_rubrica DESC",
+            ),
+            FontePlanilha(
+                "05_busca_recibos",
+                query="SELECT cod_rubr,ide_tab_rubr,MAX(dsc_rubr) dsc_rubr,MIN(per_apur) primeira_competencia,MAX(per_apur) ultima_competencia,COUNT(DISTINCT per_apur) qtd_competencias,SUM(qtd_lancamentos) qtd_lancamentos,COUNT(DISTINCT cpf) qtd_cpfs,SUM(valor_rubrica) valor_total,'Baixar recibo S-1010 da rubrica e aplicar na complementação do relatório.' acao_recomendada FROM rel_sem_s1010 GROUP BY cod_rubr,ide_tab_rubr",
+            ),
+            FontePlanilha("06_s5001_tpvalor", query="SELECT * FROM rel_s5001_resumo"),
+            FontePlanilha(
+                "07_levantamento",
+                dataframe=df_levantamento
+                if df_levantamento is not None
+                else pd.DataFrame(),
+            ),
+            FontePlanilha("apoio_s1010", query="SELECT * FROM dados_rubricas"),
+            FontePlanilha("apoio_s1200", query="SELECT * FROM rel_movimentos_cp"),
+            FontePlanilha(
+                "apoio_s5001", query="SELECT * FROM dados_bases_trabalhador"
+            ),
+            FontePlanilha(
+                "apoio_s5011", query="SELECT * FROM dados_bases_contribuicao"
+            ),
+            FontePlanilha("apoio_s3000", query="SELECT * FROM dados_exclusoes"),
+            FontePlanilha(
+                "checagem_layout",
+                query="SELECT c.tipo,c.quantidade xml_localizados,CASE WHEN c.tipo IN ('S-1200','S-5001','S-5011') THEN (SELECT COUNT(*) FROM eventos e WHERE e.tipo=c.tipo AND e.processado_segunda=1) ELSE c.quantidade END xml_parseados,0 nao_parseados FROM contagem_eventos c",
+            ),
+            FontePlanilha(
+                "inventario",
+                query="SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id",
+            ),
+            FontePlanilha(
+                "erros_xml", query="SELECT arquivo,erro FROM erros ORDER BY id"
+            ),
         ]
-        faixa = 0.21 / max(len(consultas_apoio), 1)
-        for i, (nome, sql) in enumerate(consultas_apoio):
-            controles.append(_exportar_query(wb, conn, nome, sql, cb=progress_callback, inicio=0.76+i*faixa, fim=0.76+(i+1)*faixa))
-
-        ws_ctrl = wb.create_sheet("controle_integridade")
-        ctrl_df = pd.DataFrame(controles)
-        _escrever_dataframe(ws_ctrl, ctrl_df)
-        ws_banco = wb.create_sheet("controle_banco")
         banco_df = pd.read_sql_query("SELECT * FROM rel_controle_integridade", conn)
-        _escrever_dataframe(ws_banco, banco_df)
-        _progresso(progress_callback, 0.98, "Finalizando e validando o arquivo Excel...")
-        wb.save(destino)
-        _progresso(progress_callback, 1.0, "Excel concluído em modo seguro, com controle de integridade.")
-        return str(destino)
+        fontes.append(FontePlanilha("controle_banco", dataframe=banco_df))
+        resultado = gerar_workbook(
+            destino,
+            fontes,
+            conexao=conn,
+            progress_callback=progress_callback,
+            gerar_manifesto=gerar_manifesto,
+        )
+        return resultado.caminho
     finally:
         conn.close()
 
@@ -591,8 +618,32 @@ def gerar_pacote_excel_saida_sqlite(
     modo_exportacao_movimentos_cp: str = "todos",
     linhas_por_arquivo: int = MAX_LINHAS_ARQUIVO_SEGMENTADO,
     progress_callback: ProgressCallback | None = None,
+    gerar_manifesto: bool = False,
 ) -> dict:
-    """Exporta o relatório integral em vários XLSX independentes."""
+    """Compatibilidade V9.4: entrega agora um unico workbook consolidado V9.5."""
+    saida_compat = Path(pasta_saida).expanduser().resolve()
+    caminho_unico = saida_compat / "relatorio_incidencia_cp_esocial_v9_5.xlsx"
+    caminho = gerar_excel_saida_sqlite(
+        db_path=db_path,
+        caminho_saida=caminho_unico,
+        df_empresa=df_empresa,
+        df_resumo_visual=df_resumo_visual,
+        df_rubricas_cp=df_rubricas_cp,
+        df_levantamento=df_levantamento,
+        modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+        progress_callback=progress_callback,
+        gerar_manifesto=gerar_manifesto,
+    )
+    manifesto = Path(caminho).with_name(f"{Path(caminho).stem}_manifesto.csv")
+    return {
+        "pasta_saida": str(Path(caminho).parent),
+        "arquivos": [caminho],
+        "manifesto": str(manifesto) if manifesto.exists() else "",
+        "quantidade_arquivos": 1,
+    }
+
+    # Implementacao segmentada V9.4 mantida abaixo apenas como referencia
+    # temporaria de compatibilidade; nao e mais alcancavel nem usada pela V9.5.
     saida = Path(str(pasta_saida).strip().strip('"').strip("'")).expanduser().resolve()
     saida.mkdir(parents=True, exist_ok=True)
 

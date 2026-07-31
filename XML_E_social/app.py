@@ -12,16 +12,16 @@ import streamlit as st
 from modules.auditoria import (
     _filtrar_movimentos_cp_exportacao,
     gerar_busca_recibos,
-    gerar_excel_saida,
     gerar_resumo_visual,
     preparar_pacote_analitico,
 )
+from modules.excel_builder import FontePlanilha, gerar_workbook
 from modules.processador_zip import (
     carregar_resultado_sqlite_existente,
     limpar_workspaces_temporarios_antigos,
     processar_fontes_esocial,
 )
-from modules.sqlite_relatorio import gerar_excel_saida_sqlite, gerar_pacote_excel_saida_sqlite
+from modules.sqlite_relatorio import gerar_excel_saida_sqlite
 from utils.helpers import decimal_br
 
 
@@ -29,7 +29,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 9.4 Engine V3: SQLite persistente, retomada por banco existente e Excel integral segmentado com limpeza de temporários."
+    "Versão 9.5 Engine V3: SQLite persistente, retomada por checkpoint e um único Excel consolidado validado."
 )
 
 if "modulo_ativo" not in st.session_state:
@@ -240,42 +240,6 @@ def _filtrar_rubricas_por_multibusca(df: pd.DataFrame, texto_busca: str, colunas
 
 MAX_LINHAS_DADOS_EXCEL = 1_048_575
 
-
-def _nome_aba_excel(nome_base: str, parte: int | None = None) -> str:
-    """Garante nome de aba válido no Excel (máx. 31 caracteres)."""
-    nome_base = str(nome_base or "Aba")[:31]
-    if parte is None:
-        return nome_base
-    sufixo = f"_{parte}"
-    return f"{nome_base[:31-len(sufixo)]}{sufixo}"
-
-
-def _to_excel_dividido_local(writer, df: pd.DataFrame | None, sheet_name: str, max_linhas_excel: int = 1_048_576):
-    """Escreve DataFrame no Excel e divide automaticamente quando excede o limite de linhas."""
-    if df is None:
-        pd.DataFrame().to_excel(writer, index=False, sheet_name=_nome_aba_excel(sheet_name))
-        return
-
-    base = df.copy()
-    if base.empty:
-        base.to_excel(writer, index=False, sheet_name=_nome_aba_excel(sheet_name))
-        return
-
-    # Reserva 1 linha para cabeçalho.
-    max_dados = max_linhas_excel - 1
-    if len(base) <= max_dados:
-        base.to_excel(writer, index=False, sheet_name=_nome_aba_excel(sheet_name))
-        return
-
-    parte = 1
-    for inicio in range(0, len(base), max_dados):
-        fim = inicio + max_dados
-        base.iloc[inicio:fim].to_excel(
-            writer,
-            index=False,
-            sheet_name=_nome_aba_excel(sheet_name, parte),
-        )
-        parte += 1
 
 if modo_entrada == "ZIP(s) do eSocial":
     fontes_principais, erros_principais = _resolver_fontes_zip(
@@ -838,40 +802,41 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.session_state["levantamento_status_geracao"] = "gerando"
                 atualizar_lev, barra_lev, status_lev_prog = _criar_progresso("Progresso da geração do levantamento")
                 atualizar_lev(0.03, "Preparando o arquivo Excel...")
-                buffer_levantamento = io.BytesIO()
-                with pd.ExcelWriter(buffer_levantamento, engine="openpyxl") as writer:
-                        atualizar_lev(0.10, "Exportando identificação da empresa...")
-                        _to_excel_dividido_local(writer, df_empresa, "00_empresa")
-                        atualizar_lev(0.20, "Exportando parâmetros do levantamento...")
-                        _to_excel_dividido_local(writer, df_parametros_lev, "01_resumo")
-                        atualizar_lev(0.35, "Exportando resumo por rubrica...")
-                        _to_excel_dividido_local(writer, df_resumo_lev, "02_resumo_rubricas")
-                        if incluir_movimentos_detalhados:
-                            atualizar_lev(0.55, "Exportando movimentos detalhados...")
-                            _to_excel_dividido_local(writer, df_levantamento, "03_movimentos")
-                        else:
-                            aviso_movimentos = pd.DataFrame({
-                                "Informação": [
-                                    "A aba detalhada 03_movimentos não foi incluída nesta exportação.",
-                                    "Para incluir os movimentos detalhados, marque a opção 'Incluir aba 03_movimentos detalhada no Excel' antes de preparar o arquivo.",
-                                    "Os valores do levantamento estão preservados nas abas de resumo.",
-                                ],
-                                "Valor": [
-                                    f"Movimentos detalhados disponíveis no recorte: {len(df_levantamento):,}".replace(",", "."),
-                                    "Exportação otimizada para arquivos grandes",
-                                    f"Total levantado: R$ {decimal_br(total_lev)}",
-                                ],
-                            })
-                            atualizar_lev(0.55, "Registrando opção de exportação otimizada...")
-                            _to_excel_dividido_local(writer, aviso_movimentos, "03_movimentos")
-                        atualizar_lev(0.72, "Exportando resumo por competência...")
-                        _to_excel_dividido_local(writer, df_resumo_competencia_lev, "04_resumo_competencia")
-                        atualizar_lev(0.88, "Exportando competência por rubrica...")
-                        _to_excel_dividido_local(writer, df_resumo_competencia_rubrica_lev, "05_competencia_rubrica")
-                atualizar_lev(0.97, "Finalizando arquivo do levantamento...")
+                if incluir_movimentos_detalhados:
+                    movimentos_levantamento = df_levantamento
+                else:
+                    movimentos_levantamento = pd.DataFrame({
+                        "Informação": [
+                            "A aba detalhada 03_movimentos não foi incluída nesta exportação.",
+                            "Para incluir os movimentos detalhados, marque a opção correspondente antes de preparar o arquivo.",
+                            "Os valores do levantamento estão preservados nas abas de resumo.",
+                        ],
+                        "Valor": [
+                            f"Movimentos detalhados disponíveis no recorte: {len(df_levantamento):,}".replace(",", "."),
+                            "Exportação otimizada para arquivos grandes",
+                            f"Total levantado: R$ {decimal_br(total_lev)}",
+                        ],
+                    })
+                pasta_levantamento = (
+                    Path(resultado.get("workspace_temporario", tempfile.gettempdir()))
+                    / "output"
+                )
+                resultado_levantamento = gerar_workbook(
+                    pasta_levantamento / "levantamento_verbas_cp_v9_5.xlsx",
+                    [
+                        FontePlanilha("00_empresa", dataframe=df_empresa),
+                        FontePlanilha("01_resumo", dataframe=df_parametros_lev),
+                        FontePlanilha("02_resumo_rubricas", dataframe=df_resumo_lev),
+                        FontePlanilha("03_movimentos", dataframe=movimentos_levantamento),
+                        FontePlanilha("04_resumo_competencia", dataframe=df_resumo_competencia_lev),
+                        FontePlanilha("05_competencia_rubrica", dataframe=df_resumo_competencia_rubrica_lev),
+                    ],
+                    progress_callback=atualizar_lev,
+                )
                 agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                st.session_state["levantamento_excel_bytes"] = buffer_levantamento.getvalue()
-                st.session_state["levantamento_excel_nome"] = "levantamento_verbas_cp_v8_4_engine_v2.xlsx"
+                st.session_state["levantamento_excel_path"] = resultado_levantamento.caminho
+                st.session_state.pop("levantamento_excel_bytes", None)
+                st.session_state["levantamento_excel_nome"] = Path(resultado_levantamento.caminho).name
                 st.session_state["levantamento_status_geracao"] = "pronto"
                 st.session_state["levantamento_ultima_geracao"] = {
                         "data_hora": agora,
@@ -889,7 +854,8 @@ if modulo_ativo == "Levantamento de Verbas":
             if st.session_state.get("levantamento_status_geracao") == "gerando":
                 st.warning("Excel do levantamento em geração. Aguarde a conclusão antes de baixar.")
 
-            if st.session_state.get("levantamento_excel_bytes"):
+            caminho_levantamento = st.session_state.get("levantamento_excel_path")
+            if caminho_levantamento and Path(caminho_levantamento).exists():
                 meta = st.session_state.get("levantamento_ultima_geracao", {})
                 if meta:
                     st.info(
@@ -900,14 +866,15 @@ if modulo_ativo == "Levantamento de Verbas":
                         f"CPFs: {meta.get('qtd_cpfs', 0):,} | "
                         f"03_movimentos detalhado: {meta.get('incluiu_movimentos', 'Não')}".replace(",", ".")
                     )
-                st.download_button(
-                    label="Baixar levantamento de verbas",
-                    data=st.session_state["levantamento_excel_bytes"],
-                    file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v8_4_engine_v2.xlsx"),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="download_levantamento_verbas",
-                )
+                with open(caminho_levantamento, "rb") as arquivo_levantamento:
+                    st.download_button(
+                        label="Baixar levantamento de verbas",
+                        data=arquivo_levantamento,
+                        file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v9_5.xlsx"),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="download_levantamento_verbas",
+                    )
 
             df_levantamento_export = df_resumo_lev.copy()
 
@@ -980,9 +947,16 @@ if modulo_ativo == "Relatório de Incidência CP":
             f"A aba 03_movimentos_cp será dividida automaticamente em {qtd_partes} abas, sem perda de linhas."
         )
 
-    assinatura_exportacao = f"v9_4:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}"
+    gerar_manifesto_rel = st.checkbox(
+        "Gerar manifesto CSV opcional",
+        value=False,
+        key="gerar_manifesto_relatorio_v95",
+    )
+    assinatura_exportacao = f"v9_5:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}"
     if st.session_state.get("relatorio_excel_assinatura") != assinatura_exportacao:
         st.session_state.pop("relatorio_excel_bytes", None)
+        st.session_state.pop("relatorio_excel_path", None)
+        st.session_state.pop("relatorio_pacote_saida", None)
         st.session_state.pop("relatorio_excel_nome", None)
 
     preparar_excel_rel = st.button(
@@ -991,77 +965,65 @@ if modulo_ativo == "Relatório de Incidência CP":
         use_container_width=True,
         key="preparar_excel_relatorio_incidencia",
     )
-
     if preparar_excel_rel:
         atualizar_excel_rel, barra_excel_rel, status_excel_rel = _criar_progresso("Progresso da geração do Excel do relatório")
-        if modo_sqlite_seguro:
-            pasta_saida = Path(resultado.get("workspace_temporario", tempfile.gettempdir())) / "output_segmentado_v9_4"
-            pacote_exportado = gerar_pacote_excel_saida_sqlite(
-                db_path=db_path_sqlite,
-                pasta_saida=pasta_saida,
-                df_empresa=df_empresa,
-                df_resumo_visual=df_resumo_visual,
-                df_rubricas_cp=df_rubricas_cp,
-                df_levantamento=df_levantamento_export,
-                modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
-                linhas_por_arquivo=200_000,
-                progress_callback=atualizar_excel_rel,
-            )
-            st.session_state["relatorio_pacote_saida"] = pacote_exportado
-            st.session_state.pop("relatorio_excel_path", None)
-            st.session_state.pop("relatorio_excel_bytes", None)
-            st.session_state["relatorio_excel_nome"] = "pacote_segmentado_v9_4"
-        else:
-            excel_bytes = gerar_excel_saida(
-                df_inventario=df_inventario,
-                df_rubricas=df_rubricas,
-                df_exclusoes=df_exclusoes,
-                df_remun=df_remun,
-                df_bases_trabalhador=df_bases_trab,
-                df_bases_contribuicao=df_bases_contrib,
-                df_erros=df_erros,
-                df_layout=df_layout,
-                df_resumo_visual=df_resumo_visual,
-                df_rubricas_cp=df_rubricas_cp,
-                df_movimentos_cp=df_movimentos_cp,
-                df_base_trabalhador=df_base_trabalhador,
-                df_sem_cadastro=df_sem_cadastro,
-                df_busca_recibos=df_busca_recibos,
-                df_s5001_resumo=df_s5001_resumo,
-                df_levantamento=df_levantamento_export,
-                df_empresa=df_empresa,
-                modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
-                progress_callback=atualizar_excel_rel,
-            )
-            st.session_state["relatorio_excel_bytes"] = excel_bytes
-            st.session_state.pop("relatorio_excel_path", None)
-            st.session_state["relatorio_excel_nome"] = "relatorio_incidencia_cp_esocial_v9_1.xlsx"
-        st.session_state["relatorio_excel_assinatura"] = assinatura_exportacao
-        status_excel_rel.success("Relatório integral segmentado concluído.")
-
-    pacote_relatorio_pronto = st.session_state.get("relatorio_pacote_saida")
-    if pacote_relatorio_pronto:
-        pasta_pacote = Path(pacote_relatorio_pronto.get("pasta_saida", ""))
-        st.success(
-            f"Pacote integral concluído em: {pasta_pacote} — "
-            f"{pacote_relatorio_pronto.get('quantidade_arquivos', 0)} arquivo(s)."
+        pasta_saida = (
+            Path(resultado.get("workspace_temporario", tempfile.gettempdir()))
+            / "output"
         )
-        st.caption("Cada arquivo é finalizado separadamente; assim os temporários do openpyxl são removidos antes da próxima parte.")
-        manifesto = Path(pacote_relatorio_pronto.get("manifesto", ""))
-        if manifesto.exists():
-            with open(manifesto, "rb") as fp_manifesto:
-                st.download_button(
-                    "Baixar manifesto da exportação",
-                    data=fp_manifesto,
-                    file_name=manifesto.name,
-                    mime="text/csv",
-                    use_container_width=True,
-                    key="download_manifesto_v93",
-                )
+        caminho_saida = pasta_saida / "relatorio_incidencia_cp_esocial_v9_5.xlsx"
+        if modo_sqlite_seguro:
+            caminho_relatorio = gerar_excel_saida_sqlite(
+                db_path=db_path_sqlite,
+                caminho_saida=caminho_saida,
+                df_empresa=df_empresa,
+                df_resumo_visual=df_resumo_visual,
+                df_rubricas_cp=df_rubricas_cp,
+                df_levantamento=df_levantamento_export,
+                modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+                progress_callback=atualizar_excel_rel,
+                gerar_manifesto=gerar_manifesto_rel,
+            )
+        else:
+            movimentos_export = _filtrar_movimentos_cp_exportacao(
+                df_movimentos_cp, modo_exportacao_movimentos_cp
+            )
+            fontes = [
+                FontePlanilha("00_empresa", dataframe=df_empresa),
+                FontePlanilha("01_resumo", dataframe=df_resumo_visual),
+                FontePlanilha("02_rubricas_cp", dataframe=df_rubricas_cp),
+                FontePlanilha("03_movimentos_cp", dataframe=movimentos_export),
+                FontePlanilha("04_base_trabalhador", dataframe=df_base_trabalhador),
+                FontePlanilha("05_sem_s1010", dataframe=df_sem_cadastro),
+                FontePlanilha("05_busca_recibos", dataframe=df_busca_recibos),
+                FontePlanilha("06_s5001_tpvalor", dataframe=df_s5001_resumo),
+                FontePlanilha("07_levantamento", dataframe=df_levantamento_export),
+                FontePlanilha("apoio_s1010", dataframe=df_rubricas),
+                FontePlanilha("apoio_s1200", dataframe=df_remun),
+                FontePlanilha("apoio_s5001", dataframe=df_bases_trab),
+                FontePlanilha("apoio_s5011", dataframe=df_bases_contrib),
+                FontePlanilha("apoio_s3000", dataframe=df_exclusoes),
+                FontePlanilha("checagem_layout", dataframe=df_layout),
+                FontePlanilha("inventario", dataframe=df_inventario),
+                FontePlanilha("erros_xml", dataframe=df_erros),
+            ]
+            resultado_workbook = gerar_workbook(
+                caminho_saida,
+                fontes,
+                progress_callback=atualizar_excel_rel,
+                gerar_manifesto=gerar_manifesto_rel,
+            )
+            caminho_relatorio = resultado_workbook.caminho
+        st.session_state["relatorio_excel_path"] = caminho_relatorio
+        st.session_state.pop("relatorio_excel_bytes", None)
+        st.session_state.pop("relatorio_pacote_saida", None)
+        st.session_state["relatorio_excel_nome"] = Path(caminho_relatorio).name
+        st.session_state["relatorio_excel_assinatura"] = assinatura_exportacao
+        status_excel_rel.success("Relatório único consolidado e validado.")
 
     caminho_relatorio_pronto = st.session_state.get("relatorio_excel_path")
-    bytes_relatorio_pronto = st.session_state.get("relatorio_excel_bytes")
     if caminho_relatorio_pronto and Path(caminho_relatorio_pronto).exists():
+        st.success("Relatório consolidado pronto: um único arquivo Excel.")
         with open(caminho_relatorio_pronto, "rb") as arquivo_relatorio:
             st.download_button(
                 label="Baixar relatório de incidência CP",
@@ -1071,12 +1033,16 @@ if modulo_ativo == "Relatório de Incidência CP":
                 use_container_width=True,
                 key="download_relatorio_incidencia_sqlite",
             )
-    elif bytes_relatorio_pronto:
-        st.download_button(
-            label="Baixar relatório de incidência CP",
-            data=bytes_relatorio_pronto,
-            file_name=st.session_state.get("relatorio_excel_nome", "relatorio_incidencia_cp_esocial_v9_1.xlsx"),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key="download_relatorio_incidencia_cp",
+        manifesto_pronto = Path(caminho_relatorio_pronto).with_name(
+            f"{Path(caminho_relatorio_pronto).stem}_manifesto.csv"
         )
+        if gerar_manifesto_rel and manifesto_pronto.exists():
+            with open(manifesto_pronto, "rb") as arquivo_manifesto:
+                st.download_button(
+                    "Baixar manifesto opcional",
+                    data=arquivo_manifesto,
+                    file_name=manifesto_pronto.name,
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="download_manifesto_v95",
+                )

@@ -1,8 +1,11 @@
-import io
 import re
+import tempfile
+from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+
+from modules.excel_builder import FontePlanilha, gerar_workbook
 
 CODIGOS_INCIDENTES_CP = {"11", "12", "13", "14", "15", "16", "21", "22", "23", "24", "25", "26"}
 CODIGOS_CP_EXPORTACAO_PADRAO = {"11", "12", "21", "22"}
@@ -332,40 +335,6 @@ def gerar_resumo_execucao(df_rubricas: pd.DataFrame, df_remun: pd.DataFrame, df_
     return gerar_resumo_visual(df_rubricas_cp, preparar_movimentos_cp(df_remun), df_sem_cadastro, df_bases_trabalhador if df_bases_trabalhador is not None else pd.DataFrame())
 
 
-def _nome_aba_seguro(nome: str, parte: int | None = None) -> str:
-    """Garante nome de aba dentro do limite de 31 caracteres do Excel."""
-    nome = str(nome)[:31]
-    if parte is None:
-        return nome
-    sufixo = f"_{parte}"
-    return f"{nome[:31 - len(sufixo)]}{sufixo}"
-
-
-def _to_excel_dividido(writer, df: pd.DataFrame | None, sheet_name: str, max_linhas_excel: int = 1_048_576):
-    """Exporta DataFrame para Excel respeitando o limite máximo de linhas por aba.
-
-    O Excel suporta 1.048.576 linhas incluindo o cabeçalho; por isso cada parte
-    usa no máximo 1.048.575 linhas de dados.
-    """
-    base = df if df is not None else pd.DataFrame()
-    if base.empty:
-        base.to_excel(writer, sheet_name=_nome_aba_seguro(sheet_name), index=False)
-        return
-
-    max_dados = max_linhas_excel - 1
-    total = len(base)
-    if total <= max_dados:
-        base.to_excel(writer, sheet_name=_nome_aba_seguro(sheet_name), index=False)
-        return
-
-    parte = 1
-    for inicio in range(0, total, max_dados):
-        fim = min(inicio + max_dados, total)
-        aba = _nome_aba_seguro(sheet_name, parte)
-        base.iloc[inicio:fim].to_excel(writer, sheet_name=aba, index=False)
-        parte += 1
-
-
 def _filtrar_movimentos_cp_exportacao(df: pd.DataFrame | None, modo: str = "todos") -> pd.DataFrame:
     """Filtra a aba 03_movimentos_cp somente na exportação.
 
@@ -452,39 +421,48 @@ def gerar_excel_saida(
     modo_exportacao_movimentos_cp: str = "todos",
     progress_callback: Callable[[float, str], None] | None = None,
 ) -> bytes:
-    def progresso(valor, mensagem):
-        if progress_callback:
-            progress_callback(valor, mensagem)
-    output = io.BytesIO()
-    progresso(0.02, "Abrindo arquivo Excel...")
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        progresso(0.06, "Exportando identificação da empresa...")
-        _to_excel_dividido(writer, df_empresa if df_empresa is not None else pd.DataFrame(), "00_empresa")
-        progresso(0.12, "Exportando resumo...")
-        _to_excel_dividido(writer, df_resumo_visual, "01_resumo")
-        progresso(0.20, "Exportando rubricas CP...")
-        _to_excel_dividido(writer, df_rubricas_cp, "02_rubricas_cp")
-        df_movimentos_cp_export = _filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp)
-        progresso(0.35, "Exportando movimentos CP...")
-        _to_excel_dividido(writer, df_movimentos_cp_export, "03_movimentos_cp")
-        progresso(0.50, "Exportando base por trabalhador...")
-        _to_excel_dividido(writer, df_base_trabalhador, "04_base_trabalhador")
-        progresso(0.58, "Exportando rubricas sem S-1010...")
-        _to_excel_dividido(writer, df_sem_cadastro, "05_sem_s1010")
-        _to_excel_dividido(writer, df_busca_recibos if df_busca_recibos is not None else gerar_busca_recibos(df_sem_cadastro), "05_busca_recibos")
-        progresso(0.70, "Exportando resumos complementares...")
-        _to_excel_dividido(writer, df_s5001_resumo if df_s5001_resumo is not None else pd.DataFrame(), "06_s5001_tpvalor")
-        _to_excel_dividido(writer, df_levantamento if df_levantamento is not None else pd.DataFrame(), "07_levantamento")
-        progresso(0.78, "Exportando abas de apoio...")
-        _to_excel_dividido(writer, df_rubricas, "apoio_s1010")
-        _to_excel_dividido(writer, df_remun, "apoio_s1200")
-        _to_excel_dividido(writer, df_bases_trabalhador, "apoio_s5001")
-        _to_excel_dividido(writer, df_bases_contribuicao, "apoio_s5011")
-        _to_excel_dividido(writer, df_exclusoes, "apoio_s3000")
-        _to_excel_dividido(writer, df_layout, "checagem_layout")
-        _to_excel_dividido(writer, df_inventario, "inventario")
-        _to_excel_dividido(writer, df_erros, "erros_xml")
-        progresso(0.96, "Finalizando o arquivo Excel...")
-    output.seek(0)
-    progresso(1.0, "Excel do relatório concluído.")
-    return output.getvalue()
+    movimentos = _filtrar_movimentos_cp_exportacao(
+        df_movimentos_cp, modo_exportacao_movimentos_cp
+    )
+    fontes = [
+        FontePlanilha("00_empresa", dataframe=df_empresa if df_empresa is not None else pd.DataFrame()),
+        FontePlanilha("01_resumo", dataframe=df_resumo_visual),
+        FontePlanilha("02_rubricas_cp", dataframe=df_rubricas_cp),
+        FontePlanilha("03_movimentos_cp", dataframe=movimentos),
+        FontePlanilha("04_base_trabalhador", dataframe=df_base_trabalhador),
+        FontePlanilha("05_sem_s1010", dataframe=df_sem_cadastro),
+        FontePlanilha(
+            "05_busca_recibos",
+            dataframe=df_busca_recibos
+            if df_busca_recibos is not None
+            else gerar_busca_recibos(df_sem_cadastro),
+        ),
+        FontePlanilha(
+            "06_s5001_tpvalor",
+            dataframe=df_s5001_resumo
+            if df_s5001_resumo is not None
+            else pd.DataFrame(),
+        ),
+        FontePlanilha(
+            "07_levantamento",
+            dataframe=df_levantamento
+            if df_levantamento is not None
+            else pd.DataFrame(),
+        ),
+        FontePlanilha("apoio_s1010", dataframe=df_rubricas),
+        FontePlanilha("apoio_s1200", dataframe=df_remun),
+        FontePlanilha("apoio_s5001", dataframe=df_bases_trabalhador),
+        FontePlanilha("apoio_s5011", dataframe=df_bases_contribuicao),
+        FontePlanilha("apoio_s3000", dataframe=df_exclusoes),
+        FontePlanilha("checagem_layout", dataframe=df_layout),
+        FontePlanilha("inventario", dataframe=df_inventario),
+        FontePlanilha("erros_xml", dataframe=df_erros),
+    ]
+    with tempfile.TemporaryDirectory(prefix="xml_esocial_v95_") as pasta:
+        caminho = Path(pasta) / "relatorio.xlsx"
+        gerar_workbook(
+            caminho,
+            fontes,
+            progress_callback=progress_callback,
+        )
+        return caminho.read_bytes()
