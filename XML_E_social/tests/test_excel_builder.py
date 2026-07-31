@@ -2,14 +2,43 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 from openpyxl import load_workbook
 
-from modules.excel_builder import FontePlanilha, gerar_workbook
+from modules.excel_builder import FontePlanilha, gerar_workbook, validar_workbook
 
 
 class ExcelBuilderTest(unittest.TestCase):
+    def test_validacao_rapida_nao_percorre_linhas(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            destino = Path(pasta) / "rapido.xlsx"
+            resultado = gerar_workbook(
+                destino,
+                [FontePlanilha("dados", dataframe=pd.DataFrame({"id": [1, 2]}))],
+            )
+            with patch(
+                "openpyxl.worksheet._read_only.ReadOnlyWorksheet.iter_rows",
+                side_effect=AssertionError("iter_rows nao deveria ser chamado"),
+            ):
+                abas = validar_workbook(destino, resultado.controles)
+            self.assertIn("dados", abas)
+
+    def test_validacao_completa_opcional_confere_linhas(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            destino = Path(pasta) / "completo.xlsx"
+            resultado = gerar_workbook(
+                destino,
+                [FontePlanilha("dados", dataframe=pd.DataFrame({"id": [1, 2]}))],
+            )
+            abas = validar_workbook(
+                destino,
+                resultado.controles,
+                validacao_completa=True,
+            )
+            self.assertIn("dados", abas)
+
     def test_dataframe_pequeno_e_sem_s1010(self):
         with tempfile.TemporaryDirectory() as pasta:
             destino = Path(pasta) / "relatorio.xlsx"

@@ -228,8 +228,17 @@ def _escrever_controle(
 
 
 def validar_workbook(
-    caminho: str | Path, controles: Sequence[ControleAba]
+    caminho: str | Path,
+    controles: Sequence[ControleAba],
+    *,
+    validacao_completa: bool = False,
 ) -> list[str]:
+    """Valida rapidamente o XLSX ou, opcionalmente, relê todas as linhas.
+
+    A validacao padrao confere o container ZIP e a estrutura do workbook. As
+    quantidades e o limite por aba usam os controles obtidos durante a escrita
+    incremental, evitando uma segunda leitura de milhoes de celulas.
+    """
     arquivo = Path(caminho)
     if not arquivo.is_file() or arquivo.stat().st_size == 0:
         raise RuntimeError(f"Workbook ausente ou vazio: {arquivo}")
@@ -247,16 +256,29 @@ def validar_workbook(
         for controle in controles:
             if controle.aba not in workbook.sheetnames:
                 raise RuntimeError(f"Aba ausente: {controle.aba}")
-            planilha = workbook[controle.aba]
-            total_linhas_fisicas = sum(1 for _ in planilha.iter_rows(values_only=True))
-            linhas = max(total_linhas_fisicas - 1, 0)
-            if linhas != controle.linhas_exportadas:
+            if controle.linhas_exportadas != controle.linhas_esperadas:
                 raise RuntimeError(
                     f"Integridade da aba {controle.aba}: "
-                    f"controle={controle.linhas_exportadas}, workbook={linhas}."
+                    f"esperado={controle.linhas_esperadas}, "
+                    f"exportado={controle.linhas_exportadas}."
                 )
-            if linhas > MAX_DADOS_ABA:
+            if controle.status != "OK":
+                raise RuntimeError(
+                    f"Integridade da aba {controle.aba}: status={controle.status}."
+                )
+            if controle.linhas_exportadas > MAX_DADOS_ABA:
                 raise RuntimeError(f"Aba {controle.aba} excedeu o limite do Excel.")
+            if validacao_completa:
+                planilha = workbook[controle.aba]
+                total_linhas_fisicas = sum(
+                    1 for _ in planilha.iter_rows(values_only=True)
+                )
+                linhas = max(total_linhas_fisicas - 1, 0)
+                if linhas != controle.linhas_exportadas:
+                    raise RuntimeError(
+                        f"Integridade completa da aba {controle.aba}: "
+                        f"controle={controle.linhas_exportadas}, workbook={linhas}."
+                    )
         return list(workbook.sheetnames)
     finally:
         workbook.close()
@@ -269,6 +291,7 @@ def gerar_workbook(
     conexao: sqlite3.Connection | None = None,
     progress_callback: ProgressCallback | None = None,
     gerar_manifesto: bool = False,
+    validacao_completa: bool = False,
     max_dados_aba: int = MAX_DADOS_ABA,
     chunk: int = CHUNK_EXPORT,
 ) -> ResultadoWorkbook:
@@ -301,7 +324,11 @@ def gerar_workbook(
     _progresso(progress_callback, 0.94, "Salvando workbook consolidado...")
     workbook.save(parcial)
     _progresso(progress_callback, 0.97, "Validando workbook e integridade...")
-    abas = validar_workbook(parcial, controles)
+    abas = validar_workbook(
+        parcial,
+        controles,
+        validacao_completa=validacao_completa,
+    )
     parcial.replace(destino)
 
     manifesto_path: Path | None = None
