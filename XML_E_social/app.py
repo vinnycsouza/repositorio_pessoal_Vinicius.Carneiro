@@ -364,6 +364,47 @@ def carregar_excel_consolidado(excel_bytes: bytes):
     }
 
 
+def _assinatura_banco_sqlite(db_path: str | Path) -> tuple[int, int]:
+    """Assinatura leve para invalidar caches caso o banco seja substituído."""
+    stat = Path(db_path).stat()
+    return stat.st_mtime_ns, stat.st_size
+
+
+@st.cache_data(show_spinner=False)
+def _opcoes_levantamento_sqlite(
+    db_path: str, mtime_ns: int, tamanho: int
+) -> dict[str, list[str]]:
+    contexto = WorkspaceContext.from_path(db_path, origem="cache_filtros")
+    return obter_opcoes_filtros(SQLiteDataSource(contexto))
+
+
+@st.cache_data(show_spinner=False)
+def _rubricas_levantamento_sqlite(
+    db_path: str,
+    mtime_ns: int,
+    tamanho: int,
+    filtros: FiltrosLevantamento,
+) -> pd.DataFrame:
+    contexto = WorkspaceContext.from_path(db_path, origem="cache_rubricas")
+    return consultar_rubricas(SQLiteDataSource(contexto), filtros)
+
+
+@st.cache_data(show_spinner=False)
+def _resultado_levantamento_sqlite(
+    db_path: str,
+    mtime_ns: int,
+    tamanho: int,
+    filtros: FiltrosLevantamento,
+    chaves: tuple[str, ...],
+):
+    contexto = WorkspaceContext.from_path(db_path, origem="cache_resultado")
+    # A alíquota não muda o recorte nem exige nova consulta. O percentual é
+    # aplicado na interface sobre os totais já agregados.
+    return consultar_levantamento(
+        SQLiteDataSource(contexto), filtros, chaves, aliquota=0.0
+    )
+
+
 
 
 def _extrair_termos_busca(texto: str) -> list[str]:
@@ -689,12 +730,16 @@ if modulo_ativo == "Levantamento de Verbas":
         st.session_state.pop("levantamento_ultima_geracao", None)
     fonte_levantamento_sqlite = None
     opcoes_sqlite = None
+    assinatura_sqlite = None
     if levantamento_sqlite:
         contexto_levantamento = WorkspaceContext.from_path(
             db_path_sqlite, origem="sessao"
         )
         fonte_levantamento_sqlite = SQLiteDataSource(contexto_levantamento)
-        opcoes_sqlite = obter_opcoes_filtros(fonte_levantamento_sqlite)
+        assinatura_sqlite = _assinatura_banco_sqlite(db_path_sqlite)
+        opcoes_sqlite = _opcoes_levantamento_sqlite(
+            str(Path(db_path_sqlite).resolve()), *assinatura_sqlite
+        )
         st.success(
             "Levantamento conectado diretamente ao SQLite do Workspace. "
             "Nenhum XML será reprocessado."
@@ -744,8 +789,10 @@ if modulo_ativo == "Levantamento de Verbas":
         )
         if levantamento_sqlite:
             df_base_lev = pd.DataFrame()
-            df_opts = consultar_rubricas(
-                fonte_levantamento_sqlite, filtros_levantamento
+            df_opts = _rubricas_levantamento_sqlite(
+                str(Path(db_path_sqlite).resolve()),
+                *assinatura_sqlite,
+                filtros_levantamento,
             )
         else:
             df_base_lev = df_movimentos_cp.copy()
@@ -886,16 +933,16 @@ if modulo_ativo == "Levantamento de Verbas":
 
             # A partir deste ponto apenas o recorte selecionado é consultado.
             if levantamento_sqlite:
-                resultado_lev_sqlite = consultar_levantamento(
-                    fonte_levantamento_sqlite,
+                resultado_lev_sqlite = _resultado_levantamento_sqlite(
+                    str(Path(db_path_sqlite).resolve()),
+                    *assinatura_sqlite,
                     filtros_levantamento,
-                    chaves_selecionadas,
-                    float(aliquota_lev),
+                    tuple(sorted(chaves_selecionadas)),
                 )
                 df_levantamento = resultado_lev_sqlite.movimentos_previa
                 total_movimentos_lev = resultado_lev_sqlite.qtd_movimentos
                 total_lev = resultado_lev_sqlite.total
-                cpp_lev = resultado_lev_sqlite.cpp
+                cpp_lev = total_lev * (float(aliquota_lev) / 100.0)
                 qtd_rubricas_lev = resultado_lev_sqlite.qtd_rubricas
                 qtd_cpfs_lev = resultado_lev_sqlite.qtd_cpfs
                 df_resumo_lev = resultado_lev_sqlite.resumo_rubricas
@@ -903,6 +950,19 @@ if modulo_ativo == "Levantamento de Verbas":
                     resultado_lev_sqlite.resumo_competencia_rubrica
                 )
                 df_resumo_competencia_lev = resultado_lev_sqlite.resumo_competencia
+                for resumo in (df_resumo_lev, df_resumo_competencia_rubrica_lev):
+                    if not resumo.empty:
+                        resumo["cpp_estimado"] = (
+                            pd.to_numeric(resumo["valor_total"], errors="coerce").fillna(0)
+                            * (float(aliquota_lev) / 100.0)
+                        )
+                if not df_resumo_competencia_lev.empty:
+                    df_resumo_competencia_lev["CPP estimada"] = (
+                        pd.to_numeric(
+                            df_resumo_competencia_lev["Total"], errors="coerce"
+                        ).fillna(0)
+                        * (float(aliquota_lev) / 100.0)
+                    )
             else:
                 df_levantamento = df_base_lev.copy()
                 df_levantamento["chave_rubrica"] = (

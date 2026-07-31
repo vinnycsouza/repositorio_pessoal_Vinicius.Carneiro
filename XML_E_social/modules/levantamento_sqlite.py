@@ -51,11 +51,11 @@ def _where_filtros(filtros: FiltrosLevantamento, alias: str = "m") -> tuple[str,
         if filtros.cod_inc_cp == "Sem S-1010":
             condicoes.append(f"COALESCE({prefixo}cod_inc_cp,'')=''")
         else:
-            condicoes.append(f"CAST({prefixo}cod_inc_cp AS TEXT)=?")
+            condicoes.append(f"{prefixo}cod_inc_cp=?")
             params.append(filtros.cod_inc_cp)
     if filtros.competencias:
         marcas = ",".join("?" for _ in filtros.competencias)
-        condicoes.append(f"CAST({prefixo}per_apur AS TEXT) IN ({marcas})")
+        condicoes.append(f"{prefixo}per_apur IN ({marcas})")
         params.extend(filtros.competencias)
     if filtros.apenas_positivos:
         condicoes.append(f"CAST({prefixo}vr_rubr AS REAL)>0")
@@ -86,8 +86,8 @@ def _base_selecionada_sql(filtros: FiltrosLevantamento) -> tuple[str, tuple]:
     sql = (
         "SELECT m.* FROM rel_movimentos_cp m "
         "JOIN temp.lev_rubricas_selecionadas s "
-        "ON COALESCE(CAST(m.cod_rubr AS TEXT),'')=s.cod_rubr "
-        "AND COALESCE(CAST(m.ide_tab_rubr AS TEXT),'')=s.ide_tab_rubr"
+        "ON m.cod_rubr=s.cod_rubr "
+        "AND m.ide_tab_rubr=s.ide_tab_rubr"
         + where
     )
     return sql, params
