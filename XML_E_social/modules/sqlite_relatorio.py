@@ -177,6 +177,24 @@ def materializar_tabelas_analiticas(
     _criar_tabelas_relatorio(conn, progress_callback)
 
 
+def reiniciar_materializacao_analitica(conn: sqlite3.Connection) -> None:
+    """Descarta somente projeções derivadas para reconstrução a partir de objetos.
+
+    Os eventos/XML e os objetos persistidos permanecem intactos. Esta operação é
+    necessária quando um S-1010 novo pode mudar a classificação de S-1200 antigos.
+    """
+    tabelas = [
+        "dados_rubricas", "dados_exclusoes", "dados_remuneracoes",
+        "dados_bases_trabalhador", "dados_bases_contribuicao", "dados_empresa",
+        "rel_movimentos_cp", "rel_rubricas_cp_base", "rel_sem_s1010",
+        "rel_s5001_resumo", "rel_base_trabalhador", "rel_controle_integridade",
+    ]
+    for tabela in tabelas:
+        conn.execute(f"DROP TABLE IF EXISTS {_q(tabela)}")
+    conn.execute("DELETE FROM meta WHERE chave LIKE 'materializado_%_ate'")
+    conn.commit()
+
+
 def _criar_indices(conn: sqlite3.Connection) -> None:
     comandos = [
         "CREATE INDEX IF NOT EXISTS idx_remun_per ON dados_remuneracoes(per_apur)",

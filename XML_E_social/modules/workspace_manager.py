@@ -20,6 +20,9 @@ class WorkspaceInfo:
     status: str
     tamanho_total: int
     tamanho_sqlite: int | None
+    quantidade_xml: int = 0
+    periodo_minimo: str = ""
+    periodo_maximo: str = ""
 
 
 def formatar_cnpj(valor: object) -> str:
@@ -119,6 +122,31 @@ def obter_info_workspace(resultado: Mapping[str, object]) -> WorkspaceInfo:
         raise FileNotFoundError(f"Workspace não localizado: {caminho}")
     db_path = caminho / "processamento.db"
     nome_empresa, cnpj = _empresa_do_resultado(resultado)
+    quantidade_xml = 0
+    periodo_minimo = ""
+    periodo_maximo = ""
+    if db_path.is_file():
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        try:
+            tabelas = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "eventos" in tabelas:
+                quantidade_xml = int(
+                    conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0]
+                )
+            if "rel_movimentos_cp" in tabelas:
+                periodo_minimo, periodo_maximo = conn.execute(
+                    "SELECT COALESCE(MIN(per_apur),''),COALESCE(MAX(per_apur),'') "
+                    "FROM rel_movimentos_cp"
+                ).fetchone()
+        except sqlite3.Error:
+            pass
+        finally:
+            conn.close()
     return WorkspaceInfo(
         nome_empresa=nome_empresa,
         cnpj=cnpj,
@@ -127,6 +155,9 @@ def obter_info_workspace(resultado: Mapping[str, object]) -> WorkspaceInfo:
         status=_ler_status_sqlite(db_path),
         tamanho_total=calcular_tamanho_workspace(caminho),
         tamanho_sqlite=db_path.stat().st_size if db_path.is_file() else None,
+        quantidade_xml=quantidade_xml,
+        periodo_minimo=str(periodo_minimo or ""),
+        periodo_maximo=str(periodo_maximo or ""),
     )
 
 

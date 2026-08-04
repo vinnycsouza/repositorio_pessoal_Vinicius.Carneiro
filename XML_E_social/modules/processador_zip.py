@@ -21,10 +21,14 @@ import pandas as pd
 from modules.parser_xml import (
     BaseContribuicao, BaseTrabalhador, RubricaInfo, RubricaPagamento,
     detectar_tipo_evento, parse_s1010, parse_s1200, parse_s3000,
-    parse_s5001, parse_s5011, parse_empresa_info,
+    parse_s5001, parse_s5011, parse_empresa_info, obter_recibo_principal,
 )
 from utils.helpers import localname
-from modules.sqlite_relatorio import materializar_tabelas_analiticas, carregar_pacote_resumido
+from modules.sqlite_relatorio import (
+    materializar_tabelas_analiticas,
+    carregar_pacote_resumido,
+    reiniciar_materializacao_analitica,
+)
 
 Fonte = Tuple[str, Union[bytes, bytearray, memoryview, str, os.PathLike]]
 ProgressCallback = Callable[[float, str], None]
@@ -113,7 +117,71 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
         arquivo TEXT NOT NULL,
         erro TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS historico_cargas (
+        id_carga INTEGER PRIMARY KEY AUTOINCREMENT,
+        workspace_id TEXT NOT NULL,
+        data_inicio REAL NOT NULL,
+        data_fim REAL,
+        origem TEXT NOT NULL DEFAULT '',
+        assinatura_fontes TEXT NOT NULL DEFAULT '',
+        quantidade_arquivos_recebidos INTEGER NOT NULL DEFAULT 0,
+        quantidade_xml_localizados INTEGER NOT NULL DEFAULT 0,
+        quantidade_xml_novos INTEGER NOT NULL DEFAULT 0,
+        quantidade_duplicados INTEGER NOT NULL DEFAULT 0,
+        quantidade_erros INTEGER NOT NULL DEFAULT 0,
+        periodo_minimo_adicionado TEXT NOT NULL DEFAULT '',
+        periodo_maximo_adicionado TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'processando',
+        mensagem_erro TEXT NOT NULL DEFAULT ''
+    );
     """)
+    col_eventos = {r[1] for r in conn.execute("PRAGMA table_info(eventos)")}
+    if "hash_conteudo" not in col_eventos:
+        conn.execute("ALTER TABLE eventos ADD COLUMN hash_conteudo TEXT")
+    if "id_carga" not in col_eventos:
+        conn.execute("ALTER TABLE eventos ADD COLUMN id_carga INTEGER")
+    for coluna, definicao in (
+        ("ativo", "INTEGER NOT NULL DEFAULT 1"),
+        ("id_evento_esocial", "TEXT NOT NULL DEFAULT ''"),
+        ("ind_retif", "TEXT NOT NULL DEFAULT ''"),
+        ("recibo_evento", "TEXT NOT NULL DEFAULT ''"),
+        ("recibo_referencia", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if coluna not in col_eventos:
+            conn.execute(f"ALTER TABLE eventos ADD COLUMN {coluna} {definicao}")
+    col_fontes = {r[1] for r in conn.execute("PRAGMA table_info(fontes)")}
+    if "id_carga" not in col_fontes:
+        conn.execute("ALTER TABLE fontes ADD COLUMN id_carga INTEGER")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_eventos_hash_conteudo "
+        "ON eventos(hash_conteudo) WHERE hash_conteudo IS NOT NULL AND hash_conteudo<>''"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fontes_carga_status ON fontes(id_carga,status,id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_historico_cargas_status ON historico_cargas(status,id_carga)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eventos_recibo_ativo ON eventos(recibo_evento,ativo,tipo)")
+    # Workspaces anteriores só permitem retropreencher eventos cujo XML foi
+    # preservado para a segunda passagem.
+    for evento_id, xml_zlib, hash_atual, recibo_atual in conn.execute(
+        "SELECT id,xml_zlib,hash_conteudo,recibo_evento FROM eventos WHERE xml_zlib IS NOT NULL"
+    ):
+        try:
+            xml_bruto = zlib.decompress(xml_zlib)
+            if not hash_atual:
+                digest = hashlib.sha256(xml_bruto).hexdigest()
+                conn.execute(
+                    "UPDATE OR IGNORE eventos SET hash_conteudo=? WHERE id=?",
+                    (digest, evento_id),
+                )
+            if not recibo_atual:
+                root = ET.fromstring(xml_bruto)
+                id_evt, ind_retif, recibo_evt, recibo_ref = _metadados_retificacao(root)
+                conn.execute(
+                    "UPDATE eventos SET id_evento_esocial=?,ind_retif=?,recibo_evento=?,"
+                    "recibo_referencia=? WHERE id=?",
+                    (id_evt, ind_retif, recibo_evt, recibo_ref, evento_id),
+                )
+        except Exception:
+            pass
     conn.commit()
 
 
@@ -165,27 +233,37 @@ def _montar_indice_rubricas(rubricas: List[RubricaInfo]):
     return mapa
 
 
-def _materializar_fontes(conn: sqlite3.Connection, workspace: Path, fontes: Iterable[Fonte]) -> None:
+def _materializar_fontes(
+    conn: sqlite3.Connection,
+    workspace: Path,
+    fontes: Iterable[Fonte],
+    id_carga: int | None = None,
+) -> None:
     pasta = workspace / "fontes"
     pasta.mkdir(parents=True, exist_ok=True)
     existentes = conn.execute("SELECT COUNT(*) FROM fontes").fetchone()[0]
-    if existentes:
+    if existentes and id_carga is None:
         return
 
     for indice, (nome, fonte) in enumerate(fontes):
         if isinstance(fonte, (str, os.PathLike)):
             caminho = Path(fonte).expanduser().resolve()
         else:
-            caminho = pasta / f"{indice:04d}_{_nome_seguro(nome)}"
+            marcador = f"carga_{id_carga:06d}_" if id_carga is not None else ""
+            caminho = pasta / f"{marcador}{indice:04d}_{_nome_seguro(nome)}"
             with caminho.open("wb") as fp:
                 view = memoryview(bytes(fonte))
                 bloco = 1024 * 1024
                 for ini in range(0, len(view), bloco):
                     fp.write(view[ini:ini + bloco])
         tamanho = caminho.stat().st_size if caminho.exists() else 0
+        prefixo = (
+            f"[Carga {id_carga}] {nome}" if id_carga is not None else str(nome)
+        )
         conn.execute(
-            "INSERT INTO fontes(nome, caminho, nivel, prefixo, tamanho_bytes) VALUES (?, ?, 0, ?, ?)",
-            (str(nome), str(caminho), str(nome), tamanho),
+            "INSERT INTO fontes(nome, caminho, nivel, prefixo, tamanho_bytes, id_carga) "
+            "VALUES (?, ?, 0, ?, ?, ?)",
+            (str(nome), str(caminho), prefixo, tamanho, id_carga),
         )
     conn.commit()
 
@@ -198,45 +276,130 @@ def _registrar_contagem(conn: sqlite3.Connection, tipo: str) -> None:
     )
 
 
+def _metadados_retificacao(root: ET.Element) -> tuple[str, str, str, str]:
+    evento = next(
+        (el for el in root.iter() if localname(el.tag).startswith("evt")), None
+    )
+    id_evento = str(evento.attrib.get("Id", "") if evento is not None else "")
+    ide_evento = next(
+        (el for el in root.iter() if localname(el.tag) == "ideEvento"), None
+    )
+
+    def texto(bloco: ET.Element | None, nome: str) -> str:
+        if bloco is None:
+            return ""
+        return next(
+            (str(el.text or "").strip() for el in bloco.iter() if localname(el.tag) == nome),
+            "",
+        )
+
+    ind_retif = texto(ide_evento, "indRetif")
+    recibo_referencia = texto(ide_evento, "nrRecibo") if ind_retif == "2" else ""
+    bloco_recibo = next(
+        (el for el in root.iter() if localname(el.tag) == "recibo"), None
+    )
+    recibo_evento = texto(bloco_recibo, "nrRecibo")
+    if not recibo_evento and ind_retif != "2":
+        recibo_evento = obter_recibo_principal(root)
+    return id_evento, ind_retif, recibo_evento, recibo_referencia
+
+
 def _processar_xml_ingestao(
     conn: sqlite3.Connection,
     arquivo: str,
     xml_bytes: bytes,
     tamanho: int,
-) -> None:
+    id_carga: int | None = None,
+) -> str:
+    hash_conteudo = hashlib.sha256(xml_bytes).hexdigest()
+    if conn.execute(
+        "SELECT 1 FROM eventos WHERE hash_conteudo=? LIMIT 1", (hash_conteudo,)
+    ).fetchone():
+        if id_carga is not None:
+            conn.execute(
+                "UPDATE historico_cargas SET quantidade_duplicados=quantidade_duplicados+1,"
+                "quantidade_xml_localizados=quantidade_xml_localizados+1 WHERE id_carga=?",
+                (id_carga,),
+            )
+        return "duplicado"
+    if id_carga is not None:
+        conn.execute(
+            "UPDATE historico_cargas SET quantidade_xml_localizados=quantidade_xml_localizados+1 "
+            "WHERE id_carga=?", (id_carga,),
+        )
     if tamanho > MAX_XML_INDIVIDUAL:
         conn.execute("INSERT INTO erros(arquivo, erro) VALUES (?, ?)", (arquivo, "XML acima do limite individual de segurança"))
         conn.execute(
-            "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes) VALUES (?, 'XML_INVALIDO', ?)",
-            (arquivo, tamanho),
+            "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes, hash_conteudo, id_carga) "
+            "VALUES (?, 'XML_INVALIDO', ?, ?, ?)",
+            (arquivo, tamanho, hash_conteudo, id_carga),
         )
-        return
+        if id_carga is not None:
+            conn.execute("UPDATE historico_cargas SET quantidade_erros=quantidade_erros+1 WHERE id_carga=?", (id_carga,))
+        return "erro"
     try:
         root = ET.fromstring(xml_bytes)
     except Exception as exc:
         conn.execute("INSERT INTO erros(arquivo, erro) VALUES (?, ?)", (arquivo, f"XML inválido ou ilegível: {exc}"))
         conn.execute(
-            "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes) VALUES (?, 'XML_INVALIDO', ?)",
-            (arquivo, tamanho),
+            "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes, hash_conteudo, id_carga) "
+            "VALUES (?, 'XML_INVALIDO', ?, ?, ?)",
+            (arquivo, tamanho, hash_conteudo, id_carga),
         )
-        return
+        if id_carga is not None:
+            conn.execute("UPDATE historico_cargas SET quantidade_erros=quantidade_erros+1 WHERE id_carga=?", (id_carga,))
+        return "erro"
 
     tipo = detectar_tipo_evento(root)
     recibo = _eh_retorno_evento_completo(root)
-    _registrar_contagem(conn, tipo)
-
+    id_evento, ind_retif, recibo_evento, recibo_referencia = _metadados_retificacao(root)
     blob = None
     if tipo in EVENTOS_SEGUNDA_PASSAGEM:
         blob = sqlite3.Binary(zlib.compress(xml_bytes, level=1))
     cur = conn.execute(
-        "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes, envelope_recibo, xml_zlib) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (arquivo, tipo, tamanho, int(recibo), blob),
+        "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes, envelope_recibo, xml_zlib, hash_conteudo, id_carga,"
+        "id_evento_esocial,ind_retif,recibo_evento,recibo_referencia) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (arquivo, tipo, tamanho, int(recibo), blob, hash_conteudo, id_carga,
+         id_evento, ind_retif, recibo_evento, recibo_referencia),
     )
     if cur.rowcount == 0:
+        if id_carga is not None:
+            conn.execute(
+                "UPDATE historico_cargas SET quantidade_duplicados=quantidade_duplicados+1 WHERE id_carga=?",
+                (id_carga,),
+            )
         root.clear()
-        return
+        return "duplicado"
     evento_id = int(cur.lastrowid)
+    if ind_retif == "2" and recibo_referencia:
+        substituidos = [
+            int(row[0])
+            for row in conn.execute(
+                "SELECT id FROM eventos WHERE id<>? AND tipo=? AND ativo=1 AND recibo_evento=?",
+                (evento_id, tipo, recibo_referencia),
+            )
+        ]
+        if substituidos:
+            marcas = ",".join("?" for _ in substituidos)
+            conn.execute(
+                f"UPDATE eventos SET ativo=0 WHERE id IN ({marcas})", substituidos
+            )
+            conn.execute(
+                f"DELETE FROM objetos WHERE evento_id IN ({marcas})", substituidos
+            )
+    _registrar_contagem(conn, tipo)
+    if id_carga is not None:
+        periodo = (
+            next((str(el.text or "").strip() for el in root.iter() if localname(el.tag) in {"perApur", "iniValid"} and str(el.text or "").strip()), "")
+        )
+        conn.execute(
+            "UPDATE historico_cargas SET quantidade_xml_novos=quantidade_xml_novos+1,"
+            "periodo_minimo_adicionado=CASE WHEN ?<>'' AND (periodo_minimo_adicionado='' OR ?<periodo_minimo_adicionado) THEN ? ELSE periodo_minimo_adicionado END,"
+            "periodo_maximo_adicionado=CASE WHEN ?<>'' AND (periodo_maximo_adicionado='' OR ?>periodo_maximo_adicionado) THEN ? ELSE periodo_maximo_adicionado END "
+            "WHERE id_carga=?",
+            (periodo, periodo, periodo, periodo, periodo, periodo, id_carga),
+        )
 
     if tipo in EVENTOS_SUPORTADOS:
         empresa = parse_empresa_info(root, arquivo)
@@ -254,6 +417,7 @@ def _processar_xml_ingestao(
         item["arquivo_origem"] = arquivo
         _salvar_objetos(conn, "exclusoes", evento_id, item)
     root.clear()
+    return tipo
 
 
 def _adicionar_zip_aninhado(
@@ -266,6 +430,7 @@ def _adicionar_zip_aninhado(
     origem_stream,
     tamanho: int,
     nivel: int,
+    id_carga: int | None = None,
 ) -> None:
     if nivel > MAX_NIVEL_ZIP:
         return
@@ -277,16 +442,24 @@ def _adicionar_zip_aninhado(
             shutil.copyfileobj(origem_stream, fp, length=1024 * 1024)
     caminho_logico = f"{prefixo}::{nome_membro}"
     conn.execute(
-        "INSERT OR IGNORE INTO fontes(nome, caminho, nivel, prefixo, tamanho_bytes) VALUES (?, ?, ?, ?, ?)",
-        (nome_membro, str(destino), nivel, caminho_logico, int(tamanho)),
+        "INSERT OR IGNORE INTO fontes(nome, caminho, nivel, prefixo, tamanho_bytes, id_carga) VALUES (?, ?, ?, ?, ?, ?)",
+        (nome_membro, str(destino), nivel, caminho_logico, int(tamanho), id_carga),
     )
 
 
-def _ingerir_fontes(conn: sqlite3.Connection, workspace: Path, progress_callback: ProgressCallback | None) -> None:
+def _ingerir_fontes(
+    conn: sqlite3.Connection,
+    workspace: Path,
+    progress_callback: ProgressCallback | None,
+    id_carga: int | None = None,
+) -> None:
     while True:
+        filtro_carga = " AND id_carga=?" if id_carga is not None else ""
+        params = (id_carga,) if id_carga is not None else ()
         fonte = conn.execute(
             "SELECT id, nome, caminho, nivel, prefixo, ultimo_indice FROM fontes "
-            "WHERE status != 'concluida' ORDER BY id LIMIT 1"
+            "WHERE status IN ('pendente','processando')" + filtro_carga + " ORDER BY id LIMIT 1",
+            params,
         ).fetchone()
         if not fonte:
             break
@@ -300,7 +473,7 @@ def _ingerir_fontes(conn: sqlite3.Connection, workspace: Path, progress_callback
 
         if caminho.suffix.lower() == ".xml":
             if ultimo_indice < 0:
-                _processar_xml_ingestao(conn, str(prefixo), caminho.read_bytes(), caminho.stat().st_size)
+                _processar_xml_ingestao(conn, str(prefixo), caminho.read_bytes(), caminho.stat().st_size, id_carga)
                 conn.execute("UPDATE fontes SET ultimo_indice=0, total_membros=1, status='concluida' WHERE id=?", (fonte_id,))
                 conn.commit()
             continue
@@ -322,12 +495,12 @@ def _ingerir_fontes(conn: sqlite3.Connection, workspace: Path, progress_callback
                                 if ext == ".xml":
                                     with zf.open(info, "r") as fp:
                                         conteudo = fp.read(MAX_XML_INDIVIDUAL + 1)
-                                    _processar_xml_ingestao(conn, caminho_logico, conteudo, info.file_size)
+                                    _processar_xml_ingestao(conn, caminho_logico, conteudo, info.file_size, id_carga)
                                 else:
                                     with zf.open(info, "r") as fp:
                                         _adicionar_zip_aninhado(
                                             conn, workspace, fonte_id, indice, prefixo,
-                                            info.filename, fp, info.file_size, int(nivel) + 1,
+                                            info.filename, fp, info.file_size, int(nivel) + 1, id_carga,
                                         )
                             except Exception as exc:
                                 conn.execute("INSERT INTO erros(arquivo, erro) VALUES (?, ?)", (caminho_logico, str(exc)))
@@ -353,16 +526,16 @@ def _segunda_passagem(conn: sqlite3.Connection, progress_callback: ProgressCallb
     rubricas = _ler_objetos(conn, "rubricas")
     rubricas_map = _montar_indice_rubricas(rubricas)
     total = conn.execute(
-        "SELECT COUNT(*) FROM eventos WHERE tipo IN ('S-1200','S-5001','S-5011')"
+        "SELECT COUNT(*) FROM eventos WHERE ativo=1 AND tipo IN ('S-1200','S-5001','S-5011')"
     ).fetchone()[0]
     concluidos = conn.execute(
-        "SELECT COUNT(*) FROM eventos WHERE tipo IN ('S-1200','S-5001','S-5011') AND processado_segunda=1"
+        "SELECT COUNT(*) FROM eventos WHERE ativo=1 AND tipo IN ('S-1200','S-5001','S-5011') AND processado_segunda=1"
     ).fetchone()[0]
 
     while True:
         lote = conn.execute(
             "SELECT id, arquivo, tipo, xml_zlib FROM eventos "
-            "WHERE tipo IN ('S-1200','S-5001','S-5011') AND processado_segunda=0 "
+            "WHERE ativo=1 AND tipo IN ('S-1200','S-5001','S-5011') AND processado_segunda=0 "
             "ORDER BY id LIMIT ?",
             (BATCH_SEGUNDA_PASSAGEM,),
         ).fetchall()
@@ -588,6 +761,189 @@ def _workspace_interrompido_por_assinatura(assinatura: str) -> Path | None:
     return max(candidatos, default=(0.0, None), key=lambda x: x[0])[1]
 
 
+def _atualizar_metadados_workspace(conn: sqlite3.Connection) -> None:
+    agora = time.time()
+    total = int(conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0])
+    _meta_set(conn, "ultima_atualizacao", agora)
+    _meta_set(conn, "data_ultima_consolidacao", agora)
+    _meta_set(conn, "total_xml_processados", total)
+    cargas = int(conn.execute(
+        "SELECT COUNT(*) FROM historico_cargas WHERE status='concluida'"
+    ).fetchone()[0])
+    _meta_set(conn, "quantidade_total_cargas", cargas)
+    for tipo in ("S-1010", "S-1200", "S-5001", "S-5011", "S-3000"):
+        qtd = int(conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo=?", (tipo,)).fetchone()[0])
+        _meta_set(conn, "quantidade_" + tipo.lower().replace("-", ""), qtd)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rel_movimentos_cp'").fetchone():
+        periodo = conn.execute(
+            "SELECT COALESCE(MIN(per_apur),''),COALESCE(MAX(per_apur),'') FROM rel_movimentos_cp"
+        ).fetchone()
+        _meta_set(conn, "periodo_minimo", periodo[0])
+        _meta_set(conn, "periodo_maximo", periodo[1])
+
+
+def _registrar_carga_inicial_se_necessario(
+    conn: sqlite3.Connection, workspace: Path, assinatura: str
+) -> None:
+    if conn.execute("SELECT 1 FROM historico_cargas LIMIT 1").fetchone():
+        return
+    total_xml = int(conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0])
+    total_fontes = int(conn.execute(
+        "SELECT COUNT(*) FROM fontes WHERE nivel=0 AND id_carga IS NULL"
+    ).fetchone()[0])
+    total_erros = int(conn.execute("SELECT COUNT(*) FROM erros").fetchone()[0])
+    periodo_minimo = ""
+    periodo_maximo = ""
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rel_movimentos_cp'"
+    ).fetchone():
+        periodo_minimo, periodo_maximo = conn.execute(
+            "SELECT COALESCE(MIN(per_apur),''),COALESCE(MAX(per_apur),'') FROM rel_movimentos_cp"
+        ).fetchone()
+    agora = time.time()
+    inicio = float(_meta_get(conn, "criado_em", str(agora)) or agora)
+    conn.execute(
+        "INSERT INTO historico_cargas(workspace_id,data_inicio,data_fim,origem,assinatura_fontes,"
+        "quantidade_arquivos_recebidos,quantidade_xml_localizados,quantidade_xml_novos,"
+        "quantidade_erros,periodo_minimo_adicionado,periodo_maximo_adicionado,status) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,'concluida')",
+        (workspace.name, inicio, agora, "Carga inicial", assinatura,
+         total_fontes, total_xml, total_xml, total_erros,
+         periodo_minimo, periodo_maximo),
+    )
+
+
+def _resolver_workspace_existente(caminho: str | os.PathLike) -> tuple[Path, Path]:
+    informado = Path(caminho).expanduser().resolve()
+    db_path = informado if informado.suffix.lower() == ".db" else informado / "processamento.db"
+    if not db_path.is_file():
+        raise FileNotFoundError(f"processamento.db não localizado em: {informado}")
+    return db_path.parent, db_path
+
+
+def atualizar_workspace_incremental(
+    workspace_ou_db: str | os.PathLike,
+    fontes: Iterable[Fonte] | None,
+    progress_callback: ProgressCallback | None = None,
+    origem: str = "Complementos",
+) -> Dict[str, object]:
+    """Adiciona XMLs ao mesmo Workspace, com SHA-256, histórico e retomada."""
+    workspace, db_path = _resolver_workspace_existente(workspace_ou_db)
+    conn = _conectar(db_path)
+    _criar_schema(conn)
+    assinatura = ""
+    fontes_lista: list[Fonte] = []
+    if fontes is not None:
+        assinatura, fontes_lista = _assinatura_fontes(fontes)
+    try:
+        carga = conn.execute(
+            "SELECT id_carga,assinatura_fontes FROM historico_cargas "
+            "WHERE status IN ('processando','interrompida') ORDER BY id_carga DESC LIMIT 1"
+        ).fetchone()
+        retomando = carga is not None
+        if retomando:
+            id_carga = int(carga[0])
+            if assinatura and carga[1] and assinatura != carga[1]:
+                raise ValueError(
+                    "Existe uma carga incremental interrompida com outras fontes. "
+                    "Retome-a antes de iniciar novos complementos."
+                )
+            conn.execute(
+                "UPDATE historico_cargas SET status='processando',mensagem_erro='' WHERE id_carga=?",
+                (id_carga,),
+            )
+        else:
+            if not fontes_lista:
+                raise ValueError("Nenhum ZIP/XML complementar foi informado.")
+            cur = conn.execute(
+                "INSERT INTO historico_cargas(workspace_id,data_inicio,origem,assinatura_fontes,"
+                "quantidade_arquivos_recebidos,status) VALUES(?,?,?,?,?,'processando')",
+                (workspace.name, time.time(), origem, assinatura, len(fontes_lista)),
+            )
+            id_carga = int(cur.lastrowid)
+            _materializar_fontes(conn, workspace, fontes_lista, id_carga=id_carga)
+        _meta_set(conn, "status", "processando")
+        _meta_set(conn, "fase", "carga_incremental_ingestao")
+        _meta_set(conn, "carga_incremental_ativa", id_carga)
+        conn.commit()
+
+        _progresso(
+            progress_callback, 0.02,
+            "Retomando carga incremental pelo checkpoint SQLite..." if retomando
+            else "Iniciando carga incremental no Workspace existente...",
+        )
+        _ingerir_fontes(conn, workspace, progress_callback, id_carga=id_carga)
+
+        novos_s1010 = int(conn.execute(
+            "SELECT COUNT(*) FROM eventos WHERE id_carga=? AND tipo='S-1010'", (id_carga,)
+        ).fetchone()[0])
+        novas_retificacoes = int(conn.execute(
+            "SELECT COUNT(*) FROM eventos WHERE id_carga=? AND ind_retif='2'", (id_carga,)
+        ).fetchone()[0])
+        if novos_s1010:
+            _progresso(progress_callback, 0.54, "Reaplicando vigências S-1010 à base acumulada...")
+            conn.execute(
+                "DELETE FROM objetos WHERE categoria='remuneracoes' AND evento_id IN "
+                "(SELECT id FROM eventos WHERE tipo='S-1200')"
+            )
+            conn.execute("UPDATE eventos SET processado_segunda=0 WHERE tipo='S-1200' AND ativo=1")
+            conn.commit()
+
+        _meta_set(conn, "fase", "carga_incremental_segunda_passagem")
+        conn.commit()
+        _segunda_passagem(conn, progress_callback)
+
+        if novos_s1010 or novas_retificacoes:
+            reiniciar_materializacao_analitica(conn)
+        _meta_set(conn, "fase", "carga_incremental_consolidacao")
+        conn.commit()
+        _progresso(progress_callback, 0.94, "Recalculando consolidações da base acumulada...")
+        materializar_tabelas_analiticas(conn, progress_callback=progress_callback)
+        agora = time.time()
+        conn.execute(
+            "UPDATE historico_cargas SET data_fim=?,status='concluida',mensagem_erro='' WHERE id_carga=?",
+            (agora, id_carga),
+        )
+        _atualizar_metadados_workspace(conn)
+        _meta_set(conn, "status", "concluido")
+        _meta_set(conn, "fase", "concluido")
+        _meta_set(conn, "atualizado_em", agora)
+        conn.execute("DELETE FROM meta WHERE chave='carga_incremental_ativa'")
+        conn.commit()
+    except BaseException as exc:
+        carga_id = locals().get("id_carga")
+        if carga_id is not None:
+            conn.execute(
+                "UPDATE historico_cargas SET status='interrompida',mensagem_erro=? WHERE id_carga=?",
+                (str(exc)[:2000], carga_id),
+            )
+        _meta_set(conn, "status", "interrompido")
+        _meta_set(conn, "atualizado_em", time.time())
+        conn.commit()
+        raise
+    finally:
+        conn.close()
+
+    resultado = carregar_resultado_sqlite_existente(db_path)
+    resultado["carga_incremental"] = obter_resumo_carga_incremental(db_path, id_carga)
+    return resultado
+
+
+def obter_resumo_carga_incremental(
+    workspace_ou_db: str | os.PathLike, id_carga: int | None = None
+) -> dict[str, object]:
+    _, db_path = _resolver_workspace_existente(workspace_ou_db)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        filtro = " WHERE id_carga=?" if id_carga is not None else " ORDER BY id_carga DESC LIMIT 1"
+        params = (id_carga,) if id_carga is not None else ()
+        row = conn.execute("SELECT * FROM historico_cargas" + filtro, params).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
 def processar_fontes_esocial(
     fontes: Iterable[Fonte] | None,
     progress_callback: ProgressCallback | None = None,
@@ -649,6 +1005,10 @@ def processar_fontes_esocial(
         conn.commit()
         _progresso(progress_callback, 0.94, "Consolidando o relatório no SQLite sem carregar bases gigantes na memória...")
         materializar_tabelas_analiticas(conn, progress_callback=progress_callback)
+        _registrar_carga_inicial_se_necessario(
+            conn, workspace, _meta_get(conn, "assinatura_fontes", assinatura)
+        )
+        _atualizar_metadados_workspace(conn)
         pacote = carregar_pacote_resumido(db_path)
 
         # Apenas conjuntos pequenos e prévias seguem para a interface. As bases completas

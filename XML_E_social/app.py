@@ -25,6 +25,7 @@ from modules.levantamento_sqlite import (
     obter_opcoes_filtros,
 )
 from modules.processador_zip import (
+    atualizar_workspace_incremental,
     carregar_resultado_sqlite_existente,
     processar_fontes_esocial,
 )
@@ -223,6 +224,15 @@ with st.sidebar:
                 st.markdown(
                     f"**Banco SQLite:** {formatar_tamanho(info_workspace.tamanho_sqlite)}"
                 )
+                periodo_workspace = (
+                    f"{info_workspace.periodo_minimo} a {info_workspace.periodo_maximo}"
+                    if info_workspace.periodo_minimo or info_workspace.periodo_maximo
+                    else "Não identificado"
+                )
+                st.markdown(f"**Período carregado:** {periodo_workspace}")
+                st.markdown(
+                    f"**XMLs catalogados:** {info_workspace.quantidade_xml:,}".replace(",", ".")
+                )
 
                 if st.button(
                     "📂 Abrir Workspace",
@@ -233,6 +243,117 @@ with st.sidebar:
                         abrir_workspace(info_workspace.caminho)
                     except OSError as exc:
                         st.error(f"Não foi possível abrir o Workspace: {exc}")
+
+                if st.button(
+                    "➕ Adicionar complementos ao Workspace",
+                    use_container_width=True,
+                    disabled=info_workspace.status == "Em processamento",
+                    key="abrir_complementos_workspace",
+                ):
+                    st.session_state["exibir_complementos_workspace"] = True
+
+                if st.session_state.get("exibir_complementos_workspace"):
+                    with st.container(border=True):
+                        st.markdown("#### Adicionar complementos")
+                        st.caption(
+                            "XMLs já conhecidos serão obrigatoriamente ignorados pelo SHA-256. "
+                            "A atualização ocorrerá no mesmo processamento.db."
+                        )
+                        origem_complementos = st.radio(
+                            "Origem dos complementos",
+                            ["Upload pelo navegador", "Arquivo/pasta local"],
+                            key="origem_complementos_workspace",
+                        )
+                        uploads_complementos = []
+                        caminhos_complementos = ""
+                        if origem_complementos == "Upload pelo navegador":
+                            uploads_complementos = st.file_uploader(
+                                "ZIP/XML complementares",
+                                type=["zip", "xml"],
+                                accept_multiple_files=True,
+                                key="uploads_complementos_workspace",
+                            )
+                        else:
+                            caminhos_complementos = st.text_area(
+                                "Caminhos de arquivos ou pastas (um por linha)",
+                                key="caminhos_complementos_workspace",
+                            )
+                        st.checkbox(
+                            "Ignorar XMLs já processados (obrigatório)",
+                            value=True,
+                            disabled=True,
+                            key="ignorar_duplicados_complementos",
+                        )
+                        st.checkbox(
+                            "Recalcular consolidações ao concluir (obrigatório)",
+                            value=True,
+                            disabled=True,
+                            key="recalcular_complementos",
+                        )
+                        c_cancelar, c_processar = st.columns(2)
+                        if c_cancelar.button(
+                            "Cancelar", use_container_width=True, key="cancelar_complementos"
+                        ):
+                            st.session_state.pop("exibir_complementos_workspace", None)
+                            st.rerun()
+                        if c_processar.button(
+                            "Processar complementos",
+                            use_container_width=True,
+                            key="processar_complementos",
+                        ):
+                            fontes_complementos = [
+                                (arquivo.name, arquivo.getvalue())
+                                for arquivo in uploads_complementos or []
+                            ]
+                            for linha in caminhos_complementos.splitlines():
+                                caminho = Path(linha.strip().strip('"')).expanduser()
+                                if not caminho.exists():
+                                    st.error(f"Caminho não localizado: {caminho}")
+                                    st.stop()
+                                if caminho.is_dir():
+                                    fontes_complementos.extend(
+                                        (str(item), str(item))
+                                        for item in caminho.rglob("*")
+                                        if item.is_file()
+                                        and item.suffix.lower() in {".zip", ".xml"}
+                                    )
+                                elif caminho.suffix.lower() in {".zip", ".xml"}:
+                                    fontes_complementos.append((str(caminho), str(caminho)))
+                            if not fontes_complementos:
+                                st.error("Selecione ao menos um ZIP/XML complementar.")
+                                st.stop()
+                            st.markdown("### Atualização incremental do Workspace")
+                            barra_inc = st.progress(0, text="Iniciando...")
+                            status_inc = st.empty()
+
+                            def atualizar_inc(valor: float, mensagem: str):
+                                percentual = max(0, min(100, int(round(float(valor) * 100))))
+                                barra_inc.progress(percentual, text=f"{percentual}% — {mensagem}")
+                                status_inc.caption(mensagem)
+
+                            try:
+                                resultado_atualizado = atualizar_workspace_incremental(
+                                    info_workspace.caminho,
+                                    fontes_complementos,
+                                    progress_callback=atualizar_inc,
+                                    origem=origem_complementos,
+                                )
+                            except Exception as exc:
+                                status_inc.error(f"Carga interrompida com segurança: {exc}")
+                                st.exception(exc)
+                                st.stop()
+                            st.session_state["resultado_v82"] = resultado_atualizado
+                            st.session_state.pop("exibir_complementos_workspace", None)
+                            st.cache_data.clear()
+                            resumo_inc = resultado_atualizado.get("carga_incremental", {})
+                            st.session_state["mensagem_workspace_v952"] = (
+                                "Carga incremental concluída — "
+                                f"XMLs recebidos: {resumo_inc.get('quantidade_xml_localizados', 0):,}; "
+                                f"novos: {resumo_inc.get('quantidade_xml_novos', 0):,}; "
+                                f"duplicados: {resumo_inc.get('quantidade_duplicados', 0):,}; "
+                                f"erros: {resumo_inc.get('quantidade_erros', 0):,}."
+                            ).replace(",", ".")
+                            st.rerun()
 
                 if not st.session_state.get("confirmar_lixeira_workspace_v952"):
                     if st.button(

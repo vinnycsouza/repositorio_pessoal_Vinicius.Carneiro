@@ -67,6 +67,26 @@ Atual**. O painel mostra empresa, CNPJ, status e tamanhos e permite abrir a past
 ou enviar todo o Workspace para a Lixeira, sempre com confirmação. Não existe
 exclusão definitiva nessa ação.
 
+## Atualização incremental
+
+No painel **Gerenciar Workspace Atual**, a ação **Adicionar complementos ao
+Workspace** incorpora novos ZIP/XML ao mesmo `processamento.db`, por upload ou
+caminho local. Não é criado um segundo Workspace.
+
+- cada XML novo recebe SHA-256 do conteúdo bruto;
+- duplicados são ignorados mesmo quando possuem outro nome;
+- ZIPs aninhados continuam suportados;
+- cada carga possui histórico e checkpoint para retomada;
+- S-3000 e consolidações são reaplicados sobre a base acumulada;
+- um novo S-1010 reclassifica os S-1200 preservados no SQLite, sem reler os
+  arquivos XML originais;
+- Relatório de Incidência CP e Levantamento usam os dados atualizados no mesmo
+  Workspace.
+
+Em caso de interrupção, informe novamente as mesmas fontes para retomar a carga
+incremental registrada no SQLite.
+
 Consulte `PLANO_V9_5.md`, `ATUALIZACOES_V9_5_ENGINE_V3.md` e
 `ATUALIZACOES_V9_5_2_ENGINE_V3.md`. Consulte também
 `ATUALIZACOES_INTEGRACAO_WORKSPACE_LEVANTAMENTO.md`.
+O desenho técnico da carga incremental está em `PLANO_CARGA_INCREMENTAL.md`.
