@@ -122,6 +122,32 @@ class CargaIncrementalTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_s1010_duplicado_pode_ser_reprocessado_sem_duplicar_evento(self):
+        inicial = processar_fontes_esocial(
+            [("inicial.zip", zip_xmls(**{"s1200.xml": S1200, "s1010.xml": S1010}))]
+        )
+        workspace = Path(inicial["workspace_temporario"])
+        atualizado = atualizar_workspace_incremental(
+            workspace, [("recibo_reenviado.zip", zip_xmls(**{"outro_nome.xml": S1010}))]
+        )
+        resumo = atualizado["carga_incremental"]
+        self.assertEqual(resumo["quantidade_xml_novos"], 0)
+        self.assertEqual(resumo["quantidade_duplicados"], 1)
+        conn = sqlite3.connect(workspace / "processamento.db")
+        try:
+            eventos = conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0]
+            objetos = conn.execute(
+                "SELECT COUNT(*) FROM objetos WHERE categoria='rubricas'"
+            ).fetchone()[0]
+            status = conn.execute(
+                "SELECT status_cp FROM rel_movimentos_cp WHERE cod_rubr='100'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(eventos, 2)
+        self.assertEqual(objetos, 1)
+        self.assertEqual(status, "Incide CP")
+
     def test_s3000_reaplica_exclusao_sobre_base_acumulada(self):
         inicial = self._inicial()
         workspace = Path(inicial["workspace_temporario"])

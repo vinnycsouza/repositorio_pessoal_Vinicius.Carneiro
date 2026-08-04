@@ -221,9 +221,24 @@ def _eh_retorno_evento_completo(root: ET.Element) -> bool:
 
 
 def _montar_indice_rubricas(rubricas: List[RubricaInfo]):
+    # Eventos de tabela são sequenciais. Uma exclusão remove a versão de mesma
+    # chave/vigência; inclusão/alteração posterior substitui a versão anterior.
+    # Assim uma exclusão nunca vira um cadastro vazio elegível para o S-1200.
+    versoes: dict[tuple[str, str, str], RubricaInfo] = {}
+    for rubrica in rubricas:
+        chave_versao = (
+            str(rubrica.cod_rubr or "").strip(),
+            str(rubrica.ide_tab_rubr or "").strip(),
+            str(rubrica.ini_valid or "").strip(),
+        )
+        if rubrica.origem_bloco == "exclusao":
+            versoes.pop(chave_versao, None)
+        else:
+            versoes[chave_versao] = rubrica
+
     mapa = {}
     ordenadas = sorted(
-        rubricas,
+        versoes.values(),
         key=lambda r: (0 if r.fonte_dados == "Download principal" else 1, r.ini_valid, r.fim_valid),
     )
     for r in ordenadas:
@@ -312,15 +327,44 @@ def _processar_xml_ingestao(
     id_carga: int | None = None,
 ) -> str:
     hash_conteudo = hashlib.sha256(xml_bytes).hexdigest()
-    if conn.execute(
-        "SELECT 1 FROM eventos WHERE hash_conteudo=? LIMIT 1", (hash_conteudo,)
-    ).fetchone():
+    evento_existente = conn.execute(
+        "SELECT id,arquivo,tipo,envelope_recibo FROM eventos "
+        "WHERE hash_conteudo=? LIMIT 1", (hash_conteudo,)
+    ).fetchone()
+    if evento_existente:
         if id_carga is not None:
             conn.execute(
                 "UPDATE historico_cargas SET quantidade_duplicados=quantidade_duplicados+1,"
                 "quantidade_xml_localizados=quantidade_xml_localizados+1 WHERE id_carga=?",
                 (id_carga,),
             )
+            if evento_existente[2] == "S-1010":
+                # Permite aplicar correções de parser em Workspace existente ao
+                # reenviar o mesmo recibo, sem duplicar fisicamente o evento.
+                try:
+                    root_existente = ET.fromstring(xml_bytes)
+                    itens = parse_s1010(
+                        root_existente,
+                        arquivo=str(evento_existente[1]),
+                        fonte_dados=(
+                            "Recibo S-1010" if evento_existente[3]
+                            else "Download principal"
+                        ),
+                    )
+                    conn.execute(
+                        "DELETE FROM objetos WHERE categoria='rubricas' AND evento_id=?",
+                        (int(evento_existente[0]),),
+                    )
+                    _salvar_objetos(
+                        conn, "rubricas", int(evento_existente[0]), itens
+                    )
+                    _meta_set(conn, f"carga_{id_carga}_reprocessou_s1010", 1)
+                    root_existente.clear()
+                except Exception as exc:
+                    conn.execute(
+                        "INSERT INTO erros(arquivo,erro) VALUES(?,?)",
+                        (str(arquivo), f"Falha ao reprocessar S-1010 duplicado: {exc}"),
+                    )
         return "duplicado"
     if id_carga is not None:
         conn.execute(
@@ -354,7 +398,7 @@ def _processar_xml_ingestao(
     recibo = _eh_retorno_evento_completo(root)
     id_evento, ind_retif, recibo_evento, recibo_referencia = _metadados_retificacao(root)
     blob = None
-    if tipo in EVENTOS_SEGUNDA_PASSAGEM:
+    if tipo in EVENTOS_SEGUNDA_PASSAGEM or tipo == "S-1010":
         blob = sqlite3.Binary(zlib.compress(xml_bytes, level=1))
     cur = conn.execute(
         "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes, envelope_recibo, xml_zlib, hash_conteudo, id_carga,"
@@ -877,6 +921,9 @@ def atualizar_workspace_incremental(
         novos_s1010 = int(conn.execute(
             "SELECT COUNT(*) FROM eventos WHERE id_carga=? AND tipo='S-1010'", (id_carga,)
         ).fetchone()[0])
+        novos_s1010 += int(
+            _meta_get(conn, f"carga_{id_carga}_reprocessou_s1010", "0") or 0
+        )
         novas_retificacoes = int(conn.execute(
             "SELECT COUNT(*) FROM eventos WHERE id_carga=? AND ind_retif='2'", (id_carga,)
         ).fetchone()[0])

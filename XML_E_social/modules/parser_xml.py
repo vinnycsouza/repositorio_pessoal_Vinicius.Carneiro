@@ -190,7 +190,7 @@ def parse_s1010(root: ET.Element, arquivo: str = "", fonte_dados: str = "Downloa
     saida: List[RubricaInfo] = []
 
     blocos_origem = []
-    for nome_bloco in ("inclusao", "alteracao", "novaValidade"):
+    for nome_bloco in ("inclusao", "alteracao", "novaValidade", "exclusao"):
         blocos_origem.extend([(nome_bloco, bloco) for bloco in all_elements_by_localname(root, nome_bloco)])
 
     if not blocos_origem:
@@ -206,8 +206,8 @@ def parse_s1010(root: ET.Element, arquivo: str = "", fonte_dados: str = "Downloa
             elif nome == "dadosRubrica" and dados_rubrica is None:
                 dados_rubrica = child
 
-        ide_rubrica = ide_rubrica or bloco
-        dados_rubrica = dados_rubrica or bloco
+        ide_rubrica = ide_rubrica if ide_rubrica is not None else bloco
+        dados_rubrica = dados_rubrica if dados_rubrica is not None else bloco
 
         cod_rubr = first_text_by_localname(ide_rubrica, "codRubr") or first_text_by_localname(bloco, "codRubr") or ""
         ide_tab_rubr = first_text_by_localname(ide_rubrica, "ideTabRubr") or first_text_by_localname(bloco, "ideTabRubr") or ""
