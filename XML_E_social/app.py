@@ -34,7 +34,9 @@ from modules.workspace_manager import (
     abrir_workspace,
     enviar_workspace_para_lixeira,
     formatar_tamanho,
+    listar_workspaces_disponiveis,
     obter_info_workspace,
+    pasta_padrao_workspaces,
 )
 from utils.helpers import decimal_br
 
@@ -45,6 +47,11 @@ st.title("Composição da Incidência CP — eSocial")
 st.caption(
     "Versão 9.5.2 Engine V3: SQLite persistente, Excel consolidado e gerenciamento seguro do Workspace atual."
 )
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def _catalogo_workspaces_disponiveis():
+    return listar_workspaces_disponiveis()
 
 if "modulo_ativo" not in st.session_state:
     st.session_state["modulo_ativo"] = "Relatório de Incidência CP"
@@ -168,17 +175,79 @@ with st.sidebar:
                 st.markdown("**Status:** Pronto")
             except (OSError, ValueError):
                 st.caption(f"SQLite: {contexto_ativo.db_path}")
-        else:
-            caminho_sqlite_existente = st.text_input(
-                "Caminho do processamento.db ou da pasta do Workspace",
-                placeholder=r"C:\Users\vinny\AppData\Local\XML_eSocial\workspaces\esocial_v3_...",
-                help="Informe a pasta ou o banco. Os XMLs não serão processados novamente.",
-            )
-            gerar_relatorio = st.button(
-                "Carregar Workspace" if modo_entrada == "Workspace (SQLite existente)" else "Carregar banco existente",
-                type="primary",
+            if st.button(
+                "Escolher outro Workspace",
                 use_container_width=True,
+                key="trocar_workspace_levantamento",
+            ):
+                st.session_state.pop("resultado_v82", None)
+                st.session_state.pop("exibir_workspace_v952", None)
+                st.rerun()
+        else:
+            forma_selecao_workspace = st.radio(
+                "Como localizar o Workspace",
+                ["Selecionar da lista", "Informar caminho manualmente"],
+                horizontal=False,
+                key="forma_selecao_workspace",
             )
+            if forma_selecao_workspace == "Selecionar da lista":
+                cabecalho_lista, atualizar_lista = st.columns([4, 1])
+                cabecalho_lista.caption(
+                    f"Pasta pesquisada: `{pasta_padrao_workspaces()}`"
+                )
+                if atualizar_lista.button(
+                    "↻",
+                    help="Atualizar lista de Workspaces",
+                    key="atualizar_catalogo_workspaces",
+                    use_container_width=True,
+                ):
+                    _catalogo_workspaces_disponiveis.clear()
+                    st.rerun()
+                catalogo_workspaces = _catalogo_workspaces_disponiveis()
+                if not catalogo_workspaces:
+                    st.warning(
+                        "Nenhum Workspace foi encontrado na pasta padrão. "
+                        "Use o caminho manual se ele estiver em outro local."
+                    )
+                else:
+                    workspace_selecionado = st.selectbox(
+                        "Workspace disponível",
+                        catalogo_workspaces,
+                        format_func=lambda item: item.rotulo,
+                        key="workspace_catalogo_selecionado",
+                    )
+                    st.caption(
+                        f"SQLite: {formatar_tamanho(workspace_selecionado.tamanho_sqlite)} · "
+                        f"XMLs: {workspace_selecionado.quantidade_xml:,} · "
+                        f"Caminho: {workspace_selecionado.caminho}".replace(",", ".")
+                    )
+                    if not workspace_selecionado.carregavel:
+                        st.warning(
+                            "Este Workspace está interrompido ou em processamento e não pode "
+                            "ser aberto como base concluída."
+                        )
+                    if st.button(
+                        "Carregar Workspace selecionado",
+                        type="primary",
+                        use_container_width=True,
+                        disabled=not workspace_selecionado.carregavel,
+                        key="carregar_workspace_catalogo",
+                    ):
+                        caminho_sqlite_existente = str(
+                            workspace_selecionado.db_path
+                        )
+                        gerar_relatorio = True
+            else:
+                caminho_sqlite_existente = st.text_input(
+                    "Caminho do processamento.db ou da pasta do Workspace",
+                    placeholder=r"C:\Users\vinny\AppData\Local\XML_eSocial\workspaces\esocial_v3_...",
+                    help="Informe a pasta ou o banco. Os XMLs não serão processados novamente.",
+                )
+                gerar_relatorio = st.button(
+                    "Carregar Workspace" if modo_entrada == "Workspace (SQLite existente)" else "Carregar banco existente",
+                    type="primary",
+                    use_container_width=True,
+                )
     else:
         arquivo_excel = st.file_uploader(
             "Selecione o Excel consolidado", type=["xlsx"], accept_multiple_files=False,

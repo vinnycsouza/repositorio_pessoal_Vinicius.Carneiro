@@ -25,6 +25,37 @@ class WorkspaceInfo:
     periodo_maximo: str = ""
 
 
+@dataclass(frozen=True)
+class WorkspaceCatalogItem:
+    nome_empresa: str
+    cnpj: str
+    nome_workspace: str
+    caminho: Path
+    db_path: Path
+    status: str
+    tamanho_sqlite: int
+    quantidade_xml: int
+    periodo_minimo: str
+    periodo_maximo: str
+    atualizado_em: float
+
+    @property
+    def carregavel(self) -> bool:
+        return self.status == "Concluído"
+
+    @property
+    def rotulo(self) -> str:
+        periodo = (
+            f"{self.periodo_minimo} a {self.periodo_maximo}"
+            if self.periodo_minimo or self.periodo_maximo
+            else "período não identificado"
+        )
+        return (
+            f"{self.nome_empresa} | {self.cnpj} | {periodo} | "
+            f"{self.status} | {self.nome_workspace}"
+        )
+
+
 def formatar_cnpj(valor: object) -> str:
     digitos = "".join(c for c in str(valor or "") if c.isdigit())
     if len(digitos) == 14:
@@ -60,6 +91,136 @@ def calcular_tamanho_workspace(caminho: str | Path) -> int:
             except OSError:
                 continue
     return total
+
+
+def pasta_padrao_workspaces() -> Path:
+    configurada = os.environ.get("ESOCIAL_WORKSPACES_DIR", "").strip()
+    if configurada:
+        return Path(configurada).expanduser().resolve()
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+        return (base / "XML_eSocial" / "workspaces").resolve()
+    return (Path.home() / ".xml_esocial" / "workspaces").resolve()
+
+
+def _catalogar_workspace(caminho: Path) -> WorkspaceCatalogItem | None:
+    db_path = caminho / "processamento.db"
+    if not caminho.is_dir() or not db_path.is_file():
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(
+            f"file:{db_path.resolve().as_posix()}?mode=ro",
+            uri=True,
+            timeout=2,
+        )
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 2000")
+        tabelas = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "meta" not in tabelas:
+            return None
+        metadados = {
+            str(chave): str(valor)
+            for chave, valor in conn.execute("SELECT chave,valor FROM meta")
+        }
+        status_bruto = metadados.get("status", "interrompido").strip().lower()
+        status = {
+            "concluido": "Concluído",
+            "processando": "Em processamento",
+            "interrompido": "Interrompido",
+        }.get(status_bruto, "Interrompido")
+
+        nome_empresa = "Não identificado"
+        cnpj = "Não identificado"
+        if "dados_empresa" in tabelas:
+            colunas_empresa = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(dados_empresa)")
+            }
+            if {"nome_empresa", "cnpj_empregador"} <= colunas_empresa:
+                row = conn.execute(
+                    "SELECT nome_empresa,cnpj_empregador FROM dados_empresa "
+                    "WHERE TRIM(COALESCE(nome_empresa,''))<>'' LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    row = conn.execute(
+                        "SELECT nome_empresa,cnpj_empregador FROM dados_empresa LIMIT 1"
+                    ).fetchone()
+                if row:
+                    nome_empresa = str(row[0] or "").strip() or nome_empresa
+                    cnpj = formatar_cnpj(row[1]) or cnpj
+
+        quantidade_xml = 0
+        if metadados.get("total_xml_processados", "").isdigit():
+            quantidade_xml = int(metadados["total_xml_processados"])
+        elif "contagem_eventos" in tabelas:
+            quantidade_xml = int(
+                conn.execute(
+                    "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
+                ).fetchone()[0]
+            )
+        elif "eventos" in tabelas:
+            quantidade_xml = int(
+                conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0]
+            )
+        periodo_minimo = metadados.get("periodo_minimo", "")
+        periodo_maximo = metadados.get("periodo_maximo", "")
+        if (
+            not (periodo_minimo or periodo_maximo)
+            and "rel_movimentos_cp" in tabelas
+        ):
+            periodo_minimo, periodo_maximo = conn.execute(
+                "SELECT COALESCE(MIN(per_apur),''),COALESCE(MAX(per_apur),'') "
+                "FROM rel_movimentos_cp"
+            ).fetchone()
+        atualizado_em = float(
+            metadados.get("atualizado_em", str(db_path.stat().st_mtime)) or 0
+        )
+        return WorkspaceCatalogItem(
+            nome_empresa=nome_empresa,
+            cnpj=cnpj,
+            nome_workspace=caminho.name,
+            caminho=caminho.resolve(),
+            db_path=db_path.resolve(),
+            status=status,
+            tamanho_sqlite=int(db_path.stat().st_size),
+            quantidade_xml=quantidade_xml,
+            periodo_minimo=str(periodo_minimo or ""),
+            periodo_maximo=str(periodo_maximo or ""),
+            atualizado_em=atualizado_em,
+        )
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def listar_workspaces_disponiveis(
+    pasta_base: str | Path | None = None,
+) -> list[WorkspaceCatalogItem]:
+    base = (
+        Path(pasta_base).expanduser().resolve()
+        if pasta_base is not None
+        else pasta_padrao_workspaces()
+    )
+    if not base.is_dir():
+        return []
+    itens = []
+    for caminho in base.iterdir():
+        item = _catalogar_workspace(caminho)
+        if item is not None:
+            itens.append(item)
+    return sorted(
+        itens,
+        key=lambda item: (item.atualizado_em, item.nome_empresa.lower()),
+        reverse=True,
+    )
 
 
 def _ler_status_sqlite(db_path: Path) -> str:

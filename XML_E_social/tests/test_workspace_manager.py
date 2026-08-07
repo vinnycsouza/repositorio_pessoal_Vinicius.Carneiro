@@ -11,7 +11,9 @@ from modules.workspace_manager import (
     abrir_workspace,
     enviar_workspace_para_lixeira,
     formatar_tamanho,
+    listar_workspaces_disponiveis,
     obter_info_workspace,
+    pasta_padrao_workspaces,
 )
 
 
@@ -72,6 +74,58 @@ class WorkspaceManagerTest(unittest.TestCase):
     def test_formata_tamanho(self):
         self.assertEqual(formatar_tamanho(1024**3), "1,0 GB")
         self.assertEqual(formatar_tamanho(None), "Não disponível")
+
+    def test_lista_workspaces_com_metadados_sem_carregar_tabelas_inteiras(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            workspace = self._criar_workspace(pasta)
+            db_path = workspace / "processamento.db"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "CREATE TABLE dados_empresa(nome_empresa TEXT,cnpj_empregador TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO dados_empresa VALUES('Empresa Catálogo','12345678000199')"
+                )
+                conn.execute("CREATE TABLE eventos(id INTEGER PRIMARY KEY)")
+                conn.executemany("INSERT INTO eventos DEFAULT VALUES", [(), (), ()])
+                conn.execute("CREATE TABLE rel_movimentos_cp(per_apur TEXT)")
+                conn.executemany(
+                    "INSERT INTO rel_movimentos_cp VALUES(?)",
+                    [("2025-01",), ("2026-06",)],
+                )
+                conn.execute("INSERT INTO meta VALUES('atualizado_em','100')")
+                conn.commit()
+            finally:
+                conn.close()
+
+            itens = listar_workspaces_disponiveis(pasta)
+            self.assertEqual(len(itens), 1)
+            item = itens[0]
+            self.assertEqual(item.nome_empresa, "Empresa Catálogo")
+            self.assertEqual(item.cnpj, "12.345.678/0001-99")
+            self.assertEqual(item.quantidade_xml, 3)
+            self.assertEqual(item.periodo_minimo, "2025-01")
+            self.assertEqual(item.periodo_maximo, "2026-06")
+            self.assertTrue(item.carregavel)
+            self.assertIn("Empresa Catálogo", item.rotulo)
+
+    def test_lista_interrompido_mas_nao_permite_carregamento(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            self._criar_workspace(pasta, status="interrompido")
+            item = listar_workspaces_disponiveis(pasta)[0]
+            self.assertEqual(item.status, "Interrompido")
+            self.assertFalse(item.carregavel)
+
+    def test_ignora_pasta_sem_processamento_db(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            (Path(pasta) / "pasta_qualquer").mkdir()
+            self.assertEqual(listar_workspaces_disponiveis(pasta), [])
+
+    def test_pasta_padrao_respeita_configuracao(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            with patch.dict(os.environ, {"ESOCIAL_WORKSPACES_DIR": pasta}):
+                self.assertEqual(pasta_padrao_workspaces(), Path(pasta).resolve())
 
 
 if __name__ == "__main__":
