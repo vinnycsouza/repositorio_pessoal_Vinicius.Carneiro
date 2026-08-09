@@ -147,6 +147,31 @@ class ExcelBuilderTest(unittest.TestCase):
             finally:
                 workbook.close()
 
+    def test_total_esperado_evitar_contagem_redundante(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            conexao = sqlite3.connect(":memory:")
+            try:
+                conexao.execute("CREATE TABLE movimentos(id INTEGER)")
+                conexao.executemany(
+                    "INSERT INTO movimentos VALUES(?)", [(1,), (2,), (3,)]
+                )
+                with patch(
+                    "modules.excel_builder._total_query",
+                    side_effect=AssertionError("COUNT redundante"),
+                ):
+                    resultado = gerar_workbook(
+                        Path(pasta) / "total_conhecido.xlsx",
+                        [FontePlanilha(
+                            "movimentos",
+                            query="SELECT * FROM movimentos ORDER BY id",
+                            total_esperado=3,
+                        )],
+                        conexao=conexao,
+                    )
+            finally:
+                conexao.close()
+            self.assertEqual(resultado.controles[0].linhas_exportadas, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

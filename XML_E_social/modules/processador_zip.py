@@ -37,6 +37,7 @@ EVENTOS_SUPORTADOS = {"S-1000", "S-1005", "S-1010", "S-1020", "S-1200", "S-3000"
 EVENTOS_SEGUNDA_PASSAGEM = {"S-1200", "S-5001", "S-5011"}
 CHECKPOINT_INTERVALO = 500
 BATCH_SEGUNDA_PASSAGEM = 250
+MAX_BYTES_LOTE_SEGUNDA_PASSAGEM = 32 * 1024 * 1024
 MAX_NIVEL_ZIP = 8
 MAX_XML_INDIVIDUAL = 256 * 1024 * 1024
 
@@ -66,7 +67,9 @@ def _conectar(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=120)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA temp_store=MEMORY")
+    # Agrupamentos e indices de empresas grandes podem exceder a RAM. O SQLite
+    # usa arquivos temporarios no disco, preservando memoria para parser/Excel.
+    conn.execute("PRAGMA temp_store=FILE")
     conn.execute("PRAGMA cache_size=-131072")
     conn.execute("PRAGMA busy_timeout=120000")
     return conn
@@ -289,6 +292,13 @@ def _registrar_contagem(conn: sqlite3.Connection, tipo: str) -> None:
         "ON CONFLICT(tipo) DO UPDATE SET quantidade=quantidade+1",
         (tipo,),
     )
+
+
+def _registrar_duracao(
+    conn: sqlite3.Connection, chave: str, inicio: float
+) -> None:
+    """Persiste telemetria local, sem dados dos XML e sem alterar o fluxo."""
+    _meta_set(conn, f"tempo_{chave}_segundos", f"{time.perf_counter() - inicio:.3f}")
 
 
 def _metadados_retificacao(root: ET.Element) -> tuple[str, str, str, str]:
@@ -575,14 +585,30 @@ def _segunda_passagem(conn: sqlite3.Connection, progress_callback: ProgressCallb
     concluidos = conn.execute(
         "SELECT COUNT(*) FROM eventos WHERE ativo=1 AND tipo IN ('S-1200','S-5001','S-5011') AND processado_segunda=1"
     ).fetchone()[0]
+    limite_bytes = max(
+        1,
+        int(os.environ.get(
+            "ESOCIAL_MAX_BYTES_LOTE_SEGUNDA_PASSAGEM",
+            str(MAX_BYTES_LOTE_SEGUNDA_PASSAGEM),
+        )),
+    )
 
     while True:
-        lote = conn.execute(
+        cursor = conn.execute(
             "SELECT id, arquivo, tipo, xml_zlib FROM eventos "
             "WHERE ativo=1 AND tipo IN ('S-1200','S-5001','S-5011') AND processado_segunda=0 "
             "ORDER BY id LIMIT ?",
             (BATCH_SEGUNDA_PASSAGEM,),
-        ).fetchall()
+        )
+        lote = []
+        bytes_lote = 0
+        for registro in cursor:
+            tamanho_blob = len(registro[3] or b"")
+            if lote and bytes_lote + tamanho_blob > limite_bytes:
+                break
+            lote.append(registro)
+            bytes_lote += tamanho_blob
+        cursor.close()
         if not lote:
             break
 
@@ -916,7 +942,9 @@ def atualizar_workspace_incremental(
             "Retomando carga incremental pelo checkpoint SQLite..." if retomando
             else "Iniciando carga incremental no Workspace existente...",
         )
+        inicio_etapa = time.perf_counter()
         _ingerir_fontes(conn, workspace, progress_callback, id_carga=id_carga)
+        _registrar_duracao(conn, "ingestao_incremental", inicio_etapa)
 
         novos_s1010 = int(conn.execute(
             "SELECT COUNT(*) FROM eventos WHERE id_carga=? AND tipo='S-1010'", (id_carga,)
@@ -938,14 +966,18 @@ def atualizar_workspace_incremental(
 
         _meta_set(conn, "fase", "carga_incremental_segunda_passagem")
         conn.commit()
+        inicio_etapa = time.perf_counter()
         _segunda_passagem(conn, progress_callback)
+        _registrar_duracao(conn, "segunda_passagem_incremental", inicio_etapa)
 
         if novos_s1010 or novas_retificacoes:
             reiniciar_materializacao_analitica(conn)
         _meta_set(conn, "fase", "carga_incremental_consolidacao")
         conn.commit()
         _progresso(progress_callback, 0.94, "Recalculando consolidações da base acumulada...")
+        inicio_etapa = time.perf_counter()
         materializar_tabelas_analiticas(conn, progress_callback=progress_callback)
+        _registrar_duracao(conn, "consolidacao_incremental", inicio_etapa)
         agora = time.time()
         conn.execute(
             "UPDATE historico_cargas SET data_fim=?,status='concluida',mensagem_erro='' WHERE id_carga=?",
@@ -1041,22 +1073,30 @@ def processar_fontes_esocial(
         )
         fase = _meta_get(conn, "fase", "preparacao")
         if fase in {"preparacao", "ingestao"}:
+            inicio_etapa = time.perf_counter()
             _ingerir_fontes(conn, workspace, progress_callback)
+            _registrar_duracao(conn, "ingestao", inicio_etapa)
             _meta_set(conn, "fase", "segunda_passagem")
             conn.commit()
 
         _progresso(progress_callback, 0.55, "Iniciando ou retomando a segunda passagem...")
+        inicio_etapa = time.perf_counter()
         _segunda_passagem(conn, progress_callback)
+        _registrar_duracao(conn, "segunda_passagem", inicio_etapa)
 
         _meta_set(conn, "fase", "consolidacao_sqlite")
         conn.commit()
         _progresso(progress_callback, 0.94, "Consolidando o relatório no SQLite sem carregar bases gigantes na memória...")
+        inicio_etapa = time.perf_counter()
         materializar_tabelas_analiticas(conn, progress_callback=progress_callback)
+        _registrar_duracao(conn, "consolidacao", inicio_etapa)
         _registrar_carga_inicial_se_necessario(
             conn, workspace, _meta_get(conn, "assinatura_fontes", assinatura)
         )
         _atualizar_metadados_workspace(conn)
+        inicio_etapa = time.perf_counter()
         pacote = carregar_pacote_resumido(db_path)
+        _registrar_duracao(conn, "resumo", inicio_etapa)
 
         # Apenas conjuntos pequenos e prévias seguem para a interface. As bases completas
         # permanecem no SQLite e são exportadas em streaming.

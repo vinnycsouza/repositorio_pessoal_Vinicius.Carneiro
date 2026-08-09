@@ -302,6 +302,32 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
     _progresso(cb, 0.95, "Consolidação SQLite concluída sem carregar bases gigantes na memória.")
 
 
+def _metricas_movimentos(conn: sqlite3.Connection) -> dict[str, float | int]:
+    """Calcula todos os totais de movimentos em uma unica varredura."""
+    row = conn.execute("""
+        SELECT
+            COUNT(*) total,
+            COALESCE(SUM(CAST(vr_rubr AS REAL)), 0) valor_total,
+            COALESCE(SUM(CASE WHEN considerado_cp='Sim'
+                THEN CAST(vr_rubr AS REAL) ELSE 0 END), 0) valor_incide,
+            COALESCE(SUM(CASE WHEN status_cp='Não incide CP'
+                THEN CAST(vr_rubr AS REAL) ELSE 0 END), 0) valor_nao_incide,
+            COALESCE(SUM(CASE WHEN status_cp='Incide CP' THEN 1 ELSE 0 END), 0) qtd_padrao,
+            COALESCE(SUM(CASE WHEN status_cp IN ('Incide CP','Revisar codIncCP')
+                THEN 1 ELSE 0 END), 0) qtd_prioritaria,
+            COALESCE(SUM(CASE WHEN status_cp IN
+                ('Incide CP','Não incide CP','Revisar codIncCP')
+                THEN 1 ELSE 0 END), 0) qtd_classificados,
+            COALESCE(SUM(CASE WHEN status_cp='Sem S-1010' THEN 1 ELSE 0 END), 0) qtd_sem_s1010
+        FROM rel_movimentos_cp
+    """).fetchone()
+    nomes = (
+        "total", "valor_total", "valor_incide", "valor_nao_incide",
+        "qtd_padrao", "qtd_prioritaria", "qtd_classificados", "qtd_sem_s1010",
+    )
+    return dict(zip(nomes, row))
+
+
 def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) -> dict[str, object]:
     conn = sqlite3.connect(str(db_path))
     try:
@@ -310,15 +336,16 @@ def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) ->
             rub["prioridade_revisao"] = rub.apply(_prioridade_rubrica, axis=1)
             rub["observacao"] = rub.apply(_observacao_rubrica, axis=1)
         resumo_rows = []
+        metricas = _metricas_movimentos(conn)
         def scalar(sql: str): return conn.execute(sql).fetchone()[0]
         resumo_rows.extend([
             {"indicador":"Rubricas únicas no S-1200","valor":len(rub)},
             {"indicador":"Rubricas com incidência CP","valor":int((rub.get("status_cp",pd.Series(dtype=str))=="Incide CP").sum())},
             {"indicador":"Rubricas sem incidência CP","valor":int((rub.get("status_cp",pd.Series(dtype=str))=="Não incide CP").sum())},
             {"indicador":"Rubricas sem S-1010","valor":int((rub.get("status_cp",pd.Series(dtype=str))=="Sem S-1010").sum())},
-            {"indicador":"Valor total S-1200","valor":float(scalar("SELECT COALESCE(SUM(CAST(vr_rubr AS REAL)),0) FROM rel_movimentos_cp"))},
-            {"indicador":"Valor com incidência CP","valor":float(scalar("SELECT COALESCE(SUM(CAST(vr_rubr AS REAL)),0) FROM rel_movimentos_cp WHERE considerado_cp='Sim'"))},
-            {"indicador":"Valor sem incidência CP","valor":float(scalar("SELECT COALESCE(SUM(CAST(vr_rubr AS REAL)),0) FROM rel_movimentos_cp WHERE status_cp='Não incide CP'"))},
+            {"indicador":"Valor total S-1200","valor":float(metricas["valor_total"])},
+            {"indicador":"Valor com incidência CP","valor":float(metricas["valor_incide"])},
+            {"indicador":"Valor sem incidência CP","valor":float(metricas["valor_nao_incide"])},
             {"indicador":"Linhas S-5001 detalhadas","valor":int(scalar("SELECT COUNT(*) FROM dados_bases_trabalhador"))},
         ])
         return {
@@ -329,11 +356,11 @@ def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) ->
             "sem_cadastro": pd.read_sql_query(f"SELECT * FROM rel_sem_s1010 ORDER BY valor_rubrica DESC LIMIT {int(limite_previa)}", conn),
             "s5001_resumo": pd.read_sql_query(f"SELECT * FROM rel_s5001_resumo LIMIT {int(limite_previa)}", conn),
             "controle_integridade": pd.read_sql_query("SELECT * FROM rel_controle_integridade", conn),
-            "total_movimentos_cp": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp")),
-            "total_movimentos_cp_padrao": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE status_cp='Incide CP'")),
-            "total_movimentos_analise_prioritaria": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE status_cp IN ('Incide CP','Revisar codIncCP')")),
-            "total_movimentos_classificados": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE status_cp IN ('Incide CP','Não incide CP','Revisar codIncCP')")),
-            "total_movimentos_sem_s1010": int(scalar("SELECT COUNT(*) FROM rel_movimentos_cp WHERE status_cp='Sem S-1010'")),
+            "total_movimentos_cp": int(metricas["total"]),
+            "total_movimentos_cp_padrao": int(metricas["qtd_padrao"]),
+            "total_movimentos_analise_prioritaria": int(metricas["qtd_prioritaria"]),
+            "total_movimentos_classificados": int(metricas["qtd_classificados"]),
+            "total_movimentos_sem_s1010": int(metricas["qtd_sem_s1010"]),
         }
     finally:
         conn.close()
@@ -414,6 +441,19 @@ def gerar_excel_saida_sqlite(
     conn.execute("PRAGMA cache_size = -262144")
     try:
         filtro = _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp)
+        metricas = _metricas_movimentos(conn)
+        totais_controle = {
+            str(tabela): int(quantidade)
+            for tabela, quantidade in conn.execute(
+                "SELECT tabela,quantidade FROM rel_controle_integridade"
+            )
+        }
+        totais_modo = {
+            "todos": int(metricas["total"]),
+            "incidencia_cp_padrao": int(metricas["qtd_padrao"]),
+            "analise_prioritaria": int(metricas["qtd_prioritaria"]),
+            "classificados": int(metricas["qtd_classificados"]),
+        }
         fontes = [
             FontePlanilha("00_empresa", dataframe=df_empresa),
             FontePlanilha("01_resumo", dataframe=df_resumo_visual),
@@ -421,6 +461,9 @@ def gerar_excel_saida_sqlite(
             FontePlanilha(
                 "03_movimentos_cp",
                 query="SELECT * FROM rel_movimentos_cp" + filtro,
+                total_esperado=totais_modo.get(
+                    modo_exportacao_movimentos_cp, int(metricas["total"])
+                ),
             ),
             FontePlanilha(
                 "04_base_trabalhador",
@@ -442,12 +485,18 @@ def gerar_excel_saida_sqlite(
                 else pd.DataFrame(),
             ),
             FontePlanilha("apoio_s1010", query="SELECT * FROM dados_rubricas"),
-            FontePlanilha("apoio_s1200", query="SELECT * FROM rel_movimentos_cp"),
             FontePlanilha(
-                "apoio_s5001", query="SELECT * FROM dados_bases_trabalhador"
+                "apoio_s1200",
+                query="SELECT * FROM rel_movimentos_cp",
+                total_esperado=int(metricas["total"]),
             ),
             FontePlanilha(
-                "apoio_s5011", query="SELECT * FROM dados_bases_contribuicao"
+                "apoio_s5001", query="SELECT * FROM dados_bases_trabalhador",
+                total_esperado=totais_controle.get("dados_bases_trabalhador"),
+            ),
+            FontePlanilha(
+                "apoio_s5011", query="SELECT * FROM dados_bases_contribuicao",
+                total_esperado=totais_controle.get("dados_bases_contribuicao"),
             ),
             FontePlanilha("apoio_s3000", query="SELECT * FROM dados_exclusoes"),
             FontePlanilha(
@@ -457,6 +506,7 @@ def gerar_excel_saida_sqlite(
             FontePlanilha(
                 "inventario",
                 query="SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id",
+                total_esperado=totais_controle.get("eventos"),
             ),
             FontePlanilha(
                 "erros_xml", query="SELECT arquivo,erro FROM erros ORDER BY id"
