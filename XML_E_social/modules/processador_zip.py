@@ -40,6 +40,7 @@ BATCH_SEGUNDA_PASSAGEM = 250
 MAX_BYTES_LOTE_SEGUNDA_PASSAGEM = 32 * 1024 * 1024
 MAX_NIVEL_ZIP = 8
 MAX_XML_INDIVIDUAL = 256 * 1024 * 1024
+ARQUIVO_BLOQUEIO_WORKSPACE = ".processamento.lock"
 
 
 def _progresso(callback: ProgressCallback | None, valor: float, mensagem: str) -> None:
@@ -63,6 +64,51 @@ def _nome_seguro(nome: str) -> str:
     return "".join(c if c.isalnum() or c in "._-[]" else "_" for c in str(nome))[-180:] or "arquivo"
 
 
+def _adquirir_bloqueio_workspace(workspace: Path):
+    """Impede duas escritas concorrentes no mesmo Workspace.
+
+    O arquivo permanece vazio/inofensivo; a trava pertence ao processo e e
+    liberada automaticamente pelo sistema operacional se o app for encerrado.
+    """
+    workspace.mkdir(parents=True, exist_ok=True)
+    caminho = workspace / ARQUIVO_BLOQUEIO_WORKSPACE
+    arquivo = caminho.open("a+b")
+    try:
+        arquivo.seek(0, os.SEEK_END)
+        if arquivo.tell() == 0:
+            arquivo.write(b"0")
+            arquivo.flush()
+        arquivo.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(arquivo.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(arquivo.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return arquivo
+    except OSError as exc:
+        arquivo.close()
+        raise RuntimeError(
+            "Este Workspace já está sendo processado por outra instância do "
+            "aplicativo. Feche a execução anterior e tente novamente."
+        ) from exc
+
+
+def _liberar_bloqueio_workspace(arquivo) -> None:
+    if arquivo is None or arquivo.closed:
+        return
+    try:
+        arquivo.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(arquivo.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(arquivo.fileno(), fcntl.LOCK_UN)
+    finally:
+        arquivo.close()
+
+
 def _conectar(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=120)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -72,6 +118,17 @@ def _conectar(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA temp_store=FILE")
     conn.execute("PRAGMA cache_size=-131072")
     conn.execute("PRAGMA busy_timeout=120000")
+    return conn
+
+
+def _conectar_somente_leitura(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        f"file:{db_path.resolve().as_posix()}?mode=ro",
+        uri=True,
+        timeout=5,
+    )
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -716,8 +773,7 @@ def listar_processamentos_interrompidos() -> list[dict]:
         if not db.exists():
             continue
         try:
-            conn = _conectar(db)
-            _criar_schema(conn)
+            conn = _conectar_somente_leitura(db)
             status = _meta_get(conn, "status", "interrompido")
             if status != "concluido":
                 total = conn.execute("SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos").fetchone()[0]
@@ -761,7 +817,7 @@ def limpar_workspaces_temporarios_antigos() -> dict:
                     db = pasta / "processamento.db"
                     try:
                         if db.exists():
-                            conn = _conectar(db)
+                            conn = _conectar_somente_leitura(db)
                             status = _meta_get(conn, "status", "interrompido")
                             conn.close()
                             if status != "concluido":
@@ -815,8 +871,7 @@ def _workspace_interrompido_por_assinatura(assinatura: str) -> Path | None:
             continue
         conn = None
         try:
-            conn = _conectar(db)
-            _criar_schema(conn)
+            conn = _conectar_somente_leitura(db)
             if _meta_get(conn, "assinatura_fontes", "") != assinatura:
                 continue
             if _meta_get(conn, "status", "") == "concluido":
@@ -899,8 +954,13 @@ def atualizar_workspace_incremental(
 ) -> Dict[str, object]:
     """Adiciona XMLs ao mesmo Workspace, com SHA-256, histórico e retomada."""
     workspace, db_path = _resolver_workspace_existente(workspace_ou_db)
-    conn = _conectar(db_path)
-    _criar_schema(conn)
+    bloqueio = _adquirir_bloqueio_workspace(workspace)
+    try:
+        conn = _conectar(db_path)
+        _criar_schema(conn)
+    except BaseException:
+        _liberar_bloqueio_workspace(bloqueio)
+        raise
     assinatura = ""
     fontes_lista: list[Fonte] = []
     if fontes is not None:
@@ -1002,6 +1062,7 @@ def atualizar_workspace_incremental(
         raise
     finally:
         conn.close()
+        _liberar_bloqueio_workspace(bloqueio)
 
     resultado = carregar_resultado_sqlite_existente(db_path)
     resultado["carga_incremental"] = obter_resumo_carga_incremental(db_path, id_carga)
@@ -1050,8 +1111,13 @@ def processar_fontes_esocial(
             workspace.mkdir(parents=True, exist_ok=False)
 
     db_path = workspace / "processamento.db"
-    conn = _conectar(db_path)
-    _criar_schema(conn)
+    bloqueio = _adquirir_bloqueio_workspace(workspace)
+    try:
+        conn = _conectar(db_path)
+        _criar_schema(conn)
+    except BaseException:
+        _liberar_bloqueio_workspace(bloqueio)
+        raise
     try:
         if not retomando:
             if not fontes_lista:
@@ -1155,6 +1221,7 @@ def processar_fontes_esocial(
         raise
     finally:
         conn.close()
+        _liberar_bloqueio_workspace(bloqueio)
 
 
 def processar_zip_esocial(zip_bytes: bytes, progress_callback: ProgressCallback | None = None) -> Dict[str, object]:

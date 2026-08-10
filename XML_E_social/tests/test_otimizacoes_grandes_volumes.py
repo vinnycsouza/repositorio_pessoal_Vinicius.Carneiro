@@ -5,11 +5,28 @@ import zlib
 from pathlib import Path
 from unittest.mock import patch
 
-from modules.processador_zip import _segunda_passagem
+from modules.processador_zip import (
+    _adquirir_bloqueio_workspace,
+    _liberar_bloqueio_workspace,
+    _segunda_passagem,
+)
 from modules.sqlite_relatorio import _metricas_movimentos, carregar_pacote_resumido
 
 
 class OtimizacoesGrandesVolumesTest(unittest.TestCase):
+    def test_workspace_rejeita_segunda_escrita_e_libera_depois(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            workspace = Path(pasta) / "workspace"
+            primeiro = _adquirir_bloqueio_workspace(workspace)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "outra instância"):
+                    _adquirir_bloqueio_workspace(workspace)
+            finally:
+                _liberar_bloqueio_workspace(primeiro)
+
+            segundo = _adquirir_bloqueio_workspace(workspace)
+            _liberar_bloqueio_workspace(segundo)
+
     def test_lote_por_bytes_processa_todos_os_eventos_sem_saltar(self):
         conn = sqlite3.connect(":memory:")
         try:
