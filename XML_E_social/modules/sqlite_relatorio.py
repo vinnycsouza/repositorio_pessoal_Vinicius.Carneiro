@@ -25,6 +25,7 @@ from modules.auditoria import (
     entra_base_cp,
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
+from modules.progresso import emitir_progresso
 
 ProgressCallback = Callable[[float, str], None]
 MAX_DADOS_ABA = 1_048_575
@@ -111,6 +112,11 @@ def materializar_tabelas_analiticas(
     }
     total_payloads = max(sum(totais.values()), 1)
     feitos_global = 0
+    emitir_progresso(
+        progress_callback, "materializacao", 0.0,
+        "Preparando tabelas analíticas no SQLite...",
+        f"{total_payloads:,} blocos persistidos serão verificados.".replace(",", "."),
+    )
 
     for categoria, tabela in categorias:
         chave = f"materializado_{categoria}_ate"
@@ -159,8 +165,11 @@ def materializar_tabelas_analiticas(
                 )
                 conn.commit()
                 payloads_desde_commit = 0
-                _progresso(progress_callback, 0.02 + 0.58 * feitos_global / total_payloads,
-                           f"Consolidação segura: {categoria} — {feitos_global:,} blocos persistidos".replace(",", "."))
+                emitir_progresso(
+                    progress_callback, "materializacao", feitos_global / total_payloads,
+                    f"Materialização segura: {categoria} — {feitos_global:,} blocos persistidos".replace(",", "."),
+                    f"{feitos_global:,} de {total_payloads:,} blocos persistidos".replace(",", "."),
+                )
         if buffer:
             marks = ",".join("?" for _ in colunas)
             conn.executemany(
@@ -173,7 +182,15 @@ def materializar_tabelas_analiticas(
             )
             conn.commit()
 
+    emitir_progresso(
+        progress_callback, "materializacao", 0.98,
+        "Criando índices para acelerar as consultas...",
+    )
     _criar_indices(conn)
+    emitir_progresso(
+        progress_callback, "materializacao", 1.0,
+        "Materialização analítica concluída.",
+    )
     _criar_tabelas_relatorio(conn, progress_callback)
 
 
@@ -215,7 +232,10 @@ def _criar_indices(conn: sqlite3.Connection) -> None:
 
 
 def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | None) -> None:
-    _progresso(cb, 0.64, "Consolidando rubricas e totais diretamente no SQLite...")
+    emitir_progresso(
+        cb, "consolidacao", 0.0,
+        "Consolidando rubricas e totais diretamente no SQLite...",
+    )
     conn.executescript("""
     DROP TABLE IF EXISTS rel_movimentos_cp;
     CREATE TABLE rel_movimentos_cp AS
@@ -289,7 +309,14 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
     WHERE t.cpf IS NULL;
     """)
     conn.commit()
-    _progresso(cb, 0.88, "Criando controles de integridade do relatório...")
+    emitir_progresso(
+        cb, "consolidacao", 1.0,
+        "Consolidações dos relatórios concluídas.",
+    )
+    emitir_progresso(
+        cb, "integridade", 0.0,
+        "Criando controles de integridade do relatório...",
+    )
     conn.executescript("""
     DROP TABLE IF EXISTS rel_controle_integridade;
     CREATE TABLE rel_controle_integridade AS
@@ -299,7 +326,11 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
     UNION ALL SELECT 'eventos', COUNT(*), COALESCE(SUM(tamanho_bytes),0) FROM eventos;
     """)
     conn.commit()
-    _progresso(cb, 0.95, "Consolidação SQLite concluída sem carregar bases gigantes na memória.")
+    emitir_progresso(
+        cb, "integridade", 1.0,
+        "Controles de integridade concluídos.",
+        "Consolidação SQLite concluída sem carregar bases gigantes na memória.",
+    )
 
 
 def _metricas_movimentos(conn: sqlite3.Connection) -> dict[str, float | int]:

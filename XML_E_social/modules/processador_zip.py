@@ -29,6 +29,7 @@ from modules.sqlite_relatorio import (
     carregar_pacote_resumido,
     reiniciar_materializacao_analitica,
 )
+from modules.progresso import emitir_progresso
 
 Fonte = Tuple[str, Union[bytes, bytearray, memoryview, str, os.PathLike]]
 ProgressCallback = Callable[[float, str], None]
@@ -43,9 +44,61 @@ MAX_XML_INDIVIDUAL = 256 * 1024 * 1024
 ARQUIVO_BLOQUEIO_WORKSPACE = ".processamento.lock"
 
 
-def _progresso(callback: ProgressCallback | None, valor: float, mensagem: str) -> None:
-    if callback:
-        callback(max(0.0, min(1.0, float(valor))), mensagem)
+def _progresso(
+    callback: ProgressCallback | None,
+    etapa: str,
+    valor_etapa: float,
+    mensagem: str,
+    detalhes: str = "",
+) -> None:
+    emitir_progresso(callback, etapa, valor_etapa, mensagem, detalhes)
+
+
+def _formatar_bytes(valor: float) -> str:
+    unidades = ("B", "KB", "MB", "GB", "TB")
+    numero = max(0.0, float(valor))
+    for unidade in unidades:
+        if numero < 1024 or unidade == unidades[-1]:
+            return f"{numero:.1f} {unidade}"
+        numero /= 1024
+    return f"{numero:.1f} TB"
+
+
+def _formatar_tempo(segundos: float | None) -> str:
+    if segundos is None or segundos < 0:
+        return "calculando"
+    total = int(segundos)
+    horas, resto = divmod(total, 3600)
+    minutos, secs = divmod(resto, 60)
+    if horas:
+        return f"{horas}h {minutos:02d}min"
+    if minutos:
+        return f"{minutos}min {secs:02d}s"
+    return f"{secs}s"
+
+
+def _fracao_ingestao_descoberta(
+    conn: sqlite3.Connection,
+    fonte_atual: int | None = None,
+    fracao_atual: float = 0.0,
+    id_carga: int | None = None,
+) -> float:
+    filtro = " WHERE id_carga=?" if id_carga is not None else ""
+    params = (id_carga,) if id_carga is not None else ()
+    linhas = conn.execute(
+        "SELECT id,status,MAX(COALESCE(tamanho_bytes,0),1) FROM fontes" + filtro,
+        params,
+    ).fetchall()
+    if not linhas:
+        return 0.0
+    total = sum(int(linha[2]) for linha in linhas)
+    feitos = 0.0
+    for fonte_id, status, peso in linhas:
+        if status in {"concluida", "erro"}:
+            feitos += int(peso)
+        elif fonte_atual is not None and int(fonte_id) == int(fonte_atual):
+            feitos += int(peso) * max(0.0, min(1.0, fracao_atual))
+    return feitos / max(total, 1)
 
 
 def _base_workspaces() -> Path:
@@ -564,6 +617,16 @@ def _ingerir_fontes(
     progress_callback: ProgressCallback | None,
     id_carga: int | None = None,
 ) -> None:
+    inicio_ingestao = time.perf_counter()
+    xml_inicio = int(conn.execute(
+        "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
+    ).fetchone()[0])
+    _progresso(
+        progress_callback, "ingestao",
+        _fracao_ingestao_descoberta(conn, id_carga=id_carga),
+        "Preparando a ingestão das fontes no SQLite...",
+        "Inventariando as fontes e retomando os checkpoints disponíveis.",
+    )
     while True:
         filtro_carga = " AND id_carga=?" if id_carga is not None else ""
         params = (id_carga,) if id_carga is not None else ()
@@ -587,6 +650,15 @@ def _ingerir_fontes(
                 _processar_xml_ingestao(conn, str(prefixo), caminho.read_bytes(), caminho.stat().st_size, id_carga)
                 conn.execute("UPDATE fontes SET ultimo_indice=0, total_membros=1, status='concluida' WHERE id=?", (fonte_id,))
                 conn.commit()
+                fracao = _fracao_ingestao_descoberta(conn, id_carga=id_carga)
+                total_eventos = int(conn.execute(
+                    "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
+                ).fetchone()[0])
+                _progresso(
+                    progress_callback, "ingestao", fracao,
+                    f"XML individual catalogado: {nome}",
+                    f"{total_eventos:,} XMLs catalogados até agora".replace(",", "."),
+                )
             continue
 
         try:
@@ -596,6 +668,11 @@ def _ingerir_fontes(
                 conn.execute("UPDATE fontes SET total_membros=?, status='processando' WHERE id=?", (total, fonte_id))
                 conn.commit()
                 inicio = max(int(ultimo_indice) + 1, 0)
+                total_bytes = sum(max(0, int(info.file_size)) for info in infos)
+                bytes_concluidos = sum(max(0, int(info.file_size)) for info in infos[:inicio])
+                bytes_inicio = bytes_concluidos
+                inicio_fonte = time.perf_counter()
+                ultima_atualizacao_visual = 0.0
                 for indice in range(inicio, total):
                     info = infos[indice]
                     if not info.is_dir():
@@ -615,15 +692,41 @@ def _ingerir_fontes(
                                         )
                             except Exception as exc:
                                 conn.execute("INSERT INTO erros(arquivo, erro) VALUES (?, ?)", (caminho_logico, str(exc)))
-                    if indice % CHECKPOINT_INTERVALO == 0 or indice == total - 1:
+                    bytes_concluidos += max(0, int(info.file_size))
+                    agora_visual = time.perf_counter()
+                    checkpoint = indice % CHECKPOINT_INTERVALO == 0 or indice == total - 1
+                    if checkpoint:
                         conn.execute("UPDATE fontes SET ultimo_indice=? WHERE id=?", (indice, fonte_id))
                         _meta_set(conn, "fase", "ingestao")
                         _meta_set(conn, "atualizado_em", time.time())
                         conn.commit()
+                    if checkpoint or agora_visual - ultima_atualizacao_visual >= 1.0:
+                        ultima_atualizacao_visual = agora_visual
                         total_eventos = conn.execute("SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos").fetchone()[0]
+                        fracao_fonte = (indice + 1) / max(total, 1)
+                        fracao_ingestao = _fracao_ingestao_descoberta(
+                            conn, fonte_id, fracao_fonte, id_carga,
+                        )
+                        decorrido_fonte = max(agora_visual - inicio_fonte, 0.001)
+                        decorrido_total = max(agora_visual - inicio_ingestao, 0.001)
+                        itens_feitos = indice + 1 - inicio
+                        bytes_feitos = max(0, bytes_concluidos - bytes_inicio)
+                        velocidade_itens = itens_feitos / decorrido_fonte
+                        velocidade_bytes = bytes_feitos / decorrido_fonte
+                        restantes = max(total - indice - 1, 0)
+                        eta = restantes / velocidade_itens if velocidade_itens > 0 else None
+                        detalhes = (
+                            f"Fonte: {Path(str(nome)).name} | "
+                            f"itens {indice + 1:,}/{total:,} | "
+                            f"{_formatar_bytes(bytes_concluidos)}/{_formatar_bytes(total_bytes)} | "
+                            f"{int(total_eventos):,} XMLs catalogados | "
+                            f"{velocidade_itens:,.1f} itens/s | {_formatar_bytes(velocidade_bytes)}/s | "
+                            f"decorrido {_formatar_tempo(decorrido_total)} | ETA da fonte {_formatar_tempo(eta)}"
+                        ).replace(",", ".")
                         _progresso(
-                            progress_callback, 0.05 + 0.48 * ((indice + 1) / max(total, 1)),
-                            f"Ingestão SQLite: {indice + 1:,} de {total:,} itens da fonte atual; {total_eventos:,} XMLs catalogados".replace(",", "."),
+                            progress_callback, "ingestao", fracao_ingestao,
+                            f"Lendo {Path(str(nome)).name}: {indice + 1:,} de {total:,} itens".replace(",", "."),
+                            detalhes,
                         )
                 conn.execute("UPDATE fontes SET status='concluida' WHERE id=?", (fonte_id,))
                 conn.commit()
@@ -631,6 +734,18 @@ def _ingerir_fontes(
             conn.execute("UPDATE fontes SET status='erro' WHERE id=?", (fonte_id,))
             conn.execute("INSERT INTO erros(arquivo, erro) VALUES (?, ?)", (str(prefixo), f"ZIP inválido ou inacessível: {exc}"))
             conn.commit()
+    total_eventos = int(conn.execute(
+        "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
+    ).fetchone()[0])
+    _progresso(
+        progress_callback, "ingestao", 1.0,
+        "Ingestão SQLite concluída.",
+        (
+            f"{total_eventos:,} XMLs catalogados; "
+            f"{max(total_eventos - xml_inicio, 0):,} nesta execução; "
+            f"tempo {_formatar_tempo(time.perf_counter() - inicio_ingestao)}."
+        ).replace(",", "."),
+    )
 
 
 def _segunda_passagem(conn: sqlite3.Connection, progress_callback: ProgressCallback | None) -> None:
@@ -648,6 +763,12 @@ def _segunda_passagem(conn: sqlite3.Connection, progress_callback: ProgressCallb
             "ESOCIAL_MAX_BYTES_LOTE_SEGUNDA_PASSAGEM",
             str(MAX_BYTES_LOTE_SEGUNDA_PASSAGEM),
         )),
+    )
+    inicio_etapa = time.perf_counter()
+    _progresso(
+        progress_callback, "segunda_passagem", concluidos / max(total, 1),
+        "Iniciando ou retomando a segunda passagem...",
+        f"{concluidos:,} de {total:,} eventos relevantes já processados".replace(",", "."),
     )
 
     while True:
@@ -691,10 +812,18 @@ def _segunda_passagem(conn: sqlite3.Connection, progress_callback: ProgressCallb
         _meta_set(conn, "atualizado_em", time.time())
         conn.commit()
         _progresso(
-            progress_callback,
-            0.55 + 0.38 * (concluidos / max(total, 1)),
+            progress_callback, "segunda_passagem", concluidos / max(total, 1),
             f"Segunda passagem SQLite: {concluidos:,} de {total:,} eventos relevantes".replace(",", "."),
+            (
+                f"{concluidos:,}/{total:,} eventos | "
+                f"decorrido {_formatar_tempo(time.perf_counter() - inicio_etapa)}"
+            ).replace(",", "."),
         )
+    _progresso(
+        progress_callback, "segunda_passagem", 1.0,
+        "Segunda passagem concluída.",
+        f"{total:,} eventos relevantes conferidos.".replace(",", "."),
+    )
 
 
 def _dataframe_objetos(conn: sqlite3.Connection, categoria: str, dataclass_obj: bool = True) -> pd.DataFrame:
@@ -998,7 +1127,7 @@ def atualizar_workspace_incremental(
         conn.commit()
 
         _progresso(
-            progress_callback, 0.02,
+            progress_callback, "preparacao", 1.0,
             "Retomando carga incremental pelo checkpoint SQLite..." if retomando
             else "Iniciando carga incremental no Workspace existente...",
         )
@@ -1016,7 +1145,10 @@ def atualizar_workspace_incremental(
             "SELECT COUNT(*) FROM eventos WHERE id_carga=? AND ind_retif='2'", (id_carga,)
         ).fetchone()[0])
         if novos_s1010:
-            _progresso(progress_callback, 0.54, "Reaplicando vigências S-1010 à base acumulada...")
+            _progresso(
+                progress_callback, "segunda_passagem", 0.0,
+                "Reaplicando vigências S-1010 à base acumulada...",
+            )
             conn.execute(
                 "DELETE FROM objetos WHERE categoria='remuneracoes' AND evento_id IN "
                 "(SELECT id FROM eventos WHERE tipo='S-1200')"
@@ -1034,7 +1166,10 @@ def atualizar_workspace_incremental(
             reiniciar_materializacao_analitica(conn)
         _meta_set(conn, "fase", "carga_incremental_consolidacao")
         conn.commit()
-        _progresso(progress_callback, 0.94, "Recalculando consolidações da base acumulada...")
+        _progresso(
+            progress_callback, "materializacao", 0.0,
+            "Recalculando consolidações da base acumulada...",
+        )
         inicio_etapa = time.perf_counter()
         materializar_tabelas_analiticas(conn, progress_callback=progress_callback)
         _registrar_duracao(conn, "consolidacao_incremental", inicio_etapa)
@@ -1132,8 +1267,7 @@ def processar_fontes_esocial(
         conn.commit()
 
         _progresso(
-            progress_callback,
-            0.01,
+            progress_callback, "preparacao", 1.0,
             "Retomando processamento interrompido pelo checkpoint SQLite..." if retomando
             else "Criando workspace persistente e banco SQLite...",
         )
@@ -1145,14 +1279,16 @@ def processar_fontes_esocial(
             _meta_set(conn, "fase", "segunda_passagem")
             conn.commit()
 
-        _progresso(progress_callback, 0.55, "Iniciando ou retomando a segunda passagem...")
         inicio_etapa = time.perf_counter()
         _segunda_passagem(conn, progress_callback)
         _registrar_duracao(conn, "segunda_passagem", inicio_etapa)
 
         _meta_set(conn, "fase", "consolidacao_sqlite")
         conn.commit()
-        _progresso(progress_callback, 0.94, "Consolidando o relatório no SQLite sem carregar bases gigantes na memória...")
+        _progresso(
+            progress_callback, "materializacao", 0.0,
+            "Consolidando o relatório no SQLite sem carregar bases gigantes na memória...",
+        )
         inicio_etapa = time.perf_counter()
         materializar_tabelas_analiticas(conn, progress_callback=progress_callback)
         _registrar_duracao(conn, "consolidacao", inicio_etapa)
@@ -1212,7 +1348,10 @@ def processar_fontes_esocial(
         _meta_set(conn, "status", "concluido")
         _meta_set(conn, "atualizado_em", time.time())
         conn.commit()
-        _progresso(progress_callback, 1.0, "Processamento concluído. Workspace preservado para auditoria.")
+        _progresso(
+            progress_callback, "finalizacao", 1.0,
+            "Processamento concluído. Workspace preservado para auditoria.",
+        )
         return resultado
     except BaseException:
         _meta_set(conn, "status", "interrompido")

@@ -392,13 +392,24 @@ with st.sidebar:
                                 st.error("Selecione ao menos um ZIP/XML complementar.")
                                 st.stop()
                             st.markdown("### Atualização incremental do Workspace")
-                            barra_inc = st.progress(0, text="Iniciando...")
+                            barra_etapa_inc = st.progress(0, text="Etapa atual — aguardando início...")
+                            barra_inc = st.progress(0, text="Progresso geral — 0%")
                             status_inc = st.empty()
+                            estado_progresso_inc = {"maior_geral": 0.0}
 
-                            def atualizar_inc(valor: float, mensagem: str):
-                                percentual = max(0, min(100, int(round(float(valor) * 100))))
-                                barra_inc.progress(percentual, text=f"{percentual}% — {mensagem}")
-                                status_inc.caption(mensagem)
+                            def atualizar_inc(valor: float, mensagem: str, info=None):
+                                estado_progresso_inc["maior_geral"] = max(
+                                    estado_progresso_inc["maior_geral"], float(valor)
+                                )
+                                geral = max(0, min(100, int(round(estado_progresso_inc["maior_geral"] * 100))))
+                                etapa = geral if info is None else int(round(info.percentual_etapa * 100))
+                                titulo_etapa = "Etapa atual" if info is None else info.titulo_etapa
+                                detalhes = mensagem if info is None else (info.detalhes or mensagem)
+                                barra_etapa_inc.progress(etapa, text=f"{titulo_etapa} — {etapa}%")
+                                barra_inc.progress(geral, text=f"Progresso geral — {geral}%")
+                                status_inc.caption(detalhes)
+
+                            atualizar_inc._suporta_progresso_detalhado = True
 
                             try:
                                 resultado_atualizado = atualizar_workspace_incremental(
@@ -516,15 +527,32 @@ def executar_processamento(fontes, progress_callback=None):
 
 def _criar_progresso(titulo: str):
     st.markdown(f"### {titulo}")
-    barra = st.progress(0, text="Iniciando...")
+    barra_etapa = st.progress(0, text="Etapa atual — aguardando início...")
+    barra_geral = st.progress(0, text="Progresso geral — 0%")
     status = st.empty()
+    maior_geral = 0.0
 
-    def atualizar(valor: float, mensagem: str):
-        percentual = max(0, min(100, int(round(float(valor) * 100))))
-        barra.progress(percentual, text=f"{percentual}% — {mensagem}")
-        status.caption(mensagem)
+    def atualizar(valor: float, mensagem: str, info=None):
+        nonlocal maior_geral
+        maior_geral = max(maior_geral, max(0.0, min(1.0, float(valor))))
+        percentual_geral = int(round(maior_geral * 100))
+        if info is None:
+            percentual_etapa = percentual_geral
+            titulo_etapa = "Etapa atual"
+            detalhes = mensagem
+        else:
+            percentual_etapa = int(round(info.percentual_etapa * 100))
+            titulo_etapa = info.titulo_etapa
+            detalhes = info.detalhes or mensagem
+        barra_etapa.progress(
+            percentual_etapa,
+            text=f"{titulo_etapa} — {percentual_etapa}%",
+        )
+        barra_geral.progress(percentual_geral, text=f"Progresso geral — {percentual_geral}%")
+        status.caption(detalhes)
 
-    return atualizar, barra, status
+    atualizar._suporta_progresso_detalhado = True
+    return atualizar, barra_geral, status
 
 
 @st.cache_data(show_spinner=False)
