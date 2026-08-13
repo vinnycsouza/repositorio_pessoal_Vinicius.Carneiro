@@ -77,28 +77,86 @@ def _formatar_tempo(segundos: float | None) -> str:
     return f"{secs}s"
 
 
-def _fracao_ingestao_descoberta(
+def _resumo_fontes_descobertas(
     conn: sqlite3.Connection,
     fonte_atual: int | None = None,
     fracao_atual: float = 0.0,
     id_carga: int | None = None,
-) -> float:
+) -> dict[str, int | float]:
     filtro = " WHERE id_carga=?" if id_carga is not None else ""
     params = (id_carga,) if id_carga is not None else ()
     linhas = conn.execute(
         "SELECT id,status,MAX(COALESCE(tamanho_bytes,0),1) FROM fontes" + filtro,
         params,
     ).fetchall()
-    if not linhas:
-        return 0.0
-    total = sum(int(linha[2]) for linha in linhas)
-    feitos = 0.0
+    resumo: dict[str, int | float] = {
+        "descobertas": len(linhas),
+        "concluidas": 0,
+        "pendentes": 0,
+        "processando": 0,
+        "erros": 0,
+        "faltam": 0,
+        "volume_descoberto": 0,
+        "volume_concluido": 0,
+        "volume_restante": 0,
+        "volume_erro": 0,
+        "fracao": 0.0,
+    }
+    fracao_atual = max(0.0, min(1.0, float(fracao_atual)))
+    volume_processado = 0.0
     for fonte_id, status, peso in linhas:
-        if status in {"concluida", "erro"}:
-            feitos += int(peso)
-        elif fonte_atual is not None and int(fonte_id) == int(fonte_atual):
-            feitos += int(peso) * max(0.0, min(1.0, fracao_atual))
-    return feitos / max(total, 1)
+        peso = int(peso)
+        resumo["volume_descoberto"] += peso
+        if status == "concluida":
+            resumo["concluidas"] += 1
+            resumo["volume_concluido"] += peso
+            volume_processado += peso
+        elif status == "erro":
+            resumo["erros"] += 1
+            resumo["volume_erro"] += peso
+            # Fonte já tentada não permanece pendente; conserva o avanço da barra.
+            volume_processado += peso
+        elif status == "processando":
+            resumo["processando"] += 1
+            resumo["faltam"] += 1
+            if fonte_atual is not None and int(fonte_id) == int(fonte_atual):
+                volume_processado += peso * fracao_atual
+                resumo["volume_restante"] += int(round(peso * (1.0 - fracao_atual)))
+            else:
+                resumo["volume_restante"] += peso
+        else:
+            resumo["pendentes"] += 1
+            resumo["faltam"] += 1
+            resumo["volume_restante"] += peso
+    total = int(resumo["volume_descoberto"])
+    resumo["fracao"] = volume_processado / max(total, 1)
+    return resumo
+
+
+def _fracao_ingestao_descoberta(
+    conn: sqlite3.Connection,
+    fonte_atual: int | None = None,
+    fracao_atual: float = 0.0,
+    id_carga: int | None = None,
+) -> float:
+    resumo = _resumo_fontes_descobertas(
+        conn, fonte_atual, fracao_atual, id_carga,
+    )
+    return float(resumo["fracao"])
+
+
+def _texto_resumo_fontes(resumo: dict[str, int | float]) -> str:
+    texto = (
+        f"fontes descobertas {int(resumo['descobertas']):,} | "
+        f"lidas {int(resumo['concluidas']):,} | "
+        f"faltam {int(resumo['faltam']):,} "
+        f"(pendentes {int(resumo['pendentes']):,}; em leitura {int(resumo['processando']):,}) | "
+        f"com erro {int(resumo['erros']):,} | "
+        f"volume descoberto {_formatar_bytes(float(resumo['volume_descoberto']))} | "
+        f"concluído {_formatar_bytes(float(resumo['volume_concluido']))} | "
+        f"restante conhecido {_formatar_bytes(float(resumo['volume_restante']))}"
+    )
+    return texto.replace(",", ".")
 
 
 def _base_workspaces() -> Path:
@@ -625,7 +683,8 @@ def _ingerir_fontes(
         progress_callback, "ingestao",
         _fracao_ingestao_descoberta(conn, id_carga=id_carga),
         "Preparando a ingestão das fontes no SQLite...",
-        "Inventariando as fontes e retomando os checkpoints disponíveis.",
+        "Inventariando as fontes e retomando os checkpoints disponíveis. "
+        + _texto_resumo_fontes(_resumo_fontes_descobertas(conn, id_carga=id_carga)),
     )
     while True:
         filtro_carga = " AND id_carga=?" if id_carga is not None else ""
@@ -651,13 +710,17 @@ def _ingerir_fontes(
                 conn.execute("UPDATE fontes SET ultimo_indice=0, total_membros=1, status='concluida' WHERE id=?", (fonte_id,))
                 conn.commit()
                 fracao = _fracao_ingestao_descoberta(conn, id_carga=id_carga)
+                resumo_fontes = _resumo_fontes_descobertas(conn, id_carga=id_carga)
                 total_eventos = int(conn.execute(
                     "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
                 ).fetchone()[0])
                 _progresso(
                     progress_callback, "ingestao", fracao,
                     f"XML individual catalogado: {nome}",
-                    f"{total_eventos:,} XMLs catalogados até agora".replace(",", "."),
+                    (
+                        f"{total_eventos:,} XMLs catalogados até agora | "
+                        f"{_texto_resumo_fontes(resumo_fontes)}"
+                    ).replace(",", "."),
                 )
             continue
 
@@ -704,9 +767,10 @@ def _ingerir_fontes(
                         ultima_atualizacao_visual = agora_visual
                         total_eventos = conn.execute("SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos").fetchone()[0]
                         fracao_fonte = (indice + 1) / max(total, 1)
-                        fracao_ingestao = _fracao_ingestao_descoberta(
+                        resumo_fontes = _resumo_fontes_descobertas(
                             conn, fonte_id, fracao_fonte, id_carga,
                         )
+                        fracao_ingestao = float(resumo_fontes["fracao"])
                         decorrido_fonte = max(agora_visual - inicio_fonte, 0.001)
                         decorrido_total = max(agora_visual - inicio_ingestao, 0.001)
                         itens_feitos = indice + 1 - inicio
@@ -721,7 +785,8 @@ def _ingerir_fontes(
                             f"{_formatar_bytes(bytes_concluidos)}/{_formatar_bytes(total_bytes)} | "
                             f"{int(total_eventos):,} XMLs catalogados | "
                             f"{velocidade_itens:,.1f} itens/s | {_formatar_bytes(velocidade_bytes)}/s | "
-                            f"decorrido {_formatar_tempo(decorrido_total)} | ETA da fonte {_formatar_tempo(eta)}"
+                            f"decorrido {_formatar_tempo(decorrido_total)} | ETA da fonte {_formatar_tempo(eta)} | "
+                            f"{_texto_resumo_fontes(resumo_fontes)}"
                         ).replace(",", ".")
                         _progresso(
                             progress_callback, "ingestao", fracao_ingestao,
@@ -737,13 +802,15 @@ def _ingerir_fontes(
     total_eventos = int(conn.execute(
         "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
     ).fetchone()[0])
+    resumo_final = _resumo_fontes_descobertas(conn, id_carga=id_carga)
     _progresso(
         progress_callback, "ingestao", 1.0,
         "Ingestão SQLite concluída.",
         (
             f"{total_eventos:,} XMLs catalogados; "
             f"{max(total_eventos - xml_inicio, 0):,} nesta execução; "
-            f"tempo {_formatar_tempo(time.perf_counter() - inicio_ingestao)}."
+            f"tempo {_formatar_tempo(time.perf_counter() - inicio_ingestao)} | "
+            f"{_texto_resumo_fontes(resumo_final)}."
         ).replace(",", "."),
     )
 
