@@ -19,6 +19,7 @@ from modules.levantamento_sqlite import (
 from modules.processador_zip import (
     atualizar_workspace_incremental,
     obter_resumo_carga_incremental,
+    organizar_fontes_carga_inicial,
     processar_fontes_esocial,
 )
 from modules.sqlite_relatorio import gerar_excel_saida_sqlite
@@ -58,6 +59,52 @@ class CargaIncrementalTest(unittest.TestCase):
         return processar_fontes_esocial(
             [("inicial.zip", zip_xmls(**{"s1200.xml": S1200}))]
         )
+
+    def test_carga_inicial_combina_historico_antes_do_principal_e_recibos(self):
+        fontes = organizar_fontes_carga_inicial(
+            [("[PRINCIPAL] atual.zip", b"atual")],
+            fontes_historico=[("[HISTORICO] antigo.zip", b"antigo")],
+            fontes_recibos=[("[RECIBOS] recibos.zip", b"recibos")],
+        )
+        self.assertEqual(
+            [nome for nome, _ in fontes],
+            [
+                "[HISTORICO] antigo.zip",
+                "[PRINCIPAL] atual.zip",
+                "[RECIBOS] recibos.zip",
+            ],
+        )
+
+    def test_carga_inicial_sem_historico_preserva_fluxo_padrao(self):
+        fontes = organizar_fontes_carga_inicial(
+            [("[PRINCIPAL] atual.zip", b"atual")],
+            fontes_recibos=[("[RECIBOS] recibos.zip", b"recibos")],
+        )
+        self.assertEqual(
+            [nome for nome, _ in fontes],
+            ["[PRINCIPAL] atual.zip", "[RECIBOS] recibos.zip"],
+        )
+
+    def test_carga_historica_preserva_ordem_de_original_e_retificacao(self):
+        fontes = organizar_fontes_carga_inicial(
+            [("[PRINCIPAL] recente.zip", zip_xmls(**{"retificacao.xml": S1200_RETIF}))],
+            fontes_historico=[
+                ("[HISTORICO] antigo.zip", zip_xmls(**{"original.xml": S1200}))
+            ],
+        )
+        resultado = processar_fontes_esocial(fontes)
+        conn = sqlite3.connect(Path(resultado["db_path"]))
+        try:
+            ativos, inativos = conn.execute(
+                "SELECT SUM(ativo=1),SUM(ativo=0) FROM eventos WHERE tipo='S-1200'"
+            ).fetchone()
+            total = conn.execute(
+                "SELECT SUM(CAST(vr_rubr AS REAL)) FROM rel_movimentos_cp"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual((ativos, inativos), (1, 1))
+        self.assertAlmostEqual(total, 250.0)
 
     def test_complemento_novo_permanece_no_mesmo_workspace(self):
         inicial = self._inicial()

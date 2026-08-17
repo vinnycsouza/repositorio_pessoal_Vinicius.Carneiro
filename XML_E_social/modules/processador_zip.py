@@ -20,8 +20,8 @@ import pandas as pd
 
 from modules.parser_xml import (
     BaseContribuicao, BaseTrabalhador, RubricaInfo, RubricaPagamento,
-    detectar_tipo_evento, parse_s1010, parse_s1200, parse_s3000,
-    parse_s5001, parse_s5011, parse_empresa_info, obter_recibo_principal,
+    parse_s1010, parse_s1200, parse_s3000, parse_s5001, parse_s5011,
+    obter_recibo_principal,
 )
 from utils.helpers import localname
 from modules.sqlite_relatorio import (
@@ -30,6 +30,7 @@ from modules.sqlite_relatorio import (
     reiniciar_materializacao_analitica,
 )
 from modules.progresso import emitir_progresso
+from modules.event_metadata import inspecionar_evento
 
 Fonte = Tuple[str, Union[bytes, bytearray, memoryview, str, os.PathLike]]
 ProgressCallback = Callable[[float, str], None]
@@ -42,6 +43,21 @@ MAX_BYTES_LOTE_SEGUNDA_PASSAGEM = 32 * 1024 * 1024
 MAX_NIVEL_ZIP = 8
 MAX_XML_INDIVIDUAL = 256 * 1024 * 1024
 ARQUIVO_BLOQUEIO_WORKSPACE = ".processamento.lock"
+
+
+def organizar_fontes_carga_inicial(
+    fontes_principais: Iterable[Fonte],
+    fontes_historico: Iterable[Fonte] | None = None,
+    fontes_recibos: Iterable[Fonte] | None = None,
+) -> list[Fonte]:
+    """Ordena a carga inicial do periodo mais antigo para o mais recente.
+
+    O historico e opcional. A fonte principal e os recibos conservam o fluxo
+    existente quando ele nao e informado.
+    """
+    return list(fontes_historico or []) + list(fontes_principais) + list(
+        fontes_recibos or []
+    )
 
 
 def _progresso(
@@ -572,9 +588,13 @@ def _processar_xml_ingestao(
             conn.execute("UPDATE historico_cargas SET quantidade_erros=quantidade_erros+1 WHERE id_carga=?", (id_carga,))
         return "erro"
 
-    tipo = detectar_tipo_evento(root)
-    recibo = _eh_retorno_evento_completo(root)
-    id_evento, ind_retif, recibo_evento, recibo_referencia = _metadados_retificacao(root)
+    metadados = inspecionar_evento(root)
+    tipo = metadados.tipo
+    recibo = metadados.envelope_recibo
+    id_evento = metadados.id_evento_esocial
+    ind_retif = metadados.ind_retif
+    recibo_evento = metadados.recibo_evento
+    recibo_referencia = metadados.recibo_referencia
     blob = None
     if tipo in EVENTOS_SEGUNDA_PASSAGEM or tipo == "S-1010":
         blob = sqlite3.Binary(zlib.compress(xml_bytes, level=1))
@@ -612,9 +632,7 @@ def _processar_xml_ingestao(
             )
     _registrar_contagem(conn, tipo)
     if id_carga is not None:
-        periodo = (
-            next((str(el.text or "").strip() for el in root.iter() if localname(el.tag) in {"perApur", "iniValid"} and str(el.text or "").strip()), "")
-        )
+        periodo = metadados.periodo
         conn.execute(
             "UPDATE historico_cargas SET quantidade_xml_novos=quantidade_xml_novos+1,"
             "periodo_minimo_adicionado=CASE WHEN ?<>'' AND (periodo_minimo_adicionado='' OR ?<periodo_minimo_adicionado) THEN ? ELSE periodo_minimo_adicionado END,"
@@ -624,7 +642,12 @@ def _processar_xml_ingestao(
         )
 
     if tipo in EVENTOS_SUPORTADOS:
-        empresa = parse_empresa_info(root, arquivo)
+        empresa = {
+            "arquivo_origem": arquivo,
+            "tp_insc_empregador": metadados.tp_insc_empregador,
+            "cnpj_empregador": metadados.cnpj_empregador,
+            "nome_empresa": metadados.nome_empresa,
+        }
         _salvar_objetos(conn, "empresa", evento_id, empresa)
 
     if tipo == "S-1010":

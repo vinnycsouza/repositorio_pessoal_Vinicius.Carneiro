@@ -3,7 +3,8 @@
 ## 1. Estado do documento
 
 - Tipo: especificação de arquitetura, implementação, migração e aceite.
-- Situação: planejado; nenhuma mudança da V10 está ativa na Engine atual.
+- Situação: implementação incremental iniciada; inspeção estrutural compartilhada do
+  Pacote 1 ativa na ingestão, com equivalência coberta por testes.
 - Base de comparação: V9.5.2/V9.5 com Workspace persistente, carga incremental,
   SQLite, relatório em streaming, Levantamento por Workspace e progresso em duas barras.
 - Fontes técnicas analisadas:
@@ -168,6 +169,11 @@ O progresso visual existente permanecerá. Telemetria será local no Workspace, 
 transmissão externa e sem dados pessoais em nomes de métricas.
 
 ### Pacote 1 — Registro de schema e identificação rápida
+
+Progresso: primeira etapa implementada em 17/08/2026. A ingestão passou a coletar tipo,
+envelope, retificação, recibo, período e identificação do empregador por uma inspeção
+estrutural compartilhada, eliminando varreduras completas redundantes. Registro de
+namespace/versão, corpus de homologação e fallback auditado permanecem pendentes.
 
 - Criar registro de namespace por evento e versão.
 - Identificar `eSocial`, evento interno, retorno/recibo e versão.

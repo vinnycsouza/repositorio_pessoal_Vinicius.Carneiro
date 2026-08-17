@@ -27,6 +27,7 @@ from modules.levantamento_sqlite import (
 from modules.processador_zip import (
     atualizar_workspace_incremental,
     carregar_resultado_sqlite_existente,
+    organizar_fontes_carga_inicial,
     processar_fontes_esocial,
 )
 from modules.sqlite_relatorio import gerar_excel_saida_sqlite
@@ -86,6 +87,8 @@ with st.sidebar:
 
     arquivos_principais = []
     caminhos_principais = []
+    arquivos_historico = []
+    caminhos_historico = []
     arquivos_recibos = []
     caminhos_recibos = []
     arquivo_excel = None
@@ -125,6 +128,44 @@ with st.sidebar:
                 key="caminhos_principais",
             )
             caminhos_principais = [x.strip().strip('"') for x in texto_principal.splitlines() if x.strip()]
+
+        incluir_historico = st.checkbox(
+            "Incluir histórico complementar",
+            value=False,
+            key="incluir_historico_carga_inicial",
+            help=(
+                "Use quando a fonte principal contiver somente os períodos mais "
+                "recentes e você já possuir os arquivos dos períodos anteriores."
+            ),
+        )
+        if incluir_historico:
+            st.caption(
+                "Selecione os períodos anteriores. A Engine processará esse histórico "
+                "antes da fonte principal no mesmo Workspace."
+            )
+            origem_historico = st.radio(
+                "Origem do histórico complementar",
+                ["Upload pelo navegador", "Arquivos/pasta local"],
+                key="origem_historico_carga_inicial",
+            )
+            if origem_historico == "Upload pelo navegador":
+                arquivos_historico = st.file_uploader(
+                    "Selecione ZIP/XML do histórico complementar",
+                    type=["zip", "xml"],
+                    accept_multiple_files=True,
+                    key="arquivos_historico_carga_inicial",
+                )
+            else:
+                texto_historico = st.text_area(
+                    "Caminhos do histórico complementar",
+                    placeholder="C:\\eSocial\\cliente\\historico_2018_2021.zip",
+                    key="caminhos_historico_carga_inicial",
+                )
+                caminhos_historico = [
+                    x.strip().strip('"')
+                    for x in texto_historico.splitlines()
+                    if x.strip()
+                ]
 
         st.markdown("---")
         st.subheader("2. Complementação opcional")
@@ -483,6 +524,7 @@ with st.sidebar:
                                 for chave in [
                                     "resultado_v82",
                                     "fontes_principais_v82",
+                                    "fontes_historico_v82",
                                     "fontes_recibos_v82",
                                     "exibir_workspace_v952",
                                     "confirmar_lixeira_workspace_v952",
@@ -495,7 +537,12 @@ with st.sidebar:
 
     if st.button("Resetar aplicação", use_container_width=True):
         st.cache_data.clear()
-        for chave in ["resultado_v82", "fontes_principais_v82", "fontes_recibos_v82"]:
+        for chave in [
+            "resultado_v82",
+            "fontes_principais_v82",
+            "fontes_historico_v82",
+            "fontes_recibos_v82",
+        ]:
             st.session_state.pop(chave, None)
         st.rerun()
 
@@ -661,19 +708,34 @@ if modo_entrada == "ZIP(s) do eSocial":
     fontes_principais, erros_principais = _resolver_fontes_zip(
         arquivos_principais, caminhos_principais, prefixo="[PRINCIPAL] "
     )
+    fontes_historico, erros_historico = _resolver_fontes_zip(
+        arquivos_historico, caminhos_historico, prefixo="[HISTORICO] "
+    )
     fontes_recibos, erros_recibos = _resolver_fontes_zip(
         arquivos_recibos, caminhos_recibos, prefixo="[RECIBOS] "
     )
-    for erro in erros_principais + erros_recibos:
+    for erro in erros_principais + erros_historico + erros_recibos:
         st.warning(erro)
 
     if gerar_relatorio:
         if not fontes_principais:
             st.warning("Selecione pelo menos um ZIP/XML principal do eSocial.")
             st.stop()
+        if st.session_state.get("incluir_historico_carga_inicial") and not fontes_historico:
+            st.warning(
+                "O modo de histórico complementar está ativo. Selecione pelo menos "
+                "um ZIP/XML histórico ou desative essa opção."
+            )
+            st.stop()
         atualizar_progresso, barra_proc, status_proc = _criar_progresso("Progresso do processamento dos XMLs")
-        st.session_state["resultado_v82"] = executar_processamento(fontes_principais + fontes_recibos, progress_callback=atualizar_progresso)
+        fontes_carga = organizar_fontes_carga_inicial(
+            fontes_principais,
+            fontes_historico=fontes_historico,
+            fontes_recibos=fontes_recibos,
+        )
+        st.session_state["resultado_v82"] = executar_processamento(fontes_carga, progress_callback=atualizar_progresso)
         st.session_state["fontes_principais_v82"] = len(fontes_principais)
+        st.session_state["fontes_historico_v82"] = len(fontes_historico)
         st.session_state["fontes_recibos_v82"] = len(fontes_recibos)
         status_proc.success("Processamento dos XMLs concluído.")
 
