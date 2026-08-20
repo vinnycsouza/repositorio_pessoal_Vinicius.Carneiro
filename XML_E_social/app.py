@@ -16,6 +16,7 @@ from modules.auditoria import (
     preparar_pacote_analitico,
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
+from modules.hud_progresso import extrair_hud_ingestao
 from modules.data_source import SQLiteDataSource, WorkspaceContext
 from modules.levantamento_sqlite import (
     FiltrosLevantamento,
@@ -578,9 +579,72 @@ def _criar_progresso(titulo: str):
     barra_geral = st.progress(0, text="Progresso geral — 0%")
     status = st.empty()
     maior_geral = 0.0
+    hud_ingestao = None
+
+    def criar_hud_ingestao():
+        with st.container(border=True):
+            st.markdown("### Fonte atual")
+            fonte = st.empty()
+            colunas = st.columns(3)
+            itens_lidos = colunas[0].empty()
+            itens_restantes = colunas[1].empty()
+            volume_lido = colunas[2].empty()
+            colunas = st.columns(3)
+            xml_catalogados = colunas[0].empty()
+            ritmo = colunas[1].empty()
+            eta = colunas[2].empty()
+            st.divider()
+            st.markdown("### Total da ingestão")
+            colunas = st.columns(3)
+            fontes_descobertas = colunas[0].empty()
+            fontes_concluidas = colunas[1].empty()
+            fontes_em_leitura = colunas[2].empty()
+            colunas = st.columns(3)
+            fontes_pendentes = colunas[0].empty()
+            fontes_com_erro = colunas[1].empty()
+            volume_restante = colunas[2].empty()
+            observacao = st.empty()
+        return {
+            "fonte": fonte, "itens_lidos": itens_lidos,
+            "itens_restantes": itens_restantes, "volume_lido": volume_lido,
+            "xml_catalogados": xml_catalogados, "ritmo": ritmo, "eta": eta,
+            "fontes_descobertas": fontes_descobertas,
+            "fontes_concluidas": fontes_concluidas,
+            "fontes_em_leitura": fontes_em_leitura,
+            "fontes_pendentes": fontes_pendentes,
+            "fontes_com_erro": fontes_com_erro,
+            "volume_restante": volume_restante, "observacao": observacao,
+        }
+
+    def atualizar_hud(campos):
+        hud_ingestao["fonte"].caption(campos.fonte)
+        hud_ingestao["itens_lidos"].metric("Itens lidos", campos.itens_lidos)
+        hud_ingestao["itens_restantes"].metric("Itens restantes", campos.itens_restantes)
+        hud_ingestao["volume_lido"].metric("Volume lido", campos.volume_lido)
+        hud_ingestao["xml_catalogados"].metric("XMLs catalogados", campos.xml_catalogados)
+        hud_ingestao["ritmo"].metric(
+            "Ritmo",
+            campos.ritmo,
+            help="Ritmo observado na fonte atual; pode variar conforme o tamanho e a complexidade dos XMLs.",
+        )
+        hud_ingestao["eta"].metric("ETA desta fonte", campos.eta)
+        hud_ingestao["fontes_descobertas"].metric("Fontes descobertas", campos.fontes_descobertas)
+        hud_ingestao["fontes_concluidas"].metric("Concluídas", campos.fontes_concluidas)
+        hud_ingestao["fontes_em_leitura"].metric("Em leitura", campos.fontes_em_leitura)
+        hud_ingestao["fontes_pendentes"].metric("Pendentes", campos.fontes_pendentes)
+        hud_ingestao["fontes_com_erro"].metric("Com erro", campos.fontes_com_erro)
+        hud_ingestao["volume_restante"].metric(
+            "Volume restante conhecido",
+            campos.volume_restante,
+            help="Considera as fontes já descobertas. ZIPs aninhados ainda não abertos podem ampliar esse total.",
+        )
+        hud_ingestao["observacao"].caption(
+            f"Tempo decorrido nesta fonte: {campos.tempo_decorrido}. "
+            "A estimativa pode variar conforme o tamanho e a complexidade dos XMLs."
+        )
 
     def atualizar(valor: float, mensagem: str, info=None):
-        nonlocal maior_geral
+        nonlocal maior_geral, hud_ingestao
         maior_geral = max(maior_geral, max(0.0, min(1.0, float(valor))))
         percentual_geral = int(round(maior_geral * 100))
         if info is None:
@@ -596,7 +660,17 @@ def _criar_progresso(titulo: str):
             text=f"{titulo_etapa} — {percentual_etapa}%",
         )
         barra_geral.progress(percentual_geral, text=f"Progresso geral — {percentual_geral}%")
-        status.caption(detalhes)
+        if info is not None and info.etapa == "ingestao":
+            campos = extrair_hud_ingestao(detalhes, mensagem)
+            if campos.fonte != "—":
+                if hud_ingestao is None:
+                    hud_ingestao = criar_hud_ingestao()
+                atualizar_hud(campos)
+                status.empty()
+            else:
+                status.caption(detalhes)
+        else:
+            status.caption(detalhes)
 
     atualizar._suporta_progresso_detalhado = True
     return atualizar, barra_geral, status
