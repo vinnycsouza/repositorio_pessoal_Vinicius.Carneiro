@@ -153,6 +153,15 @@ Identificador rápido (namespace, evento, versão, envelope)
 
 ### Pacote 0 — Linha de base e observabilidade
 
+Status: implementado em 20/08/2026 para a ingestão. As métricas são acumuladas em
+memória e gravadas em `telemetria`/`telemetria_eventos`, nunca uma escrita adicional
+por XML. Inclui tempos de hash, identificação, parse, inspeção, compressão, SQLite,
+commits e ingestão; contagens/bytes por evento; duplicatas; CPU, espera aproximada,
+memória, tamanhos DB/WAL/SHM e versões. As durações das etapas posteriores continuam
+registradas pelas métricas de fase já existentes. Espera de disco direta permanece
+indisponível quando o sistema operacional não a expõe; nesse caso a métrica é
+explicitamente aproximada (`parede - CPU`).
+
 Antes de otimizar, registrar por Workspace e por carga:
 
 - tempo de inventário, ingestão, parsing por evento, compressão, escrita SQLite,
@@ -170,10 +179,12 @@ transmissão externa e sem dados pessoais em nomes de métricas.
 
 ### Pacote 1 — Registro de schema e identificação rápida
 
-Progresso: primeira etapa implementada em 17/08/2026. A ingestão passou a coletar tipo,
-envelope, retificação, recibo, período e identificação do empregador por uma inspeção
-estrutural compartilhada, eliminando varreduras completas redundantes. Registro de
-namespace/versão, corpus de homologação e fallback auditado permanecem pendentes.
+Status: implementado em 20/08/2026. A ingestão coleta tipo, tag interna, namespace,
+versão, envelope, retificação, recibo, período e identificação do empregador. O
+`EventSniffer` fornece uma pista limitada, que só é aceita após concordar com a árvore
+validada; divergência usa o resultado legado e fica registrada. Versões desconhecidas
+são marcadas, mas nunca rejeitadas automaticamente. O corpus automatizado cobre
+namespace atual, fallback, envelopes e versão desconhecida.
 
 - Criar registro de namespace por evento e versão.
 - Identificar `eSocial`, evento interno, retorno/recibo e versão.
@@ -256,6 +267,21 @@ desligamentos. O pacote poderá permanecer desabilitado por feature flag até ho
 Resultado: menos CPU/memória sem sacrificar o inventário.
 
 ### Pacote 8 — Escrita SQLite e lotes adaptativos
+
+Execução reorganizada em blocos independentes:
+
+- **8.1 — caminho rápido de inserção e retomada (implementado em 20/08/2026):** na
+  carga inicial, eliminar o `SELECT` por hash antes de cada XML novo e deixar o índice
+  único resolver colisões; conservar a consulta preventiva nas cargas incrementais,
+  onde duplicatas e reprocessamento S-1010 são esperados; impedir que a abertura de um
+  Workspace já migrado descompacte novamente todos os XML preservados.
+- **8.2 — escritor SQLite centralizado:** encapsular commits, erros e checkpoints.
+- **8.3 — lotes adaptativos:** limitar por itens e bytes, com perfil para 16 GB.
+- **8.4 — ajuste de cache/WAL:** somente após benchmark reproduzível em SSD e HDD.
+- **8.5 — pressão de memória:** reduzir lote automaticamente, sem `temp_store=MEMORY`
+  indiscriminado.
+- **8.6 — paralelismo experimental:** dois parsers e um escritor, atrás de feature
+  flag e somente se equivalência e ganho forem demonstrados.
 
 - Um único escritor SQLite.
 - Tamanho de lote limitado simultaneamente por itens e bytes.

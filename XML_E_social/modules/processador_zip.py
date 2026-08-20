@@ -30,7 +30,8 @@ from modules.sqlite_relatorio import (
     reiniciar_materializacao_analitica,
 )
 from modules.progresso import emitir_progresso
-from modules.event_metadata import inspecionar_evento
+from modules.event_metadata import identificar_evento_rapido, inspecionar_evento
+from modules.telemetria import TelemetriaCarga
 
 Fonte = Tuple[str, Union[bytes, bytearray, memoryview, str, os.PathLike]]
 ProgressCallback = Callable[[float, str], None]
@@ -321,6 +322,19 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
         status TEXT NOT NULL DEFAULT 'processando',
         mensagem_erro TEXT NOT NULL DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS telemetria (
+        chave TEXT PRIMARY KEY,
+        valor TEXT NOT NULL,
+        unidade TEXT NOT NULL DEFAULT '',
+        atualizado_em REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS telemetria_eventos (
+        tipo TEXT PRIMARY KEY,
+        quantidade INTEGER NOT NULL DEFAULT 0,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        tempo_segundos REAL NOT NULL DEFAULT 0,
+        media_ms REAL NOT NULL DEFAULT 0
+    );
     """)
     col_eventos = {r[1] for r in conn.execute("PRAGMA table_info(eventos)")}
     if "hash_conteudo" not in col_eventos:
@@ -333,6 +347,11 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
         ("ind_retif", "TEXT NOT NULL DEFAULT ''"),
         ("recibo_evento", "TEXT NOT NULL DEFAULT ''"),
         ("recibo_referencia", "TEXT NOT NULL DEFAULT ''"),
+        ("namespace_xml", "TEXT NOT NULL DEFAULT ''"),
+        ("versao_layout", "TEXT NOT NULL DEFAULT ''"),
+        ("identificacao_parser", "TEXT NOT NULL DEFAULT 'fallback_legado'"),
+        ("versao_desconhecida", "INTEGER NOT NULL DEFAULT 0"),
+        ("divergencia_identificacao", "INTEGER NOT NULL DEFAULT 0"),
     ):
         if coluna not in col_eventos:
             conn.execute(f"ALTER TABLE eventos ADD COLUMN {coluna} {definicao}")
@@ -347,9 +366,11 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_historico_cargas_status ON historico_cargas(status,id_carga)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eventos_recibo_ativo ON eventos(recibo_evento,ativo,tipo)")
     # Workspaces anteriores só permitem retropreencher eventos cujo XML foi
-    # preservado para a segunda passagem.
+    # preservado para a segunda passagem. O filtro e essencial: depois da
+    # migracao, reabrir um Workspace nao pode descompactar novamente seu acervo.
     for evento_id, xml_zlib, hash_atual, recibo_atual in conn.execute(
-        "SELECT id,xml_zlib,hash_conteudo,recibo_evento FROM eventos WHERE xml_zlib IS NOT NULL"
+        "SELECT id,xml_zlib,hash_conteudo,recibo_evento FROM eventos "
+        "WHERE xml_zlib IS NOT NULL AND COALESCE(hash_conteudo,'')=''"
     ):
         try:
             xml_bruto = zlib.decompress(xml_zlib)
@@ -519,12 +540,25 @@ def _processar_xml_ingestao(
     xml_bytes: bytes,
     tamanho: int,
     id_carga: int | None = None,
+    telemetria: TelemetriaCarga | None = None,
 ) -> str:
+    inicio_xml = time.perf_counter()
+    inicio = time.perf_counter()
     hash_conteudo = hashlib.sha256(xml_bytes).hexdigest()
-    evento_existente = conn.execute(
-        "SELECT id,arquivo,tipo,envelope_recibo FROM eventos "
-        "WHERE hash_conteudo=? LIMIT 1", (hash_conteudo,)
-    ).fetchone()
+    if telemetria:
+        telemetria.tempo("hash", time.perf_counter() - inicio)
+    # Carga inicial e dominada por XMLs novos: a restricao UNIQUE resolve a rara
+    # colisao no INSERT. Cargas incrementais preservam a consulta antecipada,
+    # pois nelas duplicatas sao frequentes e S-1010 pode exigir reprocessamento.
+    evento_existente = None
+    if id_carga is not None:
+        inicio = time.perf_counter()
+        evento_existente = conn.execute(
+            "SELECT id,arquivo,tipo,envelope_recibo FROM eventos "
+            "WHERE hash_conteudo=? LIMIT 1", (hash_conteudo,)
+        ).fetchone()
+        if telemetria:
+            telemetria.tempo("consulta_duplicidade", time.perf_counter() - inicio)
     if evento_existente:
         if id_carga is not None:
             conn.execute(
@@ -559,6 +593,9 @@ def _processar_xml_ingestao(
                         "INSERT INTO erros(arquivo,erro) VALUES(?,?)",
                         (str(arquivo), f"Falha ao reprocessar S-1010 duplicado: {exc}"),
                     )
+        if telemetria:
+            telemetria.somar("duplicados")
+            telemetria.evento("DUPLICADO", tamanho, time.perf_counter() - inicio_xml)
         return "duplicado"
     if id_carga is not None:
         conn.execute(
@@ -576,7 +613,11 @@ def _processar_xml_ingestao(
             conn.execute("UPDATE historico_cargas SET quantidade_erros=quantidade_erros+1 WHERE id_carga=?", (id_carga,))
         return "erro"
     try:
+        inicio = time.perf_counter()
+        pista = identificar_evento_rapido(xml_bytes)
         root = ET.fromstring(xml_bytes)
+        if telemetria:
+            telemetria.tempo("parse_xml", time.perf_counter() - inicio)
     except Exception as exc:
         conn.execute("INSERT INTO erros(arquivo, erro) VALUES (?, ?)", (arquivo, f"XML inválido ou ilegível: {exc}"))
         conn.execute(
@@ -588,7 +629,10 @@ def _processar_xml_ingestao(
             conn.execute("UPDATE historico_cargas SET quantidade_erros=quantidade_erros+1 WHERE id_carga=?", (id_carga,))
         return "erro"
 
-    metadados = inspecionar_evento(root)
+    inicio = time.perf_counter()
+    metadados = inspecionar_evento(root, pista)
+    if telemetria:
+        telemetria.tempo("inspecao", time.perf_counter() - inicio)
     tipo = metadados.tipo
     recibo = metadados.envelope_recibo
     id_evento = metadados.id_evento_esocial
@@ -597,14 +641,24 @@ def _processar_xml_ingestao(
     recibo_referencia = metadados.recibo_referencia
     blob = None
     if tipo in EVENTOS_SEGUNDA_PASSAGEM or tipo == "S-1010":
+        inicio = time.perf_counter()
         blob = sqlite3.Binary(zlib.compress(xml_bytes, level=1))
+        if telemetria:
+            telemetria.tempo("compressao", time.perf_counter() - inicio)
+    inicio = time.perf_counter()
     cur = conn.execute(
         "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes, envelope_recibo, xml_zlib, hash_conteudo, id_carga,"
-        "id_evento_esocial,ind_retif,recibo_evento,recibo_referencia) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "id_evento_esocial,ind_retif,recibo_evento,recibo_referencia,namespace_xml,versao_layout,identificacao_parser,"
+        "versao_desconhecida,divergencia_identificacao) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (arquivo, tipo, tamanho, int(recibo), blob, hash_conteudo, id_carga,
-         id_evento, ind_retif, recibo_evento, recibo_referencia),
+         id_evento, ind_retif, recibo_evento, recibo_referencia,
+         metadados.namespace_xml, metadados.versao_layout,
+         metadados.identificacao_parser, int(metadados.versao_desconhecida),
+         int(metadados.divergencia_identificacao)),
     )
+    if telemetria:
+        telemetria.tempo("escrita_sqlite", time.perf_counter() - inicio)
     if cur.rowcount == 0:
         if id_carga is not None:
             conn.execute(
@@ -612,6 +666,9 @@ def _processar_xml_ingestao(
                 (id_carga,),
             )
         root.clear()
+        if telemetria:
+            telemetria.somar("duplicados")
+            telemetria.evento("DUPLICADO", tamanho, time.perf_counter() - inicio_xml)
         return "duplicado"
     evento_id = int(cur.lastrowid)
     if ind_retif == "2" and recibo_referencia:
@@ -662,6 +719,14 @@ def _processar_xml_ingestao(
         item["arquivo_origem"] = arquivo
         _salvar_objetos(conn, "exclusoes", evento_id, item)
     root.clear()
+    if telemetria:
+        telemetria.somar("xml_processados")
+        telemetria.somar("bytes_processados", tamanho)
+        if metadados.versao_desconhecida:
+            telemetria.somar("versoes_desconhecidas")
+        if metadados.divergencia_identificacao:
+            telemetria.somar("divergencias_identificacao")
+        telemetria.evento(tipo, tamanho, time.perf_counter() - inicio_xml)
     return tipo
 
 
@@ -699,6 +764,7 @@ def _ingerir_fontes(
     id_carga: int | None = None,
 ) -> None:
     inicio_ingestao = time.perf_counter()
+    telemetria = TelemetriaCarga()
     xml_inicio = int(conn.execute(
         "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
     ).fetchone()[0])
@@ -729,7 +795,7 @@ def _ingerir_fontes(
 
         if caminho.suffix.lower() == ".xml":
             if ultimo_indice < 0:
-                _processar_xml_ingestao(conn, str(prefixo), caminho.read_bytes(), caminho.stat().st_size, id_carga)
+                _processar_xml_ingestao(conn, str(prefixo), caminho.read_bytes(), caminho.stat().st_size, id_carga, telemetria)
                 conn.execute("UPDATE fontes SET ultimo_indice=0, total_membros=1, status='concluida' WHERE id=?", (fonte_id,))
                 conn.commit()
                 fracao = _fracao_ingestao_descoberta(conn, id_carga=id_carga)
@@ -769,7 +835,7 @@ def _ingerir_fontes(
                                 if ext == ".xml":
                                     with zf.open(info, "r") as fp:
                                         conteudo = fp.read(MAX_XML_INDIVIDUAL + 1)
-                                    _processar_xml_ingestao(conn, caminho_logico, conteudo, info.file_size, id_carga)
+                                    _processar_xml_ingestao(conn, caminho_logico, conteudo, info.file_size, id_carga, telemetria)
                                 else:
                                     with zf.open(info, "r") as fp:
                                         _adicionar_zip_aninhado(
@@ -785,7 +851,10 @@ def _ingerir_fontes(
                         conn.execute("UPDATE fontes SET ultimo_indice=? WHERE id=?", (indice, fonte_id))
                         _meta_set(conn, "fase", "ingestao")
                         _meta_set(conn, "atualizado_em", time.time())
+                        inicio_commit = time.perf_counter()
                         conn.commit()
+                        telemetria.somar("commits")
+                        telemetria.tempo("commits", time.perf_counter() - inicio_commit)
                     if checkpoint or agora_visual - ultima_atualizacao_visual >= 1.0:
                         ultima_atualizacao_visual = agora_visual
                         total_eventos = conn.execute("SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos").fetchone()[0]
@@ -826,6 +895,10 @@ def _ingerir_fontes(
         "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
     ).fetchone()[0])
     resumo_final = _resumo_fontes_descobertas(conn, id_carga=id_carga)
+    telemetria.tempo("ingestao", time.perf_counter() - inicio_ingestao)
+    db_row = conn.execute("PRAGMA database_list").fetchone()
+    telemetria.persistir(conn, str(db_row[2]) if db_row and db_row[2] else "")
+    conn.commit()
     _progresso(
         progress_callback, "ingestao", 1.0,
         "Ingestão SQLite concluída.",

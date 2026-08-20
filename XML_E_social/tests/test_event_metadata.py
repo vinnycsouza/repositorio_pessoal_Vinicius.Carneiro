@@ -1,7 +1,7 @@
 import xml.etree.ElementTree as ET
 import unittest
 
-from modules.event_metadata import inspecionar_evento
+from modules.event_metadata import identificar_evento_rapido, inspecionar_evento
 from modules.parser_xml import detectar_tipo_evento, obter_recibo_principal, parse_empresa_info
 from modules.processador_zip import _eh_retorno_evento_completo, _metadados_retificacao
 
@@ -62,6 +62,23 @@ class EventMetadataTest(unittest.TestCase):
             inspecionar_evento(root).recibo_evento,
             obter_recibo_principal(root),
         )
+
+    def test_namespace_versao_e_sniffer_confirmado(self):
+        xml = AMOSTRAS[0].encode()
+        pista = identificar_evento_rapido(xml)
+        metadados = inspecionar_evento(ET.fromstring(xml), pista)
+        self.assertEqual(pista.tipo, "S-1200")
+        self.assertEqual(metadados.versao_layout, "S_01_03_00")
+        self.assertEqual(metadados.identificacao_parser, "sniffer_confirmado")
+        self.assertFalse(metadados.versao_desconhecida)
+
+    def test_versao_desconhecida_e_marcada_sem_rejeicao(self):
+        xml = AMOSTRAS[0].replace("S_01_03_00", "S_09_99_00").encode()
+        metadados = inspecionar_evento(
+            ET.fromstring(xml), identificar_evento_rapido(xml)
+        )
+        self.assertEqual(metadados.tipo, "S-1200")
+        self.assertTrue(metadados.versao_desconhecida)
 
 
 if __name__ == "__main__":
