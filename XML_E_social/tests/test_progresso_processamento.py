@@ -2,10 +2,24 @@ import unittest
 import sqlite3
 
 from modules.progresso import ETAPAS, criar_progresso, emitir_progresso
-from modules.processador_zip import _resumo_fontes_descobertas, _texto_resumo_fontes
+from modules.processador_zip import (
+    _nome_fonte_para_hud,
+    _resumo_fontes_descobertas,
+    _texto_resumo_fontes,
+)
 
 
 class ProgressoProcessamentoTest(unittest.TestCase):
+    def test_hud_preserva_pasta_logica_sem_expor_caminho_fisico(self):
+        self.assertEqual(
+            _nome_fonte_para_hud("2018 a 2021/35265128.zip"),
+            "2018 a 2021/35265128.zip",
+        )
+        self.assertEqual(
+            _nome_fonte_para_hud(r"C:\Arquivo zip\FEDEX.zip"),
+            "FEDEX.zip",
+        )
+
     def test_resumo_fontes_conta_status_e_volume_restante(self):
         conn = sqlite3.connect(":memory:")
         try:

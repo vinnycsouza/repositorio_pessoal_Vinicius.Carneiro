@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import pickle
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -92,6 +93,17 @@ def _formatar_tempo(segundos: float | None) -> str:
     if minutos:
         return f"{minutos}min {secs:02d}s"
     return f"{secs}s"
+
+
+def _nome_fonte_para_hud(nome: object) -> str:
+    """Preserva a pasta lógica do ZIP sem exibir um caminho físico absoluto."""
+    texto = str(nome or "").strip().replace("\\", "/")
+    if not texto:
+        return "fonte"
+    caminho = Path(texto)
+    if caminho.is_absolute() or re.match(r"^[A-Za-z]:/", texto):
+        return caminho.name
+    return texto.lstrip("./")
 
 
 def _resumo_fontes_descobertas(
@@ -872,7 +884,7 @@ def _ingerir_fontes(
                         restantes = max(total - indice - 1, 0)
                         eta = restantes / velocidade_itens if velocidade_itens > 0 else None
                         detalhes = (
-                            f"Fonte: {Path(str(nome)).name} | "
+                            f"Fonte: {_nome_fonte_para_hud(nome)} | "
                             f"itens {indice + 1:,}/{total:,} | "
                             f"{_formatar_bytes(bytes_concluidos)}/{_formatar_bytes(total_bytes)} | "
                             f"{int(total_eventos):,} XMLs catalogados | "
@@ -882,7 +894,7 @@ def _ingerir_fontes(
                         ).replace(",", ".")
                         _progresso(
                             progress_callback, "ingestao", fracao_ingestao,
-                            f"Lendo {Path(str(nome)).name}: {indice + 1:,} de {total:,} itens".replace(",", "."),
+                            f"Lendo {_nome_fonte_para_hud(nome)}: {indice + 1:,} de {total:,} itens".replace(",", "."),
                             detalhes,
                         )
                 conn.execute("UPDATE fontes SET status='concluida' WHERE id=?", (fonte_id,))
