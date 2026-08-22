@@ -288,6 +288,12 @@ def _rubrica_valida_na_competencia(rubrica: RubricaInfo, competencia: str) -> bo
     return True
 
 
+def _vigencia_anterior_ao_esocial(rubrica: RubricaInfo) -> bool:
+    """Identifica cadastros com início anterior ao marco geral de janeiro/2018."""
+    ini = _competencia_para_chave(rubrica.ini_valid)
+    return bool(ini and ini < "2018-01")
+
+
 def _ordenar_rubricas_por_vigencia(rubricas: Sequence[RubricaInfo]) -> List[RubricaInfo]:
     return sorted(
         list(rubricas),
@@ -360,25 +366,59 @@ def selecionar_rubrica_vigente(
 
     for rubrica in candidatos_exatos:
         if _rubrica_valida_na_competencia(rubrica, competencia):
+            anterior_esocial = _vigencia_anterior_ao_esocial(rubrica)
             return RubricaSelecionada(
                 rubrica=rubrica,
-                criterio="codRubr+ideTabRubr+validade",
-                origem_validacao="S-1010 válido",
+                criterio=(
+                    "codRubr+ideTabRubr+vigencia_anterior_esocial"
+                    if anterior_esocial
+                    else "codRubr+ideTabRubr+validade"
+                ),
+                origem_validacao=(
+                    "S-1010 anterior ao eSocial"
+                    if anterior_esocial
+                    else "S-1010 válido"
+                ),
                 nivel_confianca="Alto",
-                status_auditoria="S1010_VALIDO",
-                observacao_validacao="Rubrica localizada na tabela S-1010 com tabela e vigência compatíveis com a competência do movimento.",
+                status_auditoria=(
+                    "S1010_ANTERIOR_ESOCIAL"
+                    if anterior_esocial
+                    else "S1010_VALIDO"
+                ),
+                observacao_validacao=(
+                    "Rubrica cadastrada com vigência anterior a janeiro de 2018 e ainda válida na competência do movimento."
+                    if anterior_esocial
+                    else "Rubrica localizada na tabela S-1010 com tabela e vigência compatíveis com a competência do movimento."
+                ),
                 usar_incidencia=True,
             )
 
     for rubrica in candidatos_codigo:
         if _rubrica_valida_na_competencia(rubrica, competencia):
+            anterior_esocial = _vigencia_anterior_ao_esocial(rubrica)
             return RubricaSelecionada(
                 rubrica=rubrica,
-                criterio="codRubr+validade",
-                origem_validacao="S-1010 válido por código",
+                criterio=(
+                    "codRubr+vigencia_anterior_esocial"
+                    if anterior_esocial
+                    else "codRubr+validade"
+                ),
+                origem_validacao=(
+                    "S-1010 anterior ao eSocial (por código)"
+                    if anterior_esocial
+                    else "S-1010 válido por código"
+                ),
                 nivel_confianca="Médio",
-                status_auditoria="S1010_VALIDO_POR_CODIGO",
-                observacao_validacao="Rubrica localizada por código e vigência, mas com ideTabRubr diferente/vazio. Conferir tabela de rubricas.",
+                status_auditoria=(
+                    "S1010_ANTERIOR_ESOCIAL_POR_CODIGO"
+                    if anterior_esocial
+                    else "S1010_VALIDO_POR_CODIGO"
+                ),
+                observacao_validacao=(
+                    "Rubrica cadastrada antes de janeiro de 2018 e ainda vigente, localizada por código com ideTabRubr diferente/vazio. Conferir tabela de rubricas."
+                    if anterior_esocial
+                    else "Rubrica localizada por código e vigência, mas com ideTabRubr diferente/vazio. Conferir tabela de rubricas."
+                ),
                 usar_incidencia=True,
             )
 

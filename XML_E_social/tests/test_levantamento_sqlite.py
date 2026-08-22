@@ -44,6 +44,19 @@ class LevantamentoSQLiteTest(unittest.TestCase):
             conn.execute("CREATE TABLE dados_empresa(nome_empresa TEXT,cnpj_empregador TEXT)")
             conn.execute("INSERT INTO dados_empresa VALUES('Empresa Teste','12345678000199')")
             dados.to_sql("rel_movimentos_cp", conn, index=False)
+            conn.execute("""
+                CREATE TABLE rel_rubricas_cp_base AS
+                SELECT cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
+                       carater_verba,tipo_verba,
+                       SUM(CAST(vr_rubr AS REAL)) valor_total,
+                       COUNT(*) qtd_lancamentos,
+                       COUNT(DISTINCT cpf) qtd_cpfs,
+                       MIN(per_apur) primeira_competencia,
+                       MAX(per_apur) ultima_competencia
+                FROM rel_movimentos_cp
+                GROUP BY cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
+                         carater_verba,tipo_verba
+            """)
             conn.commit()
         finally:
             conn.close()
@@ -97,11 +110,28 @@ class LevantamentoSQLiteTest(unittest.TestCase):
             opcoes = obter_opcoes_filtros(fonte)
             self.assertIn("Incide CP", opcoes["status_cp"])
             self.assertIn("Sem S-1010", opcoes["cod_inc_cp"])
+            self.assertEqual(opcoes["competencias"], ["2026-01", "2026-02"])
             rubricas = consultar_rubricas(
                 fonte,
                 FiltrosLevantamento(cod_inc_cp="Sem S-1010", apenas_positivos=False),
             )
             self.assertEqual(rubricas["cod_rubr"].tolist(), ["300"])
+
+    def test_catalogo_consolidado_nao_altera_filtro_final_de_positivos(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            workspace, _ = self._workspace(pasta)
+            fonte = SQLiteDataSource(WorkspaceContext.from_path(workspace))
+            filtros = FiltrosLevantamento(
+                status_cp="Incide CP", apenas_positivos=True
+            )
+            rubricas = consultar_rubricas(fonte, filtros)
+            resultado = consultar_levantamento(
+                fonte, filtros, ["100||1"], aliquota=20.0
+            )
+            self.assertEqual(rubricas["cod_rubr"].tolist(), ["100"])
+            self.assertAlmostEqual(float(rubricas.iloc[0]["valor_total"]), 290.0)
+            self.assertAlmostEqual(resultado.total, 300.0)
+            self.assertEqual(resultado.qtd_movimentos, 2)
 
     def test_exportacao_detalhada_usa_sqlite(self):
         with tempfile.TemporaryDirectory() as pasta:

@@ -1542,12 +1542,15 @@ def processar_zip_esocial(zip_bytes: bytes, progress_callback: ProgressCallback 
     return processar_fontes_esocial([("upload.zip", zip_bytes)], progress_callback=progress_callback)
 
 
-def carregar_resultado_sqlite_existente(db_path: str | os.PathLike) -> Dict[str, object]:
+def carregar_resultado_sqlite_existente(
+    db_path: str | os.PathLike,
+    somente_levantamento: bool = False,
+) -> Dict[str, object]:
     """Carrega um processamento.db já concluído sem reler os XMLs."""
     db_path = Path(db_path).expanduser().resolve()
     if not db_path.is_file():
         raise FileNotFoundError(f"Banco SQLite não localizado: {db_path}")
-    conn = _conectar(db_path)
+    conn = _conectar_somente_leitura(db_path)
     try:
         obrigatorias = {"eventos", "meta", "rel_movimentos_cp", "rel_rubricas_cp_base"}
         existentes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -1555,10 +1558,78 @@ def carregar_resultado_sqlite_existente(db_path: str | os.PathLike) -> Dict[str,
         if faltantes:
             raise ValueError("Banco incompatível ou incompleto. Tabelas ausentes: " + ", ".join(faltantes))
 
-        pacote = carregar_pacote_resumido(db_path)
+        if somente_levantamento:
+            if "dados_empresa" in existentes:
+                df_empresa = pd.read_sql_query(
+                    "SELECT nome_empresa,cnpj_empregador FROM dados_empresa "
+                    "WHERE COALESCE(nome_empresa,'')<>'' LIMIT 1",
+                    conn,
+                )
+                if df_empresa.empty:
+                    df_empresa = pd.read_sql_query(
+                        "SELECT nome_empresa,cnpj_empregador FROM dados_empresa "
+                        "WHERE COALESCE(cnpj_empregador,'')<>'' LIMIT 1",
+                        conn,
+                    )
+            else:
+                df_empresa = pd.DataFrame()
+            total_movimentos = 0
+            if "rel_controle_integridade" in existentes:
+                linha_total = conn.execute(
+                    "SELECT quantidade FROM rel_controle_integridade "
+                    "WHERE tabela='rel_movimentos_cp' LIMIT 1"
+                ).fetchone()
+                total_movimentos = int(linha_total[0] or 0) if linha_total else 0
+            if not total_movimentos:
+                total_movimentos = int(
+                    conn.execute("SELECT COUNT(*) FROM rel_movimentos_cp").fetchone()[0]
+                )
+            total_xml = 0
+            if "contagem_eventos" in existentes:
+                total_xml = int(
+                    conn.execute(
+                        "SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos"
+                    ).fetchone()[0]
+                )
+            vazio = pd.DataFrame()
+            pacote = {
+                "resumo_visual": vazio,
+                "rubricas_cp": vazio,
+                "movimentos_cp": vazio,
+                "base_trabalhador": vazio,
+                "sem_cadastro": vazio,
+                "s5001_resumo": vazio,
+                "controle_integridade": vazio,
+                "total_movimentos_cp": total_movimentos,
+                "total_movimentos_cp_padrao": 0,
+                "total_movimentos_analise_prioritaria": 0,
+                "total_movimentos_classificados": 0,
+                "total_movimentos_sem_s1010": 0,
+            }
+            return {
+                "inventario": vazio,
+                "rubricas": vazio,
+                "exclusoes": vazio,
+                "remuneracoes": vazio,
+                "bases_trabalhador": vazio,
+                "bases_contribuicao": vazio,
+                "erros_xml": vazio,
+                "layout_check": vazio,
+                "empresa": df_empresa,
+                "recibos_excluidos": set(),
+                "workspace_temporario": str(db_path.parent),
+                "db_path": str(db_path),
+                "modo_sqlite_seguro": True,
+                "pacote_sqlite": pacote,
+                "quantidade_xml_spool": total_xml,
+                "workspace_removido": False,
+                "engine": "V3 SQLite existente - Levantamento",
+            }
+
         df_empresa = pd.read_sql_query("SELECT * FROM dados_empresa", conn) if "dados_empresa" in existentes else pd.DataFrame()
         if not df_empresa.empty:
             df_empresa = df_empresa.drop_duplicates().copy()
+        pacote = carregar_pacote_resumido(db_path)
         df_rubricas = pd.read_sql_query("SELECT * FROM dados_rubricas", conn) if "dados_rubricas" in existentes else pd.DataFrame()
         df_exclusoes = pd.read_sql_query("SELECT * FROM dados_exclusoes", conn) if "dados_exclusoes" in existentes else pd.DataFrame()
         df_erros = pd.read_sql_query("SELECT arquivo, erro FROM erros ORDER BY id LIMIT 5000", conn) if "erros" in existentes else pd.DataFrame()

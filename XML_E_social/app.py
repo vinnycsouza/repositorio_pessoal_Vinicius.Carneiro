@@ -1,6 +1,5 @@
 import io
 import os
-import re
 import tempfile
 import zipfile
 from datetime import datetime
@@ -16,6 +15,7 @@ from modules.auditoria import (
     preparar_pacote_analitico,
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
+from modules.busca_rubricas import filtrar_rubricas_por_multibusca
 from modules.hud_progresso import extrair_hud_ingestao
 from modules.data_source import SQLiteDataSource, WorkspaceContext
 from modules.levantamento_sqlite import (
@@ -746,35 +746,6 @@ def _resultado_levantamento_sqlite(
 
 
 
-def _extrair_termos_busca(texto: str) -> list[str]:
-    """Separa termos colados do Excel por ;, vírgula, quebra de linha ou tabulação."""
-    if not texto:
-        return []
-    termos = [t.strip() for t in re.split(r"[;,.\n\r\t]+", str(texto)) if t.strip()]
-    # remove duplicados preservando a ordem
-    vistos = set()
-    unicos = []
-    for termo in termos:
-        chave = termo.lower()
-        if chave not in vistos:
-            vistos.add(chave)
-            unicos.append(termo)
-    return unicos
-
-
-def _filtrar_rubricas_por_multibusca(df: pd.DataFrame, texto_busca: str, colunas: list[str]) -> tuple[pd.DataFrame, list[str]]:
-    """Filtra rubricas por múltiplos termos usando lógica OU entre os termos e colunas."""
-    termos = _extrair_termos_busca(texto_busca)
-    if not termos or df.empty:
-        return df.copy(), termos
-
-    padrao = "|".join(re.escape(t.lower()) for t in termos)
-    mascara = pd.Series(False, index=df.index)
-    for coluna in colunas:
-        if coluna in df.columns:
-            mascara = mascara | df[coluna].fillna("").astype(str).str.lower().str.contains(padrao, regex=True, na=False)
-    return df[mascara].copy(), termos
-
 MAX_LINHAS_DADOS_EXCEL = 1_048_575
 
 
@@ -834,7 +805,8 @@ elif modo_entrada in {"SQLite existente", "Workspace (SQLite existente)"}:
         try:
             contexto_carregado = WorkspaceContext.from_path(caminho_sqlite_existente)
             st.session_state["resultado_v82"] = carregar_resultado_sqlite_existente(
-                contexto_carregado.db_path
+                contexto_carregado.db_path,
+                somente_levantamento=(modulo_ativo == "Levantamento de Verbas"),
             )
             st.success("Banco SQLite carregado. O processamento dos XMLs não será repetido.")
         except Exception as exc:
@@ -1080,6 +1052,7 @@ if modulo_ativo == "Levantamento de Verbas":
         st.session_state["lev_fonte_assinatura"] = identificador_fonte_levantamento
         st.session_state.pop("lev_chaves_rubricas_selecionadas", None)
         st.session_state.pop("lev_editor_versao", None)
+        st.session_state.pop("lev_catalogo_rubricas", None)
         st.session_state.pop("levantamento_excel_path", None)
         st.session_state.pop("levantamento_ultima_geracao", None)
     fonte_levantamento_sqlite = None
@@ -1185,6 +1158,16 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.session_state["lev_chaves_rubricas_selecionadas"] = []
             if "lev_editor_versao" not in st.session_state:
                 st.session_state["lev_editor_versao"] = 0
+            if "lev_catalogo_rubricas" not in st.session_state:
+                st.session_state["lev_catalogo_rubricas"] = {}
+
+            catalogo_rubricas = st.session_state["lev_catalogo_rubricas"]
+            for linha in df_opts[["chave_rubrica", "cod_rubr", "ide_tab_rubr", "dsc_rubr"]].itertuples(index=False):
+                catalogo_rubricas[str(linha.chave_rubrica)] = {
+                    "cod_rubr": str(linha.cod_rubr or ""),
+                    "ide_tab_rubr": str(linha.ide_tab_rubr or ""),
+                    "dsc_rubr": str(linha.dsc_rubr or ""),
+                }
 
             st.markdown("### Seleção de rubricas")
             busca_lev = st.text_area(
@@ -1196,15 +1179,23 @@ if modulo_ativo == "Levantamento de Verbas":
                 placeholder="Ex.: 0324P; BONUS; MATERNIDADE\nou cole uma coluna do Excel aqui",
             )
 
-            df_opts_busca, termos_busca = _filtrar_rubricas_por_multibusca(
-                df_opts,
-                busca_lev,
-                ["cod_rubr", "dsc_rubr", "cod_inc_cp", "status_cp", "carater_verba", "tipo_verba"],
+            df_opts_busca, termos_busca = filtrar_rubricas_por_multibusca(
+                df_opts, busca_lev
             )
             if termos_busca:
                 st.caption(
-                    f"Busca múltipla ativa: {len(termos_busca)} termo(s). "
-                    f"Rubricas encontradas: {len(df_opts_busca):,}.".replace(",", ".")
+                    f"Busca ativa: {len(termos_busca)} termo(s) · "
+                    f"{len(df_opts_busca):,} rubrica(s) encontrada(s). "
+                    "O código exige correspondência exata; a descrição aceita trechos e ignora acentos.".replace(",", ".")
+                )
+            else:
+                st.caption(
+                    "Digite um código exato ou parte da descrição. A busca vazia não seleciona rubricas automaticamente."
+                )
+            if levantamento_sqlite and positivos_lev and not comp_lev:
+                st.caption(
+                    "O catálogo é carregado do resumo consolidado para manter a tela rápida. "
+                    "A condição de movimentos positivos será aplicada com exatidão no cálculo e na exportação."
                 )
 
             b1, b2, b3, b4 = st.columns([1.4, 1.4, 0.8, 1.4])
@@ -1212,24 +1203,52 @@ if modulo_ativo == "Levantamento de Verbas":
             chaves_filtradas = set(df_opts["chave_rubrica"].astype(str).tolist())
             chaves_atuais = set(st.session_state["lev_chaves_rubricas_selecionadas"])
 
-            if b1.button("Selecionar resultado da busca", use_container_width=True, key="lev_btn_sel_busca"):
+            if b1.button(
+                f"Selecionar resultados ({len(chaves_resultado)})",
+                use_container_width=True,
+                disabled=not termos_busca or not chaves_resultado,
+                key="lev_btn_sel_busca",
+            ):
                 st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais | chaves_resultado)
                 st.session_state["lev_editor_versao"] += 1
                 st.rerun()
-            if b2.button("Limpar resultado da busca", use_container_width=True, key="lev_btn_limpa_busca"):
+            if b2.button(
+                f"Remover resultados ({len(chaves_resultado)})",
+                use_container_width=True,
+                disabled=not termos_busca or not chaves_resultado,
+                key="lev_btn_limpa_busca",
+            ):
                 st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais - chaves_resultado)
                 st.session_state["lev_editor_versao"] += 1
                 st.rerun()
-            if b3.button("Limpar tudo", use_container_width=True, key="lev_btn_limpa_tudo"):
+            if b3.button(
+                f"Limpar seleção ({len(chaves_atuais)})",
+                use_container_width=True,
+                disabled=not chaves_atuais,
+                key="lev_btn_limpa_tudo",
+            ):
                 st.session_state["lev_chaves_rubricas_selecionadas"] = []
                 st.session_state["lev_editor_versao"] += 1
                 st.rerun()
-            if b4.button("Selecionar tudo filtrado", use_container_width=True, key="lev_btn_sel_filtrado"):
+            if b4.button(
+                f"Selecionar todas dos filtros ({len(chaves_filtradas)})",
+                use_container_width=True,
+                disabled=not chaves_filtradas,
+                key="lev_btn_sel_filtrado",
+            ):
                 st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais | chaves_filtradas)
                 st.session_state["lev_editor_versao"] += 1
                 st.rerun()
 
-            df_editor = df_opts_busca[[
+            limite_tabela_rubricas = 250
+            df_opts_visiveis = df_opts_busca.head(limite_tabela_rubricas).copy()
+            if len(df_opts_busca) > limite_tabela_rubricas:
+                st.info(
+                    f"A tabela mostra as primeiras {limite_tabela_rubricas} de "
+                    f"{len(df_opts_busca):,} rubricas. Refine a busca para editar uma rubrica específica; "
+                    "os botões de seleção continuam considerando todos os resultados.".replace(",", ".")
+                )
+            colunas_editor = [
                 "chave_rubrica",
                 "cod_rubr",
                 "dsc_rubr",
@@ -1240,7 +1259,10 @@ if modulo_ativo == "Levantamento de Verbas":
                 "valor_total",
                 "qtd_lancamentos",
                 "qtd_cpfs",
-            ]].copy()
+            ]
+            if termos_busca and "correspondencia_busca" in df_opts_visiveis.columns:
+                colunas_editor.append("correspondencia_busca")
+            df_editor = df_opts_visiveis[colunas_editor].copy()
             selecionadas = set(st.session_state["lev_chaves_rubricas_selecionadas"])
             df_editor.insert(0, "Selecionar", df_editor["chave_rubrica"].astype(str).isin(selecionadas))
             df_editor = df_editor.rename(columns={
@@ -1253,7 +1275,14 @@ if modulo_ativo == "Levantamento de Verbas":
                 "valor_total": "Valor total",
                 "qtd_lancamentos": "Lançamentos",
                 "qtd_cpfs": "CPFs",
+                "correspondencia_busca": "Correspondência",
             })
+            colunas_bloqueadas = [
+                coluna for coluna in (
+                    "codRubr", "Descrição", "codIncCP", "Status CP", "Caráter",
+                    "Tipo", "Valor total", "Lançamentos", "CPFs", "Correspondência",
+                ) if coluna in df_editor.columns
+            ]
 
             with st.form("form_selecao_rubricas_levantamento"):
                 df_editado = st.data_editor(
@@ -1261,27 +1290,77 @@ if modulo_ativo == "Levantamento de Verbas":
                     use_container_width=True,
                     hide_index=True,
                     height=420,
-                    disabled=["codRubr", "Descrição", "codIncCP", "Status CP", "Caráter", "Tipo", "Valor total", "Lançamentos", "CPFs"],
+                    disabled=colunas_bloqueadas,
                     column_config={
                         "Selecionar": st.column_config.CheckboxColumn("Selecionar"),
                         "Valor total": st.column_config.NumberColumn("Valor total", format="R$ %.2f"),
                     },
                     key=f"lev_editor_rubricas_{st.session_state['lev_editor_versao']}",
                 )
-                aplicar_selecao = st.form_submit_button("Aplicar seleção", use_container_width=True)
+                aplicar_selecao = st.form_submit_button("Aplicar alterações visíveis", use_container_width=True)
 
             if aplicar_selecao:
-                novas_resultado = set(df_opts_busca.loc[df_editado["Selecionar"].fillna(False).tolist(), "chave_rubrica"].astype(str).tolist())
-                fora_resultado = set(st.session_state["lev_chaves_rubricas_selecionadas"]) - chaves_resultado
-                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(fora_resultado | novas_resultado)
+                chaves_visiveis = set(df_opts_visiveis["chave_rubrica"].astype(str))
+                novas_visiveis = set(df_opts_visiveis.loc[df_editado["Selecionar"].fillna(False).tolist(), "chave_rubrica"].astype(str).tolist())
+                fora_da_tabela = set(st.session_state["lev_chaves_rubricas_selecionadas"]) - chaves_visiveis
+                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(fora_da_tabela | novas_visiveis)
                 st.session_state["lev_editor_versao"] += 1
                 st.rerun()
 
             chaves_selecionadas = set(st.session_state["lev_chaves_rubricas_selecionadas"])
-            st.caption(f"Rubricas selecionadas: {len(chaves_selecionadas)}.")
+            selecionadas_visiveis = chaves_selecionadas & chaves_filtradas
+            selecionadas_fora = chaves_selecionadas - chaves_filtradas
+            with st.expander(
+                f"Seleção consolidada — {len(chaves_selecionadas)} rubrica(s)",
+                expanded=bool(chaves_selecionadas),
+            ):
+                st.caption(
+                    f"Visíveis nos filtros atuais: {len(selecionadas_visiveis)} · "
+                    f"Fora dos filtros atuais: {len(selecionadas_fora)}"
+                )
+                if chaves_selecionadas:
+                    linhas_selecionadas = []
+                    rotulos_selecionados = {}
+                    for chave in sorted(chaves_selecionadas):
+                        item = catalogo_rubricas.get(chave, {})
+                        codigo = item.get("cod_rubr", chave.partition("||")[0])
+                        tabela = item.get("ide_tab_rubr", chave.partition("||")[2])
+                        descricao = item.get("dsc_rubr", "")
+                        rotulo = f"{codigo} | {tabela} | {descricao}".strip(" |")
+                        rotulos_selecionados[chave] = rotulo
+                        linhas_selecionadas.append({
+                            "Código": codigo,
+                            "Tabela": tabela,
+                            "Descrição": descricao,
+                            "No filtro atual": "Sim" if chave in chaves_filtradas else "Não",
+                        })
+                    st.dataframe(
+                        pd.DataFrame(linhas_selecionadas),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(280, 38 + 35 * len(linhas_selecionadas)),
+                    )
+                    chave_remover = st.selectbox(
+                        "Remover uma rubrica da seleção",
+                        sorted(chaves_selecionadas),
+                        format_func=lambda chave: rotulos_selecionados[chave],
+                        key="lev_remover_rubrica_individual",
+                    )
+                    if st.button(
+                        "Remover rubrica escolhida",
+                        use_container_width=True,
+                        key="lev_btn_remover_individual",
+                    ):
+                        st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(
+                            chaves_selecionadas - {chave_remover}
+                        )
+                        st.session_state["lev_editor_versao"] += 1
+                        st.rerun()
+                else:
+                    st.caption("Nenhuma rubrica selecionada.")
 
             if not chaves_selecionadas:
-                st.info("Selecione uma ou mais rubricas e clique em Aplicar seleção. O levantamento e o Excel só serão montados depois disso, para evitar processamento desnecessário em arquivos grandes.")
+                st.info("Selecione uma ou mais rubricas e clique em Aplicar alterações visíveis. O levantamento e o Excel só serão montados depois disso, para evitar processamento desnecessário em arquivos grandes.")
                 df_levantamento_export = pd.DataFrame()
                 st.stop()
 

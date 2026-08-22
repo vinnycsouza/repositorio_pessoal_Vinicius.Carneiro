@@ -50,6 +50,41 @@ class OperacoesS1010Test(unittest.TestCase):
         self.assertIsNone(selecao.rubrica)
         self.assertEqual(selecao.status_auditoria, "SEM_S1010")
 
+    def test_vigencia_anterior_ao_esocial_continua_valida_sem_fim(self):
+        rubricas = self._parse("inclusao", "2017-01", "11")
+        mapa = _montar_indice_rubricas(rubricas)
+
+        selecao = selecionar_rubrica_vigente(mapa, "273", "0001", "2018-01")
+
+        self.assertIsNotNone(selecao.rubrica)
+        self.assertEqual(selecao.rubrica.ini_valid, "2017-01")
+        self.assertEqual(selecao.rubrica.cod_inc_cp, "11")
+        self.assertEqual(selecao.status_auditoria, "S1010_ANTERIOR_ESOCIAL")
+        self.assertEqual(selecao.origem_validacao, "S-1010 anterior ao eSocial")
+        self.assertEqual(
+            selecao.criterio, "codRubr+ideTabRubr+vigencia_anterior_esocial"
+        )
+
+    def test_vigencia_anterior_ao_esocial_vale_em_competencia_atual(self):
+        rubricas = self._parse("inclusao", "2016-06", "11")
+        mapa = _montar_indice_rubricas(rubricas)
+
+        selecao = selecionar_rubrica_vigente(mapa, "273", "0001", "2026-07")
+
+        self.assertIsNotNone(selecao.rubrica)
+        self.assertEqual(selecao.rubrica.ini_valid, "2016-06")
+        self.assertEqual(selecao.status_auditoria, "S1010_ANTERIOR_ESOCIAL")
+        self.assertEqual(selecao.origem_validacao, "S-1010 anterior ao eSocial")
+
+    def test_vigencia_a_partir_de_2018_mantem_nomenclatura_normal(self):
+        rubricas = self._parse("inclusao", "2018-01", "11")
+        mapa = _montar_indice_rubricas(rubricas)
+
+        selecao = selecionar_rubrica_vigente(mapa, "273", "0001", "2026-07")
+
+        self.assertEqual(selecao.status_auditoria, "S1010_VALIDO")
+        self.assertEqual(selecao.origem_validacao, "S-1010 válido")
+
 
 if __name__ == "__main__":
     unittest.main()

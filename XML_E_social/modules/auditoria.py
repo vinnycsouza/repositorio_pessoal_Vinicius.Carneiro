@@ -191,6 +191,10 @@ def _prioridade_rubrica(row: pd.Series) -> str:
 
 def _observacao_rubrica(row: pd.Series) -> str:
     status_auditoria = row.get("status_auditoria", "")
+    if status_auditoria == "S1010_ANTERIOR_ESOCIAL":
+        return "S-1010 com vigência anterior a janeiro de 2018, mantido por continuar válido na competência analisada."
+    if status_auditoria == "S1010_ANTERIOR_ESOCIAL_POR_CODIGO":
+        return "S-1010 com vigência anterior a janeiro de 2018 localizado por código; conferir a tabela da rubrica."
     if status_auditoria == "S1010_HISTORICO_COMPATIVEL":
         return "Incidência usada por histórico compatível: mesmo código encontrado em outra vigência/tabela com incidência única conhecida."
     if status_auditoria == "S1010_HISTORICO_DIVERGENTE":
@@ -297,6 +301,7 @@ def gerar_resumo_visual(df_rubricas_cp: pd.DataFrame, df_movimentos_cp: pd.DataF
             {"indicador": "Rubricas sem S-1010", "valor": int(df_rubricas_cp["status_cp"].eq("Sem S-1010").sum())},
             {"indicador": "Rubricas com S-1010 histórico compatível", "valor": int(df_rubricas_cp.get("status_auditoria", pd.Series(dtype=str)).eq("S1010_HISTORICO_COMPATIVEL").sum())},
             {"indicador": "Rubricas com S-1010 histórico divergente", "valor": int(df_rubricas_cp.get("status_auditoria", pd.Series(dtype=str)).eq("S1010_HISTORICO_DIVERGENTE").sum())},
+            {"indicador": "Rubricas com S-1010 anterior ao eSocial", "valor": int(df_rubricas_cp.get("status_auditoria", pd.Series(dtype=str)).isin(["S1010_ANTERIOR_ESOCIAL", "S1010_ANTERIOR_ESOCIAL_POR_CODIGO"]).sum())},
             {"indicador": "Rubricas remuneratórias", "valor": int(df_rubricas_cp["carater_verba"].eq("Remuneratório").sum())},
             {"indicador": "Rubricas rescisórias", "valor": int(df_rubricas_cp["carater_verba"].eq("Rescisório").sum())},
             {"indicador": "Rubricas informativas/técnicas", "valor": int(df_rubricas_cp["carater_verba"].eq("Informativo/Técnico").sum())},

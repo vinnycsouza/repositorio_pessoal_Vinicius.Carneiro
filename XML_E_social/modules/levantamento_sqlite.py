@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -96,27 +97,59 @@ def _base_selecionada_sql(filtros: FiltrosLevantamento) -> tuple[str, tuple]:
 def obter_opcoes_filtros(fonte: SQLiteDataSource) -> dict[str, list[str]]:
     conn = fonte.conectar()
     try:
-        def distintos(campo: str) -> list[str]:
+        tem_catalogo = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='rel_rubricas_cp_base'"
+        ).fetchone() is not None
+
+        def distintos(campo: str, tabela: str) -> list[str]:
             return [
                 str(row[0])
                 for row in conn.execute(
-                    f"SELECT DISTINCT CAST({campo} AS TEXT) FROM rel_movimentos_cp "
+                    f"SELECT DISTINCT CAST({campo} AS TEXT) FROM {tabela} "
                     f"WHERE COALESCE(CAST({campo} AS TEXT),'')<>'' ORDER BY 1"
                 )
             ]
 
-        codigos = distintos("cod_inc_cp")
+        tabela_catalogo = "rel_rubricas_cp_base" if tem_catalogo else "rel_movimentos_cp"
+        codigos = distintos("cod_inc_cp", tabela_catalogo)
         sem_s1010 = conn.execute(
-            "SELECT 1 FROM rel_movimentos_cp WHERE COALESCE(cod_inc_cp,'')='' LIMIT 1"
+            f"SELECT 1 FROM {tabela_catalogo} "
+            "WHERE COALESCE(cod_inc_cp,'')='' LIMIT 1"
         ).fetchone()
         if sem_s1010:
             codigos.append("Sem S-1010")
+        competencias: list[str]
+        if tem_catalogo:
+            limites = conn.execute(
+                "SELECT MIN(primeira_competencia),MAX(ultima_competencia) "
+                "FROM rel_rubricas_cp_base"
+            ).fetchone()
+            inicio = str(limites[0] or "") if limites else ""
+            fim = str(limites[1] or "") if limites else ""
+            if re.fullmatch(r"\d{4}-\d{2}", inicio) and re.fullmatch(
+                r"\d{4}-\d{2}", fim
+            ):
+                ano, mes = map(int, inicio.split("-"))
+                ano_fim, mes_fim = map(int, fim.split("-"))
+                competencias = []
+                while (ano, mes) <= (ano_fim, mes_fim):
+                    competencias.append(f"{ano:04d}-{mes:02d}")
+                    mes += 1
+                    if mes == 13:
+                        ano += 1
+                        mes = 1
+            else:
+                competencias = distintos("per_apur", "rel_movimentos_cp")
+        else:
+            competencias = distintos("per_apur", "rel_movimentos_cp")
+
         return {
-            "status_cp": distintos("status_cp"),
-            "carater": distintos("carater_verba"),
-            "tipo": distintos("tipo_verba"),
+            "status_cp": distintos("status_cp", tabela_catalogo),
+            "carater": distintos("carater_verba", tabela_catalogo),
+            "tipo": distintos("tipo_verba", tabela_catalogo),
             "cod_inc_cp": sorted(codigos),
-            "competencias": distintos("per_apur"),
+            "competencias": competencias,
         }
     finally:
         conn.close()
@@ -125,8 +158,42 @@ def obter_opcoes_filtros(fonte: SQLiteDataSource) -> dict[str, list[str]]:
 def consultar_rubricas(
     fonte: SQLiteDataSource, filtros: FiltrosLevantamento
 ) -> pd.DataFrame:
-    where, params = _where_filtros(filtros, "m")
-    sql = """
+    conn = fonte.conectar()
+    try:
+        tem_catalogo = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='rel_rubricas_cp_base'"
+        ).fetchone() is not None
+
+        # Sem recorte por competência, a tabela consolidada contém todas as
+        # rubricas necessárias para a seleção e evita reler milhões de movimentos.
+        # O filtro de valores positivos continua sendo aplicado, com exatidão, na
+        # consulta final do levantamento sobre rel_movimentos_cp.
+        if tem_catalogo and not filtros.competencias:
+            filtros_catalogo = FiltrosLevantamento(
+                status_cp=filtros.status_cp,
+                carater=filtros.carater,
+                tipo=filtros.tipo,
+                cod_inc_cp=filtros.cod_inc_cp,
+                competencias=(),
+                apenas_positivos=False,
+            )
+            where, params = _where_filtros(filtros_catalogo, "r")
+            sql = """
+                SELECT cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
+                       carater_verba,tipo_verba,
+                       SUM(CAST(valor_total AS REAL)) valor_total,
+                       SUM(CAST(qtd_lancamentos AS INTEGER)) qtd_lancamentos,
+                       MAX(CAST(qtd_cpfs AS INTEGER)) qtd_cpfs
+                FROM rel_rubricas_cp_base r
+            """ + where + """
+                GROUP BY cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
+                         carater_verba,tipo_verba
+                ORDER BY dsc_rubr,cod_rubr
+            """
+        else:
+            where, params = _where_filtros(filtros, "m")
+            sql = """
         SELECT cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
                carater_verba,tipo_verba,
                SUM(CAST(vr_rubr AS REAL)) valor_total,
@@ -137,9 +204,7 @@ def consultar_rubricas(
         GROUP BY cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
                  carater_verba,tipo_verba
         ORDER BY dsc_rubr,cod_rubr
-    """
-    conn = fonte.conectar()
-    try:
+            """
         df = pd.read_sql_query(sql, conn, params=params)
     finally:
         conn.close()
