@@ -16,6 +16,7 @@ from modules.auditoria import (
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
 from modules.busca_rubricas import filtrar_rubricas_por_multibusca
+from modules.entrega_arquivo import copiar_para_downloads, exige_entrega_local
 from modules.hud_progresso import extrair_hud_ingestao
 from modules.data_source import SQLiteDataSource, WorkspaceContext
 from modules.levantamento_sqlite import (
@@ -49,6 +50,49 @@ st.title("Composição da Incidência CP — eSocial")
 st.caption(
     "Versão 9.5.2 Engine V3: SQLite persistente, Excel consolidado e gerenciamento seguro do Workspace atual."
 )
+
+
+def _oferecer_arquivo_gerado(
+    caminho: str | Path,
+    *,
+    label: str,
+    nome: str,
+    mime: str,
+    key: str,
+) -> None:
+    arquivo = Path(caminho).expanduser().resolve()
+    if not exige_entrega_local(arquivo):
+        with arquivo.open("rb") as fp:
+            st.download_button(
+                label=label,
+                data=fp,
+                file_name=nome,
+                mime=mime,
+                use_container_width=True,
+                key=key,
+            )
+        return
+
+    st.warning(
+        f"O arquivo possui {formatar_tamanho(arquivo.stat().st_size)} e não pode ser "
+        "transferido pelo botão do navegador sem consumir memória excessiva. "
+        "Ele está completo e salvo no Workspace."
+    )
+    coluna_abrir, coluna_copiar = st.columns(2)
+    if coluna_abrir.button(
+        "📂 Abrir pasta do relatório",
+        use_container_width=True,
+        key=f"{key}_abrir_pasta",
+    ):
+        abrir_workspace(arquivo.parent)
+    if coluna_copiar.button(
+        "Copiar relatório para Downloads",
+        use_container_width=True,
+        key=f"{key}_copiar_downloads",
+    ):
+        with st.spinner("Copiando o relatório sem carregá-lo na memória..."):
+            destino = copiar_para_downloads(arquivo)
+        st.success(f"Relatório copiado para: {destino}")
 
 
 @st.cache_data(show_spinner=False, ttl=30)
@@ -1588,15 +1632,13 @@ if modulo_ativo == "Levantamento de Verbas":
                         f"CPFs: {meta.get('qtd_cpfs', 0):,} | "
                         f"03_movimentos detalhado: {meta.get('incluiu_movimentos', 'Não')}".replace(",", ".")
                     )
-                with open(caminho_levantamento, "rb") as arquivo_levantamento:
-                    st.download_button(
-                        label="Baixar levantamento de verbas",
-                        data=arquivo_levantamento,
-                        file_name=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v9_5.xlsx"),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="download_levantamento_verbas",
-                    )
+                _oferecer_arquivo_gerado(
+                    caminho_levantamento,
+                    label="Baixar levantamento de verbas",
+                    nome=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v9_5.xlsx"),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_levantamento_verbas",
+                )
 
             df_levantamento_export = df_resumo_lev.copy()
 
@@ -1746,15 +1788,13 @@ if modulo_ativo == "Relatório de Incidência CP":
     caminho_relatorio_pronto = st.session_state.get("relatorio_excel_path")
     if caminho_relatorio_pronto and Path(caminho_relatorio_pronto).exists():
         st.success("Relatório consolidado pronto: um único arquivo Excel.")
-        with open(caminho_relatorio_pronto, "rb") as arquivo_relatorio:
-            st.download_button(
-                label="Baixar relatório de incidência CP",
-                data=arquivo_relatorio,
-                file_name=st.session_state.get("relatorio_excel_nome", Path(caminho_relatorio_pronto).name),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="download_relatorio_incidencia_sqlite",
-            )
+        _oferecer_arquivo_gerado(
+            caminho_relatorio_pronto,
+            label="Baixar relatório de incidência CP",
+            nome=st.session_state.get("relatorio_excel_nome", Path(caminho_relatorio_pronto).name),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_relatorio_incidencia_sqlite",
+        )
         manifesto_pronto = Path(caminho_relatorio_pronto).with_name(
             f"{Path(caminho_relatorio_pronto).stem}_manifesto.csv"
         )
