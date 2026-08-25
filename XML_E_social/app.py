@@ -1196,7 +1196,6 @@ if modulo_ativo == "Levantamento de Verbas":
         comp_lev = l5.multiselect(
             "Competências selecionadas",
             options=competencias,
-            default=[],
             key="lev_comp",
             help="Use o intervalo acima ou ajuste manualmente meses específicos. Vazio considera todo o período.",
         )
