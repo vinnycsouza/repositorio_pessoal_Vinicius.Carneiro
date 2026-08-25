@@ -21,6 +21,7 @@ from modules.hud_progresso import extrair_hud_ingestao
 from modules.data_source import SQLiteDataSource, WorkspaceContext
 from modules.levantamento_sqlite import (
     FiltrosLevantamento,
+    competencias_no_intervalo,
     consultar_levantamento,
     consultar_rubricas,
     gerar_excel_levantamento_sqlite,
@@ -1097,6 +1098,9 @@ if modulo_ativo == "Levantamento de Verbas":
         st.session_state.pop("lev_chaves_rubricas_selecionadas", None)
         st.session_state.pop("lev_editor_versao", None)
         st.session_state.pop("lev_catalogo_rubricas", None)
+        st.session_state.pop("lev_comp", None)
+        st.session_state.pop("lev_comp_inicio", None)
+        st.session_state.pop("lev_comp_fim", None)
         st.session_state.pop("levantamento_excel_path", None)
         st.session_state.pop("levantamento_ultima_geracao", None)
     fonte_levantamento_sqlite = None
@@ -1145,10 +1149,66 @@ if modulo_ativo == "Levantamento de Verbas":
         tipo_lev = l3.selectbox("Tipo", tipo_ops, key="lev_tipo")
         cp_lev = l4.selectbox("codIncCP", cp_ops, key="lev_codinc")
 
+        st.markdown("#### Período do levantamento")
+        if competencias:
+            periodo_inicio, periodo_fim, periodo_acao = st.columns([1, 1, 1.2])
+            inicio_lev = periodo_inicio.selectbox(
+                "Competência inicial",
+                competencias,
+                index=0,
+                key="lev_comp_inicio",
+            )
+            fim_lev = periodo_fim.selectbox(
+                "Competência final",
+                competencias,
+                index=len(competencias) - 1,
+                key="lev_comp_fim",
+            )
+            intervalo_valido = inicio_lev <= fim_lev
+
+            def _aplicar_intervalo_levantamento():
+                st.session_state["lev_comp"] = competencias_no_intervalo(
+                    competencias, inicio_lev, fim_lev
+                )
+
+            def _limpar_intervalo_levantamento():
+                st.session_state["lev_comp"] = []
+
+            periodo_acao.caption("Aplicar o intervalo completo ou limpar o recorte.")
+            acao_aplicar, acao_limpar = periodo_acao.columns(2)
+            acao_aplicar.button(
+                "Aplicar período",
+                use_container_width=True,
+                disabled=not intervalo_valido,
+                on_click=_aplicar_intervalo_levantamento,
+                key="lev_aplicar_periodo",
+            )
+            acao_limpar.button(
+                "Todo o período",
+                use_container_width=True,
+                on_click=_limpar_intervalo_levantamento,
+                key="lev_limpar_periodo",
+            )
+            if not intervalo_valido:
+                st.warning("A competência inicial deve ser anterior ou igual à competência final.")
+
         l5, l6, l7 = st.columns(3)
-        comp_lev = l5.multiselect("Competências", options=competencias, default=[], key="lev_comp")
+        comp_lev = l5.multiselect(
+            "Competências selecionadas",
+            options=competencias,
+            default=[],
+            key="lev_comp",
+            help="Use o intervalo acima ou ajuste manualmente meses específicos. Vazio considera todo o período.",
+        )
         aliquota_lev = l6.number_input("Alíquota estimada CPP (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.5, key="lev_aliquota")
         positivos_lev = l7.checkbox("Apenas valores positivos", value=True, key="lev_positivos")
+        if comp_lev:
+            st.caption(
+                f"Período aplicado: {min(comp_lev)} a {max(comp_lev)} · "
+                f"{len(comp_lev)} competência(s)."
+            )
+        else:
+            st.caption("Período aplicado: todas as competências disponíveis.")
 
         filtros_levantamento = FiltrosLevantamento(
             status_cp=status_lev,

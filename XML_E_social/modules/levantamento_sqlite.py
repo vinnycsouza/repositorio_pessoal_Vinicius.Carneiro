@@ -35,6 +35,20 @@ class ResultadoLevantamentoSQLite:
     movimentos_previa: pd.DataFrame
 
 
+def competencias_no_intervalo(
+    competencias: Iterable[str], inicio: str, fim: str
+) -> list[str]:
+    """Retorna competências disponíveis entre os limites, inclusive."""
+    opcoes = sorted({str(valor).strip() for valor in competencias if str(valor).strip()})
+    inicio = str(inicio or "").strip()
+    fim = str(fim or "").strip()
+    if not inicio or not fim:
+        return []
+    if inicio > fim:
+        raise ValueError("A competência inicial não pode ser posterior à final.")
+    return [competencia for competencia in opcoes if inicio <= competencia <= fim]
+
+
 def _where_filtros(filtros: FiltrosLevantamento, alias: str = "m") -> tuple[str, tuple]:
     prefixo = f"{alias}." if alias else ""
     condicoes: list[str] = []

@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 from modules.data_source import SQLiteDataSource, WorkspaceContext
 from modules.levantamento_sqlite import (
     FiltrosLevantamento,
+    competencias_no_intervalo,
     consultar_levantamento,
     consultar_rubricas,
     gerar_excel_levantamento_sqlite,
@@ -23,6 +24,23 @@ COLUNAS_MOVIMENTOS = [
 
 
 class LevantamentoSQLiteTest(unittest.TestCase):
+    def test_competencias_no_intervalo_inclusivo(self):
+        competencias = ["2026-01", "2026-02", "2026-03", "2026-04"]
+        self.assertEqual(
+            competencias_no_intervalo(competencias, "2026-02", "2026-03"),
+            ["2026-02", "2026-03"],
+        )
+        self.assertEqual(
+            competencias_no_intervalo(competencias, "2026-02", "2026-02"),
+            ["2026-02"],
+        )
+
+    def test_competencias_no_intervalo_rejeita_ordem_invalida(self):
+        with self.assertRaisesRegex(ValueError, "inicial"):
+            competencias_no_intervalo(
+                ["2026-01", "2026-02"], "2026-02", "2026-01"
+            )
+
     def _workspace(self, pasta: str) -> tuple[Path, pd.DataFrame]:
         workspace = Path(pasta) / "esocial_v3_teste"
         workspace.mkdir()
