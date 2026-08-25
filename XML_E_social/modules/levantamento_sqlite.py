@@ -179,11 +179,11 @@ def consultar_rubricas(
             "AND name='rel_rubricas_cp_base'"
         ).fetchone() is not None
 
-        # Sem recorte por competência, a tabela consolidada contém todas as
-        # rubricas necessárias para a seleção e evita reler milhões de movimentos.
-        # O filtro de valores positivos continua sendo aplicado, com exatidão, na
-        # consulta final do levantamento sobre rel_movimentos_cp.
-        if tem_catalogo and not filtros.competencias:
+        # A tabela consolidada contém as rubricas necessárias para a seleção e
+        # evita reler milhões de movimentos. Quando há período, o catálogo usa
+        # a sobreposição entre primeira/última competência. Os valores positivos
+        # e as competências exatas continuam sendo aplicados na consulta final.
+        if tem_catalogo:
             filtros_catalogo = FiltrosLevantamento(
                 status_cp=filtros.status_cp,
                 carater=filtros.carater,
@@ -193,6 +193,15 @@ def consultar_rubricas(
                 apenas_positivos=False,
             )
             where, params = _where_filtros(filtros_catalogo, "r")
+            if filtros.competencias:
+                inicio = min(filtros.competencias)
+                fim = max(filtros.competencias)
+                where += " AND " if where else " WHERE "
+                where += (
+                    "COALESCE(r.primeira_competencia,'')<=? AND "
+                    "COALESCE(r.ultima_competencia,'')>=?"
+                )
+                params += (fim, inicio)
             sql = """
                 SELECT cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
                        carater_verba,tipo_verba,

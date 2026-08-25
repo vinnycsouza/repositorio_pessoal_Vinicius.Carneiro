@@ -151,6 +151,27 @@ class LevantamentoSQLiteTest(unittest.TestCase):
             self.assertAlmostEqual(resultado.total, 300.0)
             self.assertEqual(resultado.qtd_movimentos, 2)
 
+    def test_catalogo_consolidado_filtra_por_sobreposicao_do_periodo(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            workspace, _ = self._workspace(pasta)
+            fonte = SQLiteDataSource(WorkspaceContext.from_path(workspace))
+
+            janeiro = consultar_rubricas(
+                fonte,
+                FiltrosLevantamento(
+                    competencias=("2026-01",), apenas_positivos=False
+                ),
+            )
+            marco = consultar_rubricas(
+                fonte,
+                FiltrosLevantamento(
+                    competencias=("2026-03",), apenas_positivos=False
+                ),
+            )
+
+            self.assertEqual(set(janeiro["cod_rubr"]), {"100", "200"})
+            self.assertTrue(marco.empty)
+
     def test_exportacao_detalhada_usa_sqlite(self):
         with tempfile.TemporaryDirectory() as pasta:
             workspace, _ = self._workspace(pasta)

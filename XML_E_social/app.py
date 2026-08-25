@@ -1295,10 +1295,11 @@ if modulo_ativo == "Levantamento de Verbas":
                 st.caption(
                     "Digite um código exato ou parte da descrição. A busca vazia não seleciona rubricas automaticamente."
                 )
-            if levantamento_sqlite and positivos_lev and not comp_lev:
+            if levantamento_sqlite:
                 st.caption(
-                    "O catálogo é carregado do resumo consolidado para manter a tela rápida. "
-                    "A condição de movimentos positivos será aplicada com exatidão no cálculo e na exportação."
+                    "O catálogo usa o resumo consolidado e a sobreposição do período para manter a tela rápida. "
+                    "As competências selecionadas e a condição de movimentos positivos serão aplicadas "
+                    "com exatidão no cálculo e na exportação."
                 )
 
             b1, b2, b3, b4 = st.columns([1.4, 1.4, 0.8, 1.4])
