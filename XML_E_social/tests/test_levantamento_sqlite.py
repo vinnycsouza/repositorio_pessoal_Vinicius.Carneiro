@@ -9,11 +9,13 @@ from openpyxl import load_workbook
 from modules.data_source import SQLiteDataSource, WorkspaceContext
 from modules.levantamento_sqlite import (
     FiltrosLevantamento,
+    chave_ordenacao_competencia,
     competencias_no_intervalo,
     consultar_levantamento,
     consultar_rubricas,
     gerar_excel_levantamento_sqlite,
     obter_opcoes_filtros,
+    rotulo_competencia,
 )
 
 
@@ -40,6 +42,26 @@ class LevantamentoSQLiteTest(unittest.TestCase):
             competencias_no_intervalo(
                 ["2026-01", "2026-02"], "2026-02", "2026-01"
             )
+
+    def test_intervalo_distingue_periodo_anual_do_decimo_terceiro(self):
+        competencias = ["2018", "2018-01", "2018-12", "2019", "2019-01"]
+        self.assertEqual(
+            competencias_no_intervalo(
+                competencias, "2018-01", "2018-12", incluir_anuais=True
+            ),
+            ["2018-01", "2018-12", "2018"],
+        )
+        self.assertEqual(
+            competencias_no_intervalo(
+                competencias, "2018-01", "2018-12", incluir_anuais=False
+            ),
+            ["2018-01", "2018-12"],
+        )
+        self.assertGreater(
+            chave_ordenacao_competencia("2018"),
+            chave_ordenacao_competencia("2018-12"),
+        )
+        self.assertIn("13º salário", rotulo_competencia("2018"))
 
     def _workspace(self, pasta: str) -> tuple[Path, pd.DataFrame]:
         workspace = Path(pasta) / "esocial_v3_teste"

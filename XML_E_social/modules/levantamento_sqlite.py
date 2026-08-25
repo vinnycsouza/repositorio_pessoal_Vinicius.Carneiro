@@ -35,18 +35,52 @@ class ResultadoLevantamentoSQLite:
     movimentos_previa: pd.DataFrame
 
 
+def chave_ordenacao_competencia(valor: str) -> tuple[int, int, str]:
+    texto = str(valor or "").strip()
+    if re.fullmatch(r"\d{4}-\d{2}", texto):
+        ano, mes = map(int, texto.split("-"))
+        return ano, mes, texto
+    if re.fullmatch(r"\d{4}", texto):
+        # O período anual do eSocial representa o 13º salário e fica após dezembro.
+        return int(texto), 13, texto
+    return 9999, 99, texto
+
+
+def rotulo_competencia(valor: str) -> str:
+    texto = str(valor or "").strip()
+    if re.fullmatch(r"\d{4}", texto):
+        return f"{texto} — 13º salário (período anual)"
+    return texto
+
+
 def competencias_no_intervalo(
-    competencias: Iterable[str], inicio: str, fim: str
+    competencias: Iterable[str],
+    inicio: str,
+    fim: str,
+    incluir_anuais: bool = True,
 ) -> list[str]:
-    """Retorna competências disponíveis entre os limites, inclusive."""
-    opcoes = sorted({str(valor).strip() for valor in competencias if str(valor).strip()})
+    """Retorna competências mensais e, opcionalmente, períodos anuais do 13º."""
+    opcoes = sorted(
+        {str(valor).strip() for valor in competencias if str(valor).strip()},
+        key=chave_ordenacao_competencia,
+    )
     inicio = str(inicio or "").strip()
     fim = str(fim or "").strip()
     if not inicio or not fim:
         return []
-    if inicio > fim:
+    chave_inicio = chave_ordenacao_competencia(inicio)
+    chave_fim = chave_ordenacao_competencia(fim)
+    if chave_inicio > chave_fim:
         raise ValueError("A competência inicial não pode ser posterior à final.")
-    return [competencia for competencia in opcoes if inicio <= competencia <= fim]
+    ano_inicio, ano_fim = chave_inicio[0], chave_fim[0]
+    selecionadas: list[str] = []
+    for competencia in opcoes:
+        if re.fullmatch(r"\d{4}", competencia):
+            if incluir_anuais and ano_inicio <= int(competencia) <= ano_fim:
+                selecionadas.append(competencia)
+        elif chave_inicio <= chave_ordenacao_competencia(competencia) <= chave_fim:
+            selecionadas.append(competencia)
+    return selecionadas
 
 
 def _where_filtros(filtros: FiltrosLevantamento, alias: str = "m") -> tuple[str, tuple]:
@@ -147,16 +181,26 @@ def obter_opcoes_filtros(fonte: SQLiteDataSource) -> dict[str, list[str]]:
                 ano, mes = map(int, inicio.split("-"))
                 ano_fim, mes_fim = map(int, fim.split("-"))
                 competencias = []
+                primeiro_ano = ano
                 while (ano, mes) <= (ano_fim, mes_fim):
                     competencias.append(f"{ano:04d}-{mes:02d}")
                     mes += 1
                     if mes == 13:
                         ano += 1
                         mes = 1
+                for ano_anual in range(primeiro_ano, ano_fim + 1):
+                    periodo_anual = f"{ano_anual:04d}"
+                    if conn.execute(
+                        "SELECT 1 FROM rel_movimentos_cp WHERE per_apur=? LIMIT 1",
+                        (periodo_anual,),
+                    ).fetchone():
+                        competencias.append(periodo_anual)
+                competencias.sort(key=chave_ordenacao_competencia)
             else:
                 competencias = distintos("per_apur", "rel_movimentos_cp")
         else:
             competencias = distintos("per_apur", "rel_movimentos_cp")
+        competencias.sort(key=chave_ordenacao_competencia)
 
         return {
             "status_cp": distintos("status_cp", tabela_catalogo),

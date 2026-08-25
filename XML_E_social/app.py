@@ -21,11 +21,13 @@ from modules.hud_progresso import extrair_hud_ingestao
 from modules.data_source import SQLiteDataSource, WorkspaceContext
 from modules.levantamento_sqlite import (
     FiltrosLevantamento,
+    chave_ordenacao_competencia,
     competencias_no_intervalo,
     consultar_levantamento,
     consultar_rubricas,
     gerar_excel_levantamento_sqlite,
     obter_opcoes_filtros,
+    rotulo_competencia,
 )
 from modules.processador_zip import (
     atualizar_workspace_incremental,
@@ -1157,18 +1159,31 @@ if modulo_ativo == "Levantamento de Verbas":
                 competencias,
                 index=0,
                 key="lev_comp_inicio",
+                format_func=rotulo_competencia,
             )
             fim_lev = periodo_fim.selectbox(
                 "Competência final",
                 competencias,
                 index=len(competencias) - 1,
                 key="lev_comp_fim",
+                format_func=rotulo_competencia,
             )
-            intervalo_valido = inicio_lev <= fim_lev
+            intervalo_valido = (
+                chave_ordenacao_competencia(inicio_lev)
+                <= chave_ordenacao_competencia(fim_lev)
+            )
+            incluir_anuais_lev = periodo_acao.checkbox(
+                "Incluir períodos anuais do 13º salário",
+                value=True,
+                key="lev_incluir_periodos_anuais",
+            )
 
             def _aplicar_intervalo_levantamento():
                 st.session_state["lev_comp"] = competencias_no_intervalo(
-                    competencias, inicio_lev, fim_lev
+                    competencias,
+                    inicio_lev,
+                    fim_lev,
+                    incluir_anuais=incluir_anuais_lev,
                 )
 
             def _limpar_intervalo_levantamento():
@@ -1197,14 +1212,18 @@ if modulo_ativo == "Levantamento de Verbas":
             "Competências selecionadas",
             options=competencias,
             key="lev_comp",
+            format_func=rotulo_competencia,
             help="Use o intervalo acima ou ajuste manualmente meses específicos. Vazio considera todo o período.",
         )
         aliquota_lev = l6.number_input("Alíquota estimada CPP (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.5, key="lev_aliquota")
         positivos_lev = l7.checkbox("Apenas valores positivos", value=True, key="lev_positivos")
         if comp_lev:
+            comp_ordenadas = sorted(comp_lev, key=chave_ordenacao_competencia)
+            qtd_anuais = sum(1 for comp in comp_lev if len(str(comp)) == 4)
             st.caption(
-                f"Período aplicado: {min(comp_lev)} a {max(comp_lev)} · "
-                f"{len(comp_lev)} competência(s)."
+                f"Período aplicado: {rotulo_competencia(comp_ordenadas[0])} a "
+                f"{rotulo_competencia(comp_ordenadas[-1])} · {len(comp_lev)} período(s), "
+                f"incluindo {qtd_anuais} anual(is) de 13º salário."
             )
         else:
             st.caption("Período aplicado: todas as competências disponíveis.")
