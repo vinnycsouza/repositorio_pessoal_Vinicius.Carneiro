@@ -850,11 +850,28 @@ if modo_entrada == "ZIP(s) do eSocial":
 elif modo_entrada in {"SQLite existente", "Workspace (SQLite existente)"}:
     if gerar_relatorio:
         try:
-            contexto_carregado = WorkspaceContext.from_path(caminho_sqlite_existente)
-            st.session_state["resultado_v82"] = carregar_resultado_sqlite_existente(
-                contexto_carregado.db_path,
-                somente_levantamento=(modulo_ativo == "Levantamento de Verbas"),
+            atualizar_consistencia, _, status_consistencia = _criar_progresso(
+                "Verificação de consistência do Workspace"
             )
+            st.session_state["resultado_v82"] = carregar_resultado_sqlite_existente(
+                caminho_sqlite_existente,
+                somente_levantamento=(modulo_ativo == "Levantamento de Verbas"),
+                progress_callback=atualizar_consistencia,
+            )
+            consistencia = st.session_state["resultado_v82"].get(
+                "consistencia_workspace", {}
+            )
+            repetidos = int(consistencia.get("eventos_inativados", 0) or 0)
+            if repetidos:
+                status_consistencia.success(
+                    f"Workspace atualizado: {repetidos:,} cópia(s) S-1200 por recibo "
+                    "foram preservadas no inventário e desconsideradas dos relatórios."
+                    .replace(",", ".")
+                )
+            else:
+                status_consistencia.success(
+                    "Workspace consistente para geração dos relatórios."
+                )
             st.success("Banco SQLite carregado. O processamento dos XMLs não será repetido.")
         except Exception as exc:
             st.error(f"Não foi possível carregar o banco: {exc}")

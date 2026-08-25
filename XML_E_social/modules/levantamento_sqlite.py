@@ -381,6 +381,12 @@ def gerar_excel_levantamento_sqlite(
     incluir_movimentos: bool,
     progress_callback=None,
 ) -> ResultadoWorkbook:
+    from modules.processador_zip import preparar_workspace_para_relatorios
+
+    preparar_workspace_para_relatorios(
+        fonte.db_path,
+        progress_callback=progress_callback,
+    )
     conn = fonte.conectar()
     try:
         _preparar_selecao(conn, chaves)

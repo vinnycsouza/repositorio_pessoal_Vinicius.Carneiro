@@ -18,6 +18,8 @@ from modules.levantamento_sqlite import (
 )
 from modules.processador_zip import (
     atualizar_workspace_incremental,
+    carregar_resultado_sqlite_existente,
+    corrigir_duplicados_s1200_por_recibo,
     obter_resumo_carga_incremental,
     organizar_fontes_carga_inicial,
     processar_fontes_esocial,
@@ -45,6 +47,8 @@ S1200_RETIF = S1200.replace(
 ).replace('<vrRubr>100.00</vrRubr>', '<vrRubr>250.00</vrRubr>').replace(
     '<nrRecibo>R1</nrRecibo></recibo>', '<nrRecibo>R2</nrRecibo></recibo>'
 )
+
+S1200_MESMO_RECIBO_OUTRO_XML = S1200.replace('Id="ID1200"', 'Id="ID1200-COPIA"')
 
 
 class CargaIncrementalTest(unittest.TestCase):
@@ -168,6 +172,101 @@ class CargaIncrementalTest(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0], 2)
         finally:
             conn.close()
+
+    def test_mesmo_recibo_em_xml_distinto_nao_duplica_movimentos(self):
+        resultado = processar_fontes_esocial([
+            ("sobrepostos.zip", zip_xmls(
+                **{"primeiro.xml": S1200, "segundo.xml": S1200_MESMO_RECIBO_OUTRO_XML}
+            ))
+        ])
+        conn = sqlite3.connect(Path(resultado["db_path"]))
+        try:
+            ativos, inativos = conn.execute(
+                "SELECT SUM(ativo=1),SUM(ativo=0) FROM eventos WHERE tipo='S-1200'"
+            ).fetchone()
+            movimentos = conn.execute("SELECT COUNT(*) FROM rel_movimentos_cp").fetchone()[0]
+            vinculo = conn.execute(
+                "SELECT COUNT(*) FROM eventos WHERE duplicado_logico_de IS NOT NULL"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual((ativos, inativos), (1, 1))
+        self.assertEqual(movimentos, 1)
+        self.assertEqual(vinculo, 1)
+
+    def test_corrige_workspace_legado_sem_reprocessar_xml(self):
+        resultado = self._inicial()
+        conn = sqlite3.connect(Path(resultado["db_path"]))
+        try:
+            canonico = conn.execute(
+                "SELECT id FROM eventos WHERE tipo='S-1200'"
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO eventos(arquivo,tipo,tamanho_bytes,envelope_recibo,xml_zlib,"
+                "processado_segunda,hash_conteudo,ativo,id_evento_esocial,ind_retif,"
+                "recibo_evento,recibo_referencia) "
+                "SELECT 'copia.xml',tipo,tamanho_bytes,envelope_recibo,xml_zlib,1,'hash-copia',0,"
+                "'ID-COPIA',ind_retif,recibo_evento,recibo_referencia FROM eventos WHERE id=?",
+                (canonico,),
+            )
+            copia = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            payload = conn.execute(
+                "SELECT payload FROM objetos WHERE categoria='remuneracoes' AND evento_id=?",
+                (canonico,),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO objetos(categoria,evento_id,payload) VALUES('remuneracoes',?,?)",
+                (copia, payload),
+            )
+            conn.execute("INSERT INTO dados_remuneracoes SELECT * FROM dados_remuneracoes LIMIT 1")
+            conn.execute(
+                "UPDATE dados_remuneracoes SET arquivo='copia.xml' "
+                "WHERE rowid=(SELECT MAX(rowid) FROM dados_remuneracoes)"
+            )
+            conn.execute(
+                "DELETE FROM meta WHERE chave='versao_consistencia_recibo_s1200'"
+            )
+            conn.commit()
+            resumo = corrigir_duplicados_s1200_por_recibo(conn)
+            movimentos = conn.execute("SELECT COUNT(*) FROM rel_movimentos_cp").fetchone()[0]
+            inventario = conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo='S-1200'").fetchone()[0]
+            linhas_brutas = conn.execute("SELECT COUNT(*) FROM dados_remuneracoes").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(resumo["eventos_inativados"], 1)
+        self.assertEqual(resumo["objetos_preservados"], 1)
+        self.assertEqual(movimentos, 1)
+        self.assertEqual(inventario, 2)
+        self.assertEqual(linhas_brutas, 2)
+
+    def test_carregamento_reconstroi_consolidacao_interrompida(self):
+        resultado = self._inicial()
+        db = Path(resultado["db_path"])
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("DROP TABLE rel_movimentos_cp")
+            conn.execute(
+                "INSERT INTO meta(chave,valor) VALUES('versao_consistencia_recibo_s1200','2') "
+                "ON CONFLICT(chave) DO UPDATE SET valor='2'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        carregado = carregar_resultado_sqlite_existente(
+            db.parent,
+            somente_levantamento=True,
+        )
+        conn = sqlite3.connect(db)
+        try:
+            movimentos = conn.execute("SELECT COUNT(*) FROM rel_movimentos_cp").fetchone()[0]
+            versao = conn.execute(
+                "SELECT valor FROM meta WHERE chave='versao_consistencia_recibo_s1200'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(movimentos, 1)
+        self.assertEqual(versao, "3")
+        self.assertTrue(carregado["modo_sqlite_seguro"])
 
     def test_s1010_duplicado_pode_ser_reprocessado_sem_duplicar_evento(self):
         inicial = processar_fontes_esocial(

@@ -214,6 +214,7 @@ def reiniciar_materializacao_analitica(conn: sqlite3.Connection) -> None:
 
 def _criar_indices(conn: sqlite3.Connection) -> None:
     comandos = [
+        "CREATE INDEX IF NOT EXISTS idx_remun_arquivo ON dados_remuneracoes(arquivo)",
         "CREATE INDEX IF NOT EXISTS idx_remun_per ON dados_remuneracoes(per_apur)",
         "CREATE INDEX IF NOT EXISTS idx_remun_rubr ON dados_remuneracoes(cod_rubr, ide_tab_rubr)",
         "CREATE INDEX IF NOT EXISTS idx_remun_cp ON dados_remuneracoes(cod_inc_cp)",
@@ -241,7 +242,9 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
     CREATE TABLE rel_movimentos_cp AS
     SELECT r.*
     FROM dados_remuneracoes r
-    WHERE COALESCE(r.nr_recibo_evento,'') NOT IN (
+    JOIN eventos e ON e.arquivo=r.arquivo AND e.tipo='S-1200'
+    WHERE e.ativo=1 AND e.duplicado_logico_de IS NULL
+      AND COALESCE(r.nr_recibo_evento,'') NOT IN (
         SELECT COALESCE(nrRecEvt,'') FROM dados_exclusoes WHERE COALESCE(nrRecEvt,'')<>''
     );
     CREATE INDEX idx_rel_mov_cp ON rel_movimentos_cp(cod_inc_cp);
@@ -331,6 +334,14 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
         "Controles de integridade concluídos.",
         "Consolidação SQLite concluída sem carregar bases gigantes na memória.",
     )
+
+
+def reconstruir_consolidados_analiticos(
+    conn: sqlite3.Connection,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
+    """Reconstrói somente os consolidados a partir das tabelas analíticas."""
+    _criar_tabelas_relatorio(conn, progress_callback)
 
 
 def _metricas_movimentos(conn: sqlite3.Connection) -> dict[str, float | int]:
@@ -459,6 +470,12 @@ def gerar_excel_saida_sqlite(
     gerar_manifesto: bool = False,
 ) -> str:
     """Gera um unico relatório V9.5 em streaming e valida antes da entrega."""
+    from modules.processador_zip import preparar_workspace_para_relatorios
+
+    preparar_workspace_para_relatorios(
+        db_path,
+        progress_callback=progress_callback,
+    )
     destino = Path(caminho_saida)
     destino.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
