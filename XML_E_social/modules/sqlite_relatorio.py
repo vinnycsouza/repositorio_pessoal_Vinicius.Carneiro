@@ -32,6 +32,21 @@ MAX_DADOS_ABA = 1_048_575
 CHUNK_EXPORT = 25_000
 
 
+_SQL_MOVIMENTOS_CP_EFETIVOS = """
+SELECT r.*
+FROM dados_remuneracoes AS r
+CROSS JOIN eventos AS e ON e.arquivo = r.arquivo
+WHERE e.tipo='S-1200'
+  AND e.ativo=1
+  AND e.duplicado_logico_de IS NULL
+  AND COALESCE(r.nr_recibo_evento,'') NOT IN (
+    SELECT COALESCE(nrRecEvt,'')
+    FROM dados_exclusoes
+    WHERE COALESCE(nrRecEvt,'')<>''
+  )
+"""
+
+
 SCHEMAS_PADRAO = {
     "dados_rubricas": {"cod_rubr":"", "ide_tab_rubr":"", "dsc_rubr":"", "nat_rubr":"", "cod_inc_cp":"", "cod_inc_fgts":"", "cod_inc_irrf":"", "tp_rubr":"", "origem_bloco":"", "ini_valid":"", "fim_valid":"", "arquivo_origem":"", "fonte_dados":""},
     "dados_exclusoes": {"nrRecEvt":"", "arquivo_origem":""},
@@ -232,27 +247,112 @@ def _criar_indices(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _formatar_duracao_consulta(segundos: float) -> str:
+    total = max(0, int(segundos))
+    horas, resto = divmod(total, 3600)
+    minutos, segundos = divmod(resto, 60)
+    if horas:
+        return f"{horas}h {minutos:02d}min"
+    if minutos:
+        return f"{minutos}min {segundos:02d}s"
+    return f"{segundos}s"
+
+
+def _executar_consulta_com_heartbeat(
+    conn: sqlite3.Connection,
+    sql: str,
+    cb: ProgressCallback | None,
+    progresso: float,
+    mensagem: str,
+) -> None:
+    """Executa SQL longo mantendo o HUD vivo, sem consultar o banco no callback."""
+    inicio = time.monotonic()
+    ultimo_aviso = inicio
+
+    def avisar_atividade() -> int:
+        nonlocal ultimo_aviso
+        agora = time.monotonic()
+        if cb is not None and agora - ultimo_aviso >= 5.0:
+            ultimo_aviso = agora
+            try:
+                emitir_progresso(
+                    cb,
+                    "consolidacao",
+                    progresso,
+                    mensagem,
+                    "Consulta SQLite ativa há "
+                    f"{_formatar_duracao_consulta(agora - inicio)}.",
+                )
+            except Exception:
+                # O HUD é observabilidade: uma falha visual não deve cancelar
+                # a transação SQLite que preserva a consistência do Workspace.
+                pass
+        return 0
+
+    conn.set_progress_handler(avisar_atividade, 250_000)
+    try:
+        conn.execute(sql)
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
+def _recriar_tabela_derivada(
+    conn: sqlite3.Connection,
+    tabela: str,
+    consulta: str,
+    cb: ProgressCallback | None,
+    progresso: float,
+    mensagem: str,
+) -> None:
+    """Monta uma projeção ao lado da atual e a substitui somente ao concluir."""
+    temporaria = f"{tabela}_nova"
+    conn.execute(f"DROP TABLE IF EXISTS {_q(temporaria)}")
+    conn.commit()
+    _executar_consulta_com_heartbeat(
+        conn,
+        f"CREATE TABLE {_q(temporaria)} AS {consulta}",
+        cb,
+        progresso,
+        mensagem,
+    )
+    conn.commit()
+    with conn:
+        conn.execute(f"DROP TABLE IF EXISTS {_q(tabela)}")
+        conn.execute(
+            f"ALTER TABLE {_q(temporaria)} RENAME TO {_q(tabela)}"
+        )
+
+
 def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | None) -> None:
     emitir_progresso(
         cb, "consolidacao", 0.0,
         "Consolidando rubricas e totais diretamente no SQLite...",
     )
+    emitir_progresso(
+        cb, "consolidacao", 0.05,
+        "Selecionando movimentos S-1200 efetivos em uma única varredura...",
+        "Os XMLs e as tabelas analíticas permanecem intactos.",
+    )
+    _recriar_tabela_derivada(
+        conn,
+        "rel_movimentos_cp",
+        _SQL_MOVIMENTOS_CP_EFETIVOS,
+        cb,
+        0.05,
+        "Selecionando movimentos S-1200 efetivos em uma única varredura...",
+    )
+    emitir_progresso(
+        cb, "consolidacao", 0.35,
+        "Movimentos efetivos selecionados; criando índices do relatório...",
+    )
     conn.executescript("""
-    DROP TABLE IF EXISTS rel_movimentos_cp;
-    CREATE TABLE rel_movimentos_cp AS
-    SELECT r.*
-    FROM dados_remuneracoes r
-    JOIN eventos e ON e.arquivo=r.arquivo AND e.tipo='S-1200'
-    WHERE e.ativo=1 AND e.duplicado_logico_de IS NULL
-      AND COALESCE(r.nr_recibo_evento,'') NOT IN (
-        SELECT COALESCE(nrRecEvt,'') FROM dados_exclusoes WHERE COALESCE(nrRecEvt,'')<>''
-    );
-    CREATE INDEX idx_rel_mov_cp ON rel_movimentos_cp(cod_inc_cp);
-    CREATE INDEX idx_rel_mov_rubr ON rel_movimentos_cp(cod_rubr, ide_tab_rubr);
-    CREATE INDEX idx_rel_mov_trab ON rel_movimentos_cp(per_apur, cpf, matricula);
+    CREATE INDEX IF NOT EXISTS idx_rel_mov_cp ON rel_movimentos_cp(cod_inc_cp);
+    CREATE INDEX IF NOT EXISTS idx_rel_mov_rubr ON rel_movimentos_cp(cod_rubr, ide_tab_rubr);
+    CREATE INDEX IF NOT EXISTS idx_rel_mov_trab ON rel_movimentos_cp(per_apur, cpf, matricula);
+    """)
+    conn.commit()
 
-    DROP TABLE IF EXISTS rel_rubricas_cp_base;
-    CREATE TABLE rel_rubricas_cp_base AS
+    _recriar_tabela_derivada(conn, "rel_rubricas_cp_base", """
     SELECT cod_rubr, ide_tab_rubr, dsc_rubr, nat_rubr, tp_rubr, cod_inc_cp,
            ini_valid, fim_valid, origem_bloco_s1010, criterio_cruzamento_s1010,
            origem_validacao, nivel_confianca, status_auditoria,
@@ -266,27 +366,27 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
     GROUP BY cod_rubr, ide_tab_rubr, dsc_rubr, nat_rubr, tp_rubr, cod_inc_cp,
              ini_valid, fim_valid, origem_bloco_s1010, criterio_cruzamento_s1010,
              origem_validacao, nivel_confianca, status_auditoria,
-             status_cp, considerado_cp, tipo_verba, carater_verba;
+             status_cp, considerado_cp, tipo_verba, carater_verba
+    """, cb, 0.48, "Consolidando rubricas e totais...")
 
-    DROP TABLE IF EXISTS rel_sem_s1010;
-    CREATE TABLE rel_sem_s1010 AS
+    _recriar_tabela_derivada(conn, "rel_sem_s1010", """
     SELECT per_apur, cpf, matricula, cod_rubr, ide_tab_rubr, dsc_rubr,
            SUM(CAST(vr_rubr AS REAL)) valor_rubrica, COUNT(*) qtd_lancamentos
     FROM rel_movimentos_cp WHERE status_cp='Sem S-1010'
-    GROUP BY per_apur, cpf, matricula, cod_rubr, ide_tab_rubr, dsc_rubr;
+    GROUP BY per_apur, cpf, matricula, cod_rubr, ide_tab_rubr, dsc_rubr
+    """, cb, 0.60, "Consolidando ocorrências sem S-1010...")
 
-    DROP TABLE IF EXISTS rel_s5001_resumo;
-    CREATE TABLE rel_s5001_resumo AS
+    _recriar_tabela_derivada(conn, "rel_s5001_resumo", """
     SELECT cpf, matricula, per_apur, cod_categ, tp_insc_estab, nr_insc_estab,
            cod_lotacao, tp_valor, SUM(CAST(valor AS REAL)) valor_s5001, COUNT(*) qtd_linhas_s5001
     FROM dados_bases_trabalhador
     WHERE origem_valor='infoBaseCS' AND COALESCE(nr_recibo_base,'') NOT IN (
         SELECT COALESCE(nrRecEvt,'') FROM dados_exclusoes WHERE COALESCE(nrRecEvt,'')<>''
     )
-    GROUP BY cpf, matricula, per_apur, cod_categ, tp_insc_estab, nr_insc_estab, cod_lotacao, tp_valor;
+    GROUP BY cpf, matricula, per_apur, cod_categ, tp_insc_estab, nr_insc_estab, cod_lotacao, tp_valor
+    """, cb, 0.70, "Consolidando bases oficiais S-5001...")
 
-    DROP TABLE IF EXISTS rel_base_trabalhador;
-    CREATE TABLE rel_base_trabalhador AS
+    _recriar_tabela_derivada(conn, "rel_base_trabalhador", """
     WITH teorica AS (
       SELECT per_apur, cpf, matricula, cod_categ, cod_lotacao,
              SUM(CAST(vr_rubr AS REAL)) total_s1200,
@@ -309,25 +409,23 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
            0,0,0,0,0,o.total_s5001_infoBaseCS,-o.total_s5001_infoBaseCS,
            CASE WHEN ABS(o.total_s5001_infoBaseCS)<=0.05 THEN 'OK' ELSE 'Revisar' END
     FROM oficial o LEFT JOIN teorica t USING(per_apur,cpf,matricula,cod_categ,cod_lotacao)
-    WHERE t.cpf IS NULL;
-    """)
+    WHERE t.cpf IS NULL
+    """, cb, 0.82, "Consolidando bases por trabalhador...")
     conn.commit()
     emitir_progresso(
-        cb, "consolidacao", 1.0,
+        cb, "consolidacao", 0.95,
         "Consolidações dos relatórios concluídas.",
     )
     emitir_progresso(
         cb, "integridade", 0.0,
         "Criando controles de integridade do relatório...",
     )
-    conn.executescript("""
-    DROP TABLE IF EXISTS rel_controle_integridade;
-    CREATE TABLE rel_controle_integridade AS
+    _recriar_tabela_derivada(conn, "rel_controle_integridade", """
     SELECT 'rel_movimentos_cp' tabela, COUNT(*) quantidade, COALESCE(SUM(CAST(vr_rubr AS REAL)),0) soma_valores FROM rel_movimentos_cp
     UNION ALL SELECT 'dados_bases_trabalhador', COUNT(*), COALESCE(SUM(CAST(valor AS REAL)),0) FROM dados_bases_trabalhador
     UNION ALL SELECT 'dados_bases_contribuicao', COUNT(*), COALESCE(SUM(CAST(vr_bc_cp AS REAL)),0) FROM dados_bases_contribuicao
-    UNION ALL SELECT 'eventos', COUNT(*), COALESCE(SUM(tamanho_bytes),0) FROM eventos;
-    """)
+    UNION ALL SELECT 'eventos', COUNT(*), COALESCE(SUM(tamanho_bytes),0) FROM eventos
+    """, cb, 0.98, "Atualizando os controles de integridade...")
     conn.commit()
     emitir_progresso(
         cb, "integridade", 1.0,

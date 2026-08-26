@@ -24,7 +24,10 @@ from modules.processador_zip import (
     organizar_fontes_carga_inicial,
     processar_fontes_esocial,
 )
-from modules.sqlite_relatorio import gerar_excel_saida_sqlite
+from modules.sqlite_relatorio import (
+    _SQL_MOVIMENTOS_CP_EFETIVOS,
+    gerar_excel_saida_sqlite,
+)
 
 
 def zip_xmls(**arquivos: str) -> bytes:
@@ -245,6 +248,7 @@ class CargaIncrementalTest(unittest.TestCase):
         conn = sqlite3.connect(db)
         try:
             conn.execute("DROP TABLE rel_movimentos_cp")
+            conn.execute("CREATE TABLE rel_movimentos_cp_nova(lixo TEXT)")
             conn.execute(
                 "INSERT INTO meta(chave,valor) VALUES('versao_consistencia_recibo_s1200','2') "
                 "ON CONFLICT(chave) DO UPDATE SET valor='2'"
@@ -252,9 +256,13 @@ class CargaIncrementalTest(unittest.TestCase):
             conn.commit()
         finally:
             conn.close()
+        mensagens = []
         carregado = carregar_resultado_sqlite_existente(
             db.parent,
             somente_levantamento=True,
+            progress_callback=lambda valor, mensagem: mensagens.append(
+                (valor, mensagem)
+            ),
         )
         conn = sqlite3.connect(db)
         try:
@@ -262,11 +270,43 @@ class CargaIncrementalTest(unittest.TestCase):
             versao = conn.execute(
                 "SELECT valor FROM meta WHERE chave='versao_consistencia_recibo_s1200'"
             ).fetchone()[0]
+            temporaria = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='rel_movimentos_cp_nova'"
+            ).fetchone()
         finally:
             conn.close()
         self.assertEqual(movimentos, 1)
         self.assertEqual(versao, "3")
+        self.assertIsNone(temporaria)
         self.assertTrue(carregado["modo_sqlite_seguro"])
+        self.assertTrue(any(
+            "única varredura" in mensagem for _, mensagem in mensagens
+        ))
+        self.assertTrue(any(
+            "Consolidações dos relatórios concluídas" in mensagem
+            for _, mensagem in mensagens
+        ))
+
+    def test_plano_de_reconstrucao_varre_remuneracoes_uma_unica_vez(self):
+        resultado = self._inicial()
+        conn = sqlite3.connect(Path(resultado["db_path"]))
+        try:
+            # Reproduz um Workspace antigo que ainda não possui esse índice novo.
+            conn.execute("DROP INDEX IF EXISTS idx_remun_arquivo")
+            plano = [
+                str(row[3])
+                for row in conn.execute(
+                    "EXPLAIN QUERY PLAN " + _SQL_MOVIMENTOS_CP_EFETIVOS
+                )
+            ]
+        finally:
+            conn.close()
+        texto = " | ".join(plano)
+        self.assertIn("SCAN r", texto)
+        self.assertIn("SEARCH e USING INDEX", texto)
+        self.assertIn("(arquivo=?)", texto)
+        self.assertLess(texto.index("SCAN r"), texto.index("SEARCH e USING INDEX"))
 
     def test_s1010_duplicado_pode_ser_reprocessado_sem_duplicar_evento(self):
         inicial = processar_fontes_esocial(

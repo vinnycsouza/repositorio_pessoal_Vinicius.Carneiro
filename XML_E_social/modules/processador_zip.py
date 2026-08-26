@@ -858,7 +858,10 @@ def corrigir_duplicados_s1200_por_recibo(
                 progress_callback, "integridade", 0.75,
                 "Retomando a atualização dos relatórios a partir dos eventos efetivos...",
             )
-            reconstruir_consolidados_analiticos(conn)
+            reconstruir_consolidados_analiticos(
+                conn,
+                progress_callback=progress_callback,
+            )
         _meta_set(conn, "versao_consistencia_recibo_s1200", VERSAO_CONSISTENCIA_RECIBO_S1200)
         _meta_set(conn, "duplicidade_recibo_s1200_corrigida_em", time.time())
         conn.commit()
@@ -903,7 +906,10 @@ def corrigir_duplicados_s1200_por_recibo(
             progress_callback, "integridade", 0.75,
             "Atualizando os relatórios a partir dos eventos efetivos...",
         )
-        reconstruir_consolidados_analiticos(conn)
+        reconstruir_consolidados_analiticos(
+            conn,
+            progress_callback=progress_callback,
+        )
         conn.commit()
     _meta_set(conn, "versao_consistencia_recibo_s1200", VERSAO_CONSISTENCIA_RECIBO_S1200)
     conn.commit()
