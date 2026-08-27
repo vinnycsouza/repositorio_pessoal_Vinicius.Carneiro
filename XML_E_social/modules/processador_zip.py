@@ -21,7 +21,9 @@ import pandas as pd
 
 from modules.parser_xml import (
     BaseContribuicao, BaseTrabalhador, RubricaInfo, RubricaPagamento,
-    parse_s1010, parse_s1200, parse_s3000, parse_s5001, parse_s5011,
+    parse_s1000_contexto, parse_s1010, parse_s1020_contexto,
+    parse_s1200, parse_s1200_v10, parse_s2200_contexto, parse_s2299,
+    parse_s3000, parse_s5001, parse_s5011,
     obter_recibo_principal,
 )
 from utils.helpers import localname
@@ -32,19 +34,32 @@ from modules.sqlite_relatorio import (
     reiniciar_materializacao_analitica,
 )
 from modules.progresso import emitir_progresso
-from modules.event_metadata import identificar_evento_rapido, inspecionar_evento
+from modules.event_metadata import (
+    identificar_evento_rapido,
+    inspecionar_evento,
+    inspecionar_evento_streaming,
+)
 from modules.telemetria import TelemetriaCarga
+from modules.sqlite_writer import BatchPolicy
+from modules.xsd_validator import validar_xml_xsd
+from modules.v10_core import (
+    PARSER_VERSION,
+    flag_ativa,
+    modo_parser,
+    registrar_versoes_workspace,
+    assinatura_itens,
+)
 
 Fonte = Tuple[str, Union[bytes, bytearray, memoryview, str, os.PathLike]]
 ProgressCallback = Callable[[float, str], None]
 
-EVENTOS_SUPORTADOS = {"S-1000", "S-1005", "S-1010", "S-1020", "S-1200", "S-3000", "S-5001", "S-5011"}
-EVENTOS_SEGUNDA_PASSAGEM = {"S-1200", "S-5001", "S-5011"}
+EVENTOS_SUPORTADOS = {"S-1000", "S-1005", "S-1010", "S-1020", "S-1200", "S-2200", "S-2299", "S-3000", "S-5001", "S-5011"}
+EVENTOS_SEGUNDA_PASSAGEM = {"S-1200", "S-2299", "S-5001", "S-5011"}
 CHECKPOINT_INTERVALO = 500
 BATCH_SEGUNDA_PASSAGEM = 250
 MAX_BYTES_LOTE_SEGUNDA_PASSAGEM = 32 * 1024 * 1024
 MAX_NIVEL_ZIP = 8
-VERSAO_CONSISTENCIA_RECIBO_S1200 = 3
+VERSAO_CONSISTENCIA_RECIBO_S1200 = 4
 MAX_XML_INDIVIDUAL = 256 * 1024 * 1024
 ARQUIVO_BLOQUEIO_WORKSPACE = ".processamento.lock"
 
@@ -258,7 +273,13 @@ def _conectar(db_path: Path) -> sqlite3.Connection:
     # Agrupamentos e indices de empresas grandes podem exceder a RAM. O SQLite
     # usa arquivos temporarios no disco, preservando memoria para parser/Excel.
     conn.execute("PRAGMA temp_store=FILE")
-    conn.execute("PRAGMA cache_size=-131072")
+    pressao = BatchPolicy.atual("analitico").pressao_memoria
+    cache_mb_padrao = 64 if pressao else 128
+    cache_mb = max(
+        32,
+        min(512, int(os.environ.get("ESOCIAL_SQLITE_CACHE_MB", cache_mb_padrao))),
+    )
+    conn.execute(f"PRAGMA cache_size=-{cache_mb * 1024}")
     conn.execute("PRAGMA busy_timeout=120000")
     return conn
 
@@ -349,6 +370,22 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
         tempo_segundos REAL NOT NULL DEFAULT 0,
         media_ms REAL NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS migracoes_workspace (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        versao_origem TEXT NOT NULL,
+        versao_destino TEXT NOT NULL,
+        iniciada_em REAL NOT NULL,
+        concluida_em REAL,
+        status TEXT NOT NULL DEFAULT 'processando',
+        resumo TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS backup_logico_migracao (
+        migracao_id INTEGER NOT NULL,
+        categoria TEXT NOT NULL,
+        chave TEXT NOT NULL,
+        valor TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY(migracao_id,categoria,chave)
+    );
     """)
     col_eventos = {r[1] for r in conn.execute("PRAGMA table_info(eventos)")}
     if "hash_conteudo" not in col_eventos:
@@ -367,6 +404,9 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
         ("versao_desconhecida", "INTEGER NOT NULL DEFAULT 0"),
         ("divergencia_identificacao", "INTEGER NOT NULL DEFAULT 0"),
         ("duplicado_logico_de", "INTEGER"),
+        ("parser_versao", "TEXT NOT NULL DEFAULT 'legado'"),
+        ("status_schema", "TEXT NOT NULL DEFAULT 'nao_validado'"),
+        ("origem_movimento", "TEXT NOT NULL DEFAULT ''"),
     ):
         if coluna not in col_eventos:
             conn.execute(f"ALTER TABLE eventos ADD COLUMN {coluna} {definicao}")
@@ -382,6 +422,7 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eventos_recibo_ativo ON eventos(recibo_evento,ativo,tipo)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eventos_tipo_ativo_recibo ON eventos(tipo,ativo,recibo_evento,id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eventos_duplicado_logico ON eventos(duplicado_logico_de)")
+    registrar_versoes_workspace(conn)
     # Workspaces anteriores só permitem retropreencher eventos cujo XML foi
     # preservado para a segunda passagem. O filtro e essencial: depois da
     # migracao, reabrir um Workspace nao pode descompactar novamente seu acervo.
@@ -430,9 +471,27 @@ def _salvar_objetos(conn: sqlite3.Connection, categoria: str, evento_id: int | N
     )
 
 
-def _ler_objetos(conn: sqlite3.Connection, categoria: str) -> list:
+def _ler_objetos(
+    conn: sqlite3.Connection,
+    categoria: str,
+    somente_eventos_ativos: bool = False,
+) -> list:
     saida: list = []
-    for (payload,) in conn.execute("SELECT payload FROM objetos WHERE categoria=? ORDER BY id", (categoria,)):
+    if somente_eventos_ativos:
+        colunas_eventos = {
+            str(linha[1]) for linha in conn.execute("PRAGMA table_info(eventos)")
+        }
+        filtros = ["e.ativo=1"] if "ativo" in colunas_eventos else ["1=1"]
+        if "duplicado_logico_de" in colunas_eventos:
+            filtros.append("e.duplicado_logico_de IS NULL")
+        consulta = (
+            "SELECT o.payload FROM objetos AS o JOIN eventos AS e ON e.id=o.evento_id "
+            "WHERE o.categoria=? AND " + " AND ".join(filtros) + " "
+            "ORDER BY o.id"
+        )
+    else:
+        consulta = "SELECT payload FROM objetos WHERE categoria=? ORDER BY id"
+    for (payload,) in conn.execute(consulta, (categoria,)):
         obj = pickle.loads(zlib.decompress(payload))
         if isinstance(obj, list):
             saida.extend(obj)
@@ -514,6 +573,58 @@ def _registrar_contagem(conn: sqlite3.Connection, tipo: str) -> None:
         "ON CONFLICT(tipo) DO UPDATE SET quantidade=quantidade+1",
         (tipo,),
     )
+
+
+def _iniciar_backup_logico_migracao(
+    conn: sqlite3.Connection,
+    versao_origem: str,
+    versao_destino: str,
+) -> int:
+    """Preserva metadados e DDL antes de alterar um Workspace legado."""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS migracoes_workspace (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,versao_origem TEXT NOT NULL,
+      versao_destino TEXT NOT NULL,iniciada_em REAL NOT NULL,concluida_em REAL,
+      status TEXT NOT NULL DEFAULT 'processando',resumo TEXT NOT NULL DEFAULT '');
+    CREATE TABLE IF NOT EXISTS backup_logico_migracao (
+      migracao_id INTEGER NOT NULL,categoria TEXT NOT NULL,chave TEXT NOT NULL,
+      valor TEXT NOT NULL DEFAULT '',PRIMARY KEY(migracao_id,categoria,chave));
+    """)
+    cursor = conn.execute(
+        "INSERT INTO migracoes_workspace(versao_origem,versao_destino,iniciada_em) "
+        "VALUES(?,?,?)",
+        (str(versao_origem), str(versao_destino), time.time()),
+    )
+    migracao_id = int(cursor.lastrowid)
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+    ).fetchone():
+        conn.execute(
+            "INSERT OR IGNORE INTO backup_logico_migracao(migracao_id,categoria,chave,valor) "
+            "SELECT ?,'meta',chave,valor FROM meta",
+            (migracao_id,),
+        )
+    conn.execute(
+        "INSERT OR IGNORE INTO backup_logico_migracao(migracao_id,categoria,chave,valor) "
+        "SELECT ?,'schema',name,COALESCE(sql,'') FROM sqlite_master "
+        "WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'",
+        (migracao_id,),
+    )
+    conn.commit()
+    return migracao_id
+
+
+def _finalizar_migracao(
+    conn: sqlite3.Connection,
+    migracao_id: int,
+    status: str,
+    resumo: str,
+) -> None:
+    conn.execute(
+        "UPDATE migracoes_workspace SET concluida_em=?,status=?,resumo=? WHERE id=?",
+        (time.time(), status, resumo[:4000], migracao_id),
+    )
+    conn.commit()
 
 
 def _registrar_duracao(
@@ -632,7 +743,17 @@ def _processar_xml_ingestao(
     try:
         inicio = time.perf_counter()
         pista = identificar_evento_rapido(xml_bytes)
-        root = ET.fromstring(xml_bytes)
+        usar_streaming_seletivo = (
+            flag_ativa("ESOCIAL_V10_INGESTAO_SELETIVA", False)
+            and pista.tipo != "DESCONHECIDO"
+            and pista.tipo not in EVENTOS_SUPORTADOS
+        )
+        if usar_streaming_seletivo:
+            root = None
+            metadados = inspecionar_evento_streaming(xml_bytes, pista)
+        else:
+            root = ET.fromstring(xml_bytes)
+            metadados = inspecionar_evento(root, pista)
         if telemetria:
             telemetria.tempo("parse_xml", time.perf_counter() - inicio)
     except Exception as exc:
@@ -646,10 +767,8 @@ def _processar_xml_ingestao(
             conn.execute("UPDATE historico_cargas SET quantidade_erros=quantidade_erros+1 WHERE id_carga=?", (id_carga,))
         return "erro"
 
-    inicio = time.perf_counter()
-    metadados = inspecionar_evento(root, pista)
     if telemetria:
-        telemetria.tempo("inspecao", time.perf_counter() - inicio)
+        telemetria.tempo("inspecao", 0.0)
     tipo = metadados.tipo
     recibo = metadados.envelope_recibo
     id_evento = metadados.id_evento_esocial
@@ -666,13 +785,15 @@ def _processar_xml_ingestao(
     cur = conn.execute(
         "INSERT OR IGNORE INTO eventos(arquivo, tipo, tamanho_bytes, envelope_recibo, xml_zlib, hash_conteudo, id_carga,"
         "id_evento_esocial,ind_retif,recibo_evento,recibo_referencia,namespace_xml,versao_layout,identificacao_parser,"
-        "versao_desconhecida,divergencia_identificacao) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "versao_desconhecida,divergencia_identificacao,parser_versao,status_schema,origem_movimento) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (arquivo, tipo, tamanho, int(recibo), blob, hash_conteudo, id_carga,
          id_evento, ind_retif, recibo_evento, recibo_referencia,
          metadados.namespace_xml, metadados.versao_layout,
          metadados.identificacao_parser, int(metadados.versao_desconhecida),
-         int(metadados.divergencia_identificacao)),
+         int(metadados.divergencia_identificacao), "catalogacao-v10",
+         "versao_desconhecida" if metadados.versao_desconhecida else "identificado",
+         tipo if tipo in {"S-1200", "S-2299"} else ""),
     )
     if telemetria:
         telemetria.tempo("escrita_sqlite", time.perf_counter() - inicio)
@@ -682,12 +803,26 @@ def _processar_xml_ingestao(
                 "UPDATE historico_cargas SET quantidade_duplicados=quantidade_duplicados+1 WHERE id_carga=?",
                 (id_carga,),
             )
-        root.clear()
+        if root is not None:
+            root.clear()
         if telemetria:
             telemetria.somar("duplicados")
             telemetria.evento("DUPLICADO", tamanho, time.perf_counter() - inicio_xml)
         return "duplicado"
     evento_id = int(cur.lastrowid)
+    validacao_xsd = validar_xml_xsd(xml_bytes, tipo, hash_conteudo)
+    conn.execute(
+        "UPDATE eventos SET status_schema=? WHERE id=?",
+        (validacao_xsd.status, evento_id),
+    )
+    if validacao_xsd.executada:
+        chave_xsd = "xsd_validos" if validacao_xsd.valida else "xsd_invalidos"
+        _meta_set(conn, chave_xsd, int(_meta_get(conn, chave_xsd, "0") or 0) + 1)
+    if validacao_xsd.executada and not validacao_xsd.valida:
+        conn.execute(
+            "INSERT INTO erros(arquivo,erro) VALUES(?,?)",
+            (arquivo, "Validação XSD: " + validacao_xsd.erro[:2000]),
+        )
     if tipo == "S-1200" and recibo_evento:
         evento_canonico = conn.execute(
             "SELECT id FROM eventos WHERE id<>? AND tipo='S-1200' "
@@ -723,9 +858,8 @@ def _processar_xml_ingestao(
             conn.execute(
                 f"UPDATE eventos SET ativo=0 WHERE id IN ({marcas})", substituidos
             )
-            conn.execute(
-                f"DELETE FROM objetos WHERE evento_id IN ({marcas})", substituidos
-            )
+            # Os objetos antigos permanecem como trilha histórica. Consultas
+            # operacionais usam somente eventos ativos.
     _registrar_contagem(conn, tipo)
     if id_carga is not None:
         periodo = metadados.periodo
@@ -746,18 +880,34 @@ def _processar_xml_ingestao(
         }
         _salvar_objetos(conn, "empresa", evento_id, empresa)
 
-    if tipo == "S-1010":
+    if tipo == "S-1000":
+        _salvar_objetos(
+            conn, "contexto_empregador", evento_id,
+            parse_s1000_contexto(root, arquivo),
+        )
+    elif tipo == "S-1010":
         itens = parse_s1010(
             root,
             arquivo=arquivo,
             fonte_dados="Recibo S-1010" if recibo else "Download principal",
         )
         _salvar_objetos(conn, "rubricas", evento_id, itens)
+    elif tipo == "S-1020":
+        _salvar_objetos(
+            conn, "contexto_lotacao", evento_id,
+            parse_s1020_contexto(root, arquivo),
+        )
+    elif tipo == "S-2200":
+        _salvar_objetos(
+            conn, "contexto_trabalhador", evento_id,
+            parse_s2200_contexto(root, arquivo),
+        )
     elif tipo == "S-3000":
         item = parse_s3000(root)
         item["arquivo_origem"] = arquivo
         _salvar_objetos(conn, "exclusoes", evento_id, item)
-    root.clear()
+    if root is not None:
+        root.clear()
     if telemetria:
         telemetria.somar("xml_processados")
         telemetria.somar("bytes_processados", tamanho)
@@ -774,7 +924,13 @@ def corrigir_duplicados_s1200_por_recibo(
     reconstruir_consolidados: bool = True,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, int]:
-    """Marca cópias S-1200 por recibo sem apagar o inventário ou os dados brutos."""
+    """Normaliza recibos S-1200 sem apagar inventário ou dados brutos.
+
+    A versão 4 separa cópia real (mesmo recibo atual) de histórico de
+    retificação (o recibo antigo é a referência do evento novo). Também força
+    a reconstrução dos derivados para que S-3000 use o recibo atual guardado
+    em ``eventos``.
+    """
     colunas_eventos = {r[1] for r in conn.execute("PRAGMA table_info(eventos)")}
     if "duplicado_logico_de" not in colunas_eventos:
         conn.execute("ALTER TABLE eventos ADD COLUMN duplicado_logico_de INTEGER")
@@ -788,6 +944,7 @@ def corrigir_duplicados_s1200_por_recibo(
             "eventos_inativados": 0,
             "objetos_preservados": 0,
             "linhas_brutas_preservadas": 0,
+            "retificacoes_reclassificadas": 0,
             "verificacao_executada": 0,
         }
     _progresso(
@@ -798,6 +955,27 @@ def corrigir_duplicados_s1200_por_recibo(
     existe_analitica = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dados_remuneracoes'"
     ).fetchone()
+    # A consistência v3 podia marcar como cópia o evento anterior de uma
+    # retificação, pois o campo analítico continha ideEvento/nrRecibo. O evento
+    # histórico continua inativo, mas deixa de ser rotulado como duplicado.
+    retificacoes_reclassificadas = int(conn.execute(
+        "SELECT COUNT(*) FROM eventos AS anterior "
+        "WHERE anterior.tipo='S-1200' "
+        "AND anterior.duplicado_logico_de IS NOT NULL "
+        "AND COALESCE(anterior.recibo_evento,'')<>'' "
+        "AND EXISTS (SELECT 1 FROM eventos AS atual "
+        "WHERE atual.id=anterior.duplicado_logico_de "
+        "AND anterior.recibo_evento=atual.recibo_referencia)"
+    ).fetchone()[0])
+    if retificacoes_reclassificadas:
+        conn.execute(
+            "UPDATE eventos SET duplicado_logico_de=NULL "
+            "WHERE tipo='S-1200' AND duplicado_logico_de IS NOT NULL "
+            "AND COALESCE(recibo_evento,'')<>'' "
+            "AND EXISTS (SELECT 1 FROM eventos AS atual "
+            "WHERE atual.id=eventos.duplicado_logico_de "
+            "AND eventos.recibo_evento=atual.recibo_referencia)"
+        )
     conn.execute(
         "CREATE TEMP TABLE IF NOT EXISTS candidatos_recibo_s1200("
         "recibo TEXT NOT NULL,evento_id INTEGER NOT NULL,PRIMARY KEY(recibo,evento_id))"
@@ -817,7 +995,10 @@ def corrigir_duplicados_s1200_por_recibo(
             "INSERT OR IGNORE INTO temp.candidatos_recibo_s1200(recibo,evento_id) "
             "SELECT DISTINCT r.nr_recibo_evento,e.id FROM dados_remuneracoes r "
             "JOIN eventos e ON e.arquivo=r.arquivo AND e.tipo='S-1200' "
-            "WHERE COALESCE(r.nr_recibo_evento,'')<>''"
+            "WHERE COALESCE(e.recibo_evento,'')='' "
+            "AND COALESCE(e.ind_retif,'')<>'2' "
+            "AND COALESCE(r.nr_recibo_evento,'')<>'' "
+            "AND r.nr_recibo_evento<>COALESCE(e.recibo_referencia,'')"
         )
     grupos = conn.execute(
         "SELECT recibo,COUNT(*) FROM temp.candidatos_recibo_s1200 "
@@ -837,26 +1018,12 @@ def corrigir_duplicados_s1200_por_recibo(
             for (evento_id,) in eventos_recibo[1:]
         )
     if not duplicados:
-        ja_marcados = int(conn.execute(
-            "SELECT COUNT(*) FROM eventos WHERE tipo='S-1200' "
-            "AND duplicado_logico_de IS NOT NULL"
-        ).fetchone()[0])
-        tabelas_consolidadas = {
-            str(r[0]) for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
-                "('rel_movimentos_cp','rel_rubricas_cp_base','rel_sem_s1010',"
-                "'rel_s5001_resumo','rel_base_trabalhador','rel_controle_integridade')"
-            )
-        }
-        consolidacao_incompleta = len(tabelas_consolidadas) < 6
-        if (
-            (ja_marcados or consolidacao_incompleta)
-            and existe_analitica
-            and reconstruir_consolidados
-        ):
+        # Mesmo sem cópias, a passagem v3 -> v4 precisa reconstruir os
+        # derivados: o filtro S-3000 passou a consultar o recibo atual do evento.
+        if existe_analitica and reconstruir_consolidados:
             _progresso(
                 progress_callback, "integridade", 0.75,
-                "Retomando a atualização dos relatórios a partir dos eventos efetivos...",
+                "Atualizando relatórios com os recibos atuais dos eventos...",
             )
             reconstruir_consolidados_analiticos(
                 conn,
@@ -875,6 +1042,7 @@ def corrigir_duplicados_s1200_por_recibo(
             "eventos_inativados": 0,
             "objetos_preservados": 0,
             "linhas_brutas_preservadas": 0,
+            "retificacoes_reclassificadas": retificacoes_reclassificadas,
             "verificacao_executada": 1,
         }
 
@@ -892,7 +1060,7 @@ def corrigir_duplicados_s1200_por_recibo(
                     progress_callback, "integridade",
                     0.15 + 0.55 * concluidos / len(duplicados),
                     "Classificando eventos S-1200 efetivos...",
-                    f"{concluidos:,} de {len(duplicados):,} cópias marcadas".replace(",", "."),
+                    f"{concluidos:,} de {len(duplicados):,} cópias reais marcadas".replace(",", "."),
                 )
         _meta_set(conn, "duplicidade_recibo_s1200_corrigida_em", time.time())
         conn.execute("RELEASE SAVEPOINT corrigir_duplicados_s1200")
@@ -920,13 +1088,14 @@ def corrigir_duplicados_s1200_por_recibo(
     _progresso(
         progress_callback, "integridade", 1.0,
         "Consistência dos recibos S-1200 atualizada.",
-        f"{len(duplicados):,} cópias preservadas no inventário e desconsideradas dos relatórios.".replace(",", "."),
+        f"{len(duplicados):,} cópias reais preservadas no inventário e desconsideradas dos relatórios.".replace(",", "."),
     )
     return {
         "grupos": len(grupos),
         "eventos_inativados": len(duplicados),
         "objetos_preservados": objetos_preservados,
         "linhas_brutas_preservadas": objetos_preservados,
+        "retificacoes_reclassificadas": retificacoes_reclassificadas,
         "verificacao_executada": 1,
     }
 
@@ -1113,21 +1282,19 @@ def _ingerir_fontes(
 
 
 def _segunda_passagem(conn: sqlite3.Connection, progress_callback: ProgressCallback | None) -> None:
-    rubricas = _ler_objetos(conn, "rubricas")
+    rubricas = _ler_objetos(conn, "rubricas", somente_eventos_ativos=True)
     rubricas_map = _montar_indice_rubricas(rubricas)
     total = conn.execute(
-        "SELECT COUNT(*) FROM eventos WHERE ativo=1 AND tipo IN ('S-1200','S-5001','S-5011')"
+        "SELECT COUNT(*) FROM eventos WHERE ativo=1 AND tipo IN ('S-1200','S-2299','S-5001','S-5011')"
     ).fetchone()[0]
     concluidos = conn.execute(
-        "SELECT COUNT(*) FROM eventos WHERE ativo=1 AND tipo IN ('S-1200','S-5001','S-5011') AND processado_segunda=1"
+        "SELECT COUNT(*) FROM eventos WHERE ativo=1 AND tipo IN ('S-1200','S-2299','S-5001','S-5011') AND processado_segunda=1"
     ).fetchone()[0]
-    limite_bytes = max(
-        1,
-        int(os.environ.get(
-            "ESOCIAL_MAX_BYTES_LOTE_SEGUNDA_PASSAGEM",
-            str(MAX_BYTES_LOTE_SEGUNDA_PASSAGEM),
-        )),
-    )
+    politica_lote = BatchPolicy.atual("segunda_passagem")
+    limite_bytes = politica_lote.max_bytes
+    _meta_set(conn, "segunda_passagem_lote_max_itens", politica_lote.max_itens)
+    _meta_set(conn, "segunda_passagem_lote_max_bytes", politica_lote.max_bytes)
+    _meta_set(conn, "segunda_passagem_pressao_memoria", int(politica_lote.pressao_memoria))
     inicio_etapa = time.perf_counter()
     _progresso(
         progress_callback, "segunda_passagem", concluidos / max(total, 1),
@@ -1138,9 +1305,9 @@ def _segunda_passagem(conn: sqlite3.Connection, progress_callback: ProgressCallb
     while True:
         cursor = conn.execute(
             "SELECT id, arquivo, tipo, xml_zlib FROM eventos "
-            "WHERE ativo=1 AND tipo IN ('S-1200','S-5001','S-5011') AND processado_segunda=0 "
+            "WHERE ativo=1 AND tipo IN ('S-1200','S-2299','S-5001','S-5011') AND processado_segunda=0 "
             "ORDER BY id LIMIT ?",
-            (BATCH_SEGUNDA_PASSAGEM,),
+            (politica_lote.max_itens,),
         )
         lote = []
         bytes_lote = 0
@@ -1158,14 +1325,71 @@ def _segunda_passagem(conn: sqlite3.Connection, progress_callback: ProgressCallb
             try:
                 root = ET.fromstring(zlib.decompress(xml_zlib))
                 if tipo == "S-1200":
-                    itens = parse_s1200(root, rubricas_map, arquivo)
+                    modo = modo_parser(tipo)
+                    if modo == "legado":
+                        itens = parse_s1200(root, rubricas_map, arquivo)
+                        parser_usado = "legado-s1200"
+                    else:
+                        itens_legado = parse_s1200(root, rubricas_map, arquivo)
+                        itens_v10 = parse_s1200_v10(root, rubricas_map, arquivo)
+                        equivalentes = (
+                            assinatura_itens(itens_legado)
+                            == assinatura_itens(itens_v10)
+                        )
+                        if equivalentes and modo == "v10":
+                            itens = itens_v10
+                            parser_usado = PARSER_VERSION + "-s1200"
+                        else:
+                            itens = itens_legado
+                            parser_usado = (
+                                "sombra-equivalente-s1200"
+                                if equivalentes
+                                else "fallback-divergencia-s1200"
+                            )
+                        chave = (
+                            "parser_s1200_sombra_equivalente"
+                            if equivalentes
+                            else "parser_s1200_sombra_divergente"
+                        )
+                        _meta_set(
+                            conn, chave,
+                            int(_meta_get(conn, chave, "0") or 0) + 1,
+                        )
+                        if not equivalentes:
+                            conn.execute(
+                                "INSERT INTO erros(arquivo,erro) VALUES(?,?)",
+                                (
+                                    arquivo,
+                                    "Divergência entre parser S-1200 legado e V10; "
+                                    "resultado legado preservado.",
+                                ),
+                            )
                     _salvar_objetos(conn, "remuneracoes", evento_id, itens)
+                    conn.execute(
+                        "UPDATE eventos SET parser_versao=? WHERE id=?",
+                        (parser_usado, evento_id),
+                    )
+                elif tipo == "S-2299":
+                    itens = parse_s2299(root, rubricas_map, arquivo)
+                    _salvar_objetos(conn, "remuneracoes_s2299", evento_id, itens)
+                    conn.execute(
+                        "UPDATE eventos SET parser_versao=? WHERE id=?",
+                        (PARSER_VERSION + "-s2299", evento_id),
+                    )
                 elif tipo == "S-5001":
                     itens = parse_s5001(root, arquivo)
                     _salvar_objetos(conn, "bases_trabalhador", evento_id, itens)
+                    conn.execute(
+                        "UPDATE eventos SET parser_versao=? WHERE id=?",
+                        (PARSER_VERSION + "-s5001", evento_id),
+                    )
                 elif tipo == "S-5011":
                     itens = parse_s5011(root, arquivo)
                     _salvar_objetos(conn, "bases_contribuicao", evento_id, itens)
+                    conn.execute(
+                        "UPDATE eventos SET parser_versao=? WHERE id=?",
+                        (PARSER_VERSION + "-s5011", evento_id),
+                    )
                 root.clear()
             except Exception as exc:
                 conn.execute("INSERT INTO erros(arquivo, erro) VALUES (?, ?)", (arquivo, f"Falha na segunda passagem: {exc}"))
@@ -1198,21 +1422,43 @@ def _dataframe_objetos(conn: sqlite3.Connection, categoria: str, dataclass_obj: 
 
 
 def _finalizar_resultado(conn: sqlite3.Connection, workspace: Path) -> Dict[str, object]:
-    rubricas = _ler_objetos(conn, "rubricas")
-    exclusoes = _ler_objetos(conn, "exclusoes")
-    remuneracoes = _ler_objetos(conn, "remuneracoes")
-    bases_trabalhador = _ler_objetos(conn, "bases_trabalhador")
-    bases_contribuicao = _ler_objetos(conn, "bases_contribuicao")
-    empresas = _ler_objetos(conn, "empresa")
+    rubricas = _ler_objetos(conn, "rubricas", somente_eventos_ativos=True)
+    exclusoes = _ler_objetos(conn, "exclusoes", somente_eventos_ativos=True)
+    remuneracoes = _ler_objetos(conn, "remuneracoes", somente_eventos_ativos=True)
+    remuneracoes_s2299 = _ler_objetos(
+        conn, "remuneracoes_s2299", somente_eventos_ativos=True
+    )
+    bases_trabalhador = _ler_objetos(
+        conn, "bases_trabalhador", somente_eventos_ativos=True
+    )
+    bases_contribuicao = _ler_objetos(
+        conn, "bases_contribuicao", somente_eventos_ativos=True
+    )
+    empresas = _ler_objetos(conn, "empresa", somente_eventos_ativos=True)
 
     recibos_excluidos = {x.get("nrRecEvt", "") for x in exclusoes if isinstance(x, dict) and x.get("nrRecEvt")}
-    remuneracoes = [r for r in remuneracoes if getattr(r, "nr_recibo_evento", "") not in recibos_excluidos]
+    # Objetos antigos podem conter em nr_recibo_evento o recibo referenciado
+    # pela retificação. A tabela eventos é a fonte autoritativa do recibo atual
+    # e também do estado efetivo do evento.
+    eventos_s1200_efetivos = {
+        str(arquivo): str(recibo_evento or "")
+        for arquivo, recibo_evento in conn.execute(
+            "SELECT arquivo,recibo_evento FROM eventos "
+            "WHERE tipo='S-1200' AND ativo=1 AND duplicado_logico_de IS NULL"
+        )
+    }
+    remuneracoes = [
+        r for r in remuneracoes
+        if getattr(r, "arquivo", "") in eventos_s1200_efetivos
+        and eventos_s1200_efetivos.get(getattr(r, "arquivo", ""), "")
+        not in recibos_excluidos
+    ]
     bases_trabalhador = [b for b in bases_trabalhador if getattr(b, "nr_recibo_base", "") not in recibos_excluidos]
     bases_contribuicao = [b for b in bases_contribuicao if getattr(b, "nr_recibo_base", "") not in recibos_excluidos]
 
     inventario = pd.read_sql_query(
         "SELECT arquivo, tipo, tamanho_bytes, "
-        "CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END AS parseado, "
+        "CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-2200','S-2299','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END AS parseado, "
         "CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END AS envelope_recibo "
         "FROM eventos ORDER BY id",
         conn,
@@ -1220,12 +1466,13 @@ def _finalizar_resultado(conn: sqlite3.Connection, workspace: Path) -> Dict[str,
     erros = pd.read_sql_query("SELECT arquivo, erro FROM erros ORDER BY id", conn)
     contagem = pd.read_sql_query(
         "SELECT tipo, quantidade AS xml_localizados FROM contagem_eventos "
-        "WHERE tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') ORDER BY tipo",
+        "WHERE tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-2200','S-2299','S-3000','S-5001','S-5011') ORDER BY tipo",
         conn,
     )
     parseados = pd.DataFrame([
         {"tipo": "S-1010", "xml_parseados": int(contagem.loc[contagem["tipo"].eq("S-1010"), "xml_localizados"].sum()) if not contagem.empty else 0},
         {"tipo": "S-1200", "xml_parseados": conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo='S-1200' AND processado_segunda=1").fetchone()[0]},
+        {"tipo": "S-2299", "xml_parseados": conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo='S-2299' AND processado_segunda=1").fetchone()[0]},
         {"tipo": "S-5001", "xml_parseados": conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo='S-5001' AND processado_segunda=1").fetchone()[0]},
         {"tipo": "S-5011", "xml_parseados": conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo='S-5011' AND processado_segunda=1").fetchone()[0]},
         {"tipo": "S-3000", "xml_parseados": len(exclusoes)},
@@ -1244,6 +1491,9 @@ def _finalizar_resultado(conn: sqlite3.Connection, workspace: Path) -> Dict[str,
     return {
         "inventario": inventario,
         "rubricas": pd.DataFrame([asdict(x) for x in rubricas]),
+        "remuneracoes_s2299": pd.DataFrame(
+            [asdict(x) for x in remuneracoes_s2299]
+        ),
         "exclusoes": pd.DataFrame(exclusoes),
         "remuneracoes": pd.DataFrame([asdict(x) for x in remuneracoes]),
         "bases_trabalhador": pd.DataFrame([asdict(x) for x in bases_trabalhador]),
@@ -1270,7 +1520,7 @@ def listar_processamentos_interrompidos() -> list[dict]:
             status = _meta_get(conn, "status", "interrompido")
             if status != "concluido":
                 total = conn.execute("SELECT COALESCE(SUM(quantidade),0) FROM contagem_eventos").fetchone()[0]
-                relevantes = conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo IN ('S-1200','S-5001','S-5011')").fetchone()[0]
+                relevantes = conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo IN ('S-1200','S-2299','S-5001','S-5011')").fetchone()[0]
                 processados = conn.execute("SELECT COUNT(*) FROM eventos WHERE processado_segunda=1").fetchone()[0]
                 saida.append({
                     "id": pasta.name,
@@ -1389,7 +1639,7 @@ def _atualizar_metadados_workspace(conn: sqlite3.Connection) -> None:
         "SELECT COUNT(*) FROM historico_cargas WHERE status='concluida'"
     ).fetchone()[0])
     _meta_set(conn, "quantidade_total_cargas", cargas)
-    for tipo in ("S-1010", "S-1200", "S-5001", "S-5011", "S-3000"):
+    for tipo in ("S-1000", "S-1010", "S-1020", "S-1200", "S-2200", "S-2299", "S-5001", "S-5011", "S-3000"):
         qtd = int(conn.execute("SELECT COUNT(*) FROM eventos WHERE tipo=?", (tipo,)).fetchone()[0])
         _meta_set(conn, "quantidade_" + tipo.lower().replace("-", ""), qtd)
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='rel_movimentos_cp'").fetchone():
@@ -1462,17 +1712,27 @@ def preparar_workspace_para_relatorios(
         }
     bloqueio = _adquirir_bloqueio_workspace(workspace)
     conn: sqlite3.Connection | None = None
+    migracao_id: int | None = None
     try:
         _progresso(
             progress_callback, "integridade", 0.01,
             "Preparando os controles de consistência do Workspace...",
         )
         conn = _conectar(db_path)
+        migracao_id = _iniciar_backup_logico_migracao(
+            conn,
+            str(versao),
+            f"V10/recibos-{VERSAO_CONSISTENCIA_RECIBO_S1200}",
+        )
         colunas_eventos = {
             str(r[1]) for r in conn.execute("PRAGMA table_info(eventos)")
         }
         campos_base = {"arquivo", "tipo", "processado_segunda"}
         if not campos_base.issubset(colunas_eventos):
+            _finalizar_migracao(
+                conn, migracao_id, "incompativel",
+                "Tabela eventos não possui os campos mínimos para migração automática.",
+            )
             return {
                 "grupos": 0,
                 "eventos_inativados": 0,
@@ -1481,11 +1741,23 @@ def preparar_workspace_para_relatorios(
                 "verificacao_executada": 0,
             }
         _criar_schema(conn)
-        return corrigir_duplicados_s1200_por_recibo(
+        resultado = corrigir_duplicados_s1200_por_recibo(
             conn,
             reconstruir_consolidados=True,
             progress_callback=progress_callback,
         )
+        _finalizar_migracao(
+            conn, migracao_id, "concluida",
+            json.dumps(resultado, ensure_ascii=False, sort_keys=True),
+        )
+        return resultado
+    except Exception as exc:
+        if conn is not None and migracao_id is not None:
+            try:
+                _finalizar_migracao(conn, migracao_id, "falha", str(exc))
+            except Exception:
+                pass
+        raise
     finally:
         if conn is not None:
             conn.close()
@@ -1501,8 +1773,18 @@ def atualizar_workspace_incremental(
     """Adiciona XMLs ao mesmo Workspace, com SHA-256, histórico e retomada."""
     workspace, db_path = _resolver_workspace_existente(workspace_ou_db)
     bloqueio = _adquirir_bloqueio_workspace(workspace)
+    migracao_id: int | None = None
     try:
         conn = _conectar(db_path)
+        versao_anterior = int(
+            _meta_get(conn, "versao_consistencia_recibo_s1200", "0") or 0
+        )
+        if versao_anterior < VERSAO_CONSISTENCIA_RECIBO_S1200:
+            migracao_id = _iniciar_backup_logico_migracao(
+                conn,
+                str(versao_anterior),
+                f"V10/recibos-{VERSAO_CONSISTENCIA_RECIBO_S1200}",
+            )
         _criar_schema(conn)
     except BaseException:
         _liberar_bloqueio_workspace(bloqueio)
@@ -1557,6 +1839,11 @@ def atualizar_workspace_incremental(
             reconstruir_consolidados=False,
             progress_callback=progress_callback,
         )
+        if migracao_id is not None:
+            _finalizar_migracao(
+                conn, migracao_id, "concluida",
+                json.dumps(consistencia, ensure_ascii=False, sort_keys=True),
+            )
 
         novos_s1010 = int(conn.execute(
             "SELECT COUNT(*) FROM eventos WHERE id_carga=? AND tipo='S-1010'", (id_carga,)
@@ -1608,6 +1895,11 @@ def atualizar_workspace_incremental(
         conn.execute("DELETE FROM meta WHERE chave='carga_incremental_ativa'")
         conn.commit()
     except BaseException as exc:
+        if migracao_id is not None:
+            try:
+                _finalizar_migracao(conn, migracao_id, "falha", str(exc))
+            except Exception:
+                pass
         carga_id = locals().get("id_carga")
         if carga_id is not None:
             conn.execute(
@@ -1671,8 +1963,19 @@ def processar_fontes_esocial(
 
     db_path = workspace / "processamento.db"
     bloqueio = _adquirir_bloqueio_workspace(workspace)
+    migracao_id: int | None = None
     try:
         conn = _conectar(db_path)
+        if retomando and db_path.is_file():
+            versao_anterior = int(
+                _meta_get(conn, "versao_consistencia_recibo_s1200", "0") or 0
+            )
+            if versao_anterior < VERSAO_CONSISTENCIA_RECIBO_S1200:
+                migracao_id = _iniciar_backup_logico_migracao(
+                    conn,
+                    str(versao_anterior),
+                    f"V10/recibos-{VERSAO_CONSISTENCIA_RECIBO_S1200}",
+                )
         _criar_schema(conn)
     except BaseException:
         _liberar_bloqueio_workspace(bloqueio)
@@ -1708,6 +2011,11 @@ def processar_fontes_esocial(
             reconstruir_consolidados=False,
             progress_callback=progress_callback,
         )
+        if migracao_id is not None:
+            _finalizar_migracao(
+                conn, migracao_id, "concluida",
+                json.dumps(consistencia, ensure_ascii=False, sort_keys=True),
+            )
 
         inicio_etapa = time.perf_counter()
         _segunda_passagem(conn, progress_callback)
@@ -1732,7 +2040,7 @@ def processar_fontes_esocial(
 
         # Apenas conjuntos pequenos e prévias seguem para a interface. As bases completas
         # permanecem no SQLite e são exportadas em streaming.
-        empresas = _ler_objetos(conn, "empresa")
+        empresas = _ler_objetos(conn, "empresa", somente_eventos_ativos=True)
         df_empresa = pd.DataFrame(empresas)
         if not df_empresa.empty:
             df_empresa = df_empresa.drop_duplicates().copy()
@@ -1741,7 +2049,7 @@ def processar_fontes_esocial(
         df_rubricas = pd.read_sql_query("SELECT * FROM dados_rubricas", conn)
         df_exclusoes = pd.read_sql_query("SELECT * FROM dados_exclusoes", conn)
         df_erros = pd.read_sql_query("SELECT arquivo, erro FROM erros ORDER BY id LIMIT 5000", conn)
-        df_inventario = pd.read_sql_query("SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id LIMIT 5000", conn)
+        df_inventario = pd.read_sql_query("SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-2200','S-2299','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id LIMIT 5000", conn)
         df_layout = pd.read_sql_query("SELECT tipo, quantidade AS xml_localizados FROM contagem_eventos ORDER BY tipo", conn)
         total_movimentos = int(pacote.get("total_movimentos_cp", 0))
         limite_dataframe_integral = int(os.environ.get("ESOCIAL_LIMITE_DATAFRAME_INTEGRAL", "300000"))
@@ -1772,7 +2080,7 @@ def processar_fontes_esocial(
             "pacote_sqlite": pacote,
             "quantidade_xml_spool": int(conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0]),
             "workspace_removido": False,
-            "engine": "V3 SQLite + checkpoint + relatório streaming",
+            "engine": "V10 SQLite + checkpoint + relatório streaming",
             "consistencia_workspace": consistencia,
         }
         _meta_set(conn, "fase", "concluido")
@@ -1784,7 +2092,12 @@ def processar_fontes_esocial(
             "Processamento concluído. Workspace preservado para auditoria.",
         )
         return resultado
-    except BaseException:
+    except BaseException as exc:
+        if migracao_id is not None:
+            try:
+                _finalizar_migracao(conn, migracao_id, "falha", str(exc))
+            except Exception:
+                pass
         _meta_set(conn, "status", "interrompido")
         _meta_set(conn, "atualizado_em", time.time())
         conn.commit()
@@ -1894,7 +2207,7 @@ def carregar_resultado_sqlite_existente(
         df_exclusoes = pd.read_sql_query("SELECT * FROM dados_exclusoes", conn) if "dados_exclusoes" in existentes else pd.DataFrame()
         df_erros = pd.read_sql_query("SELECT arquivo, erro FROM erros ORDER BY id LIMIT 5000", conn) if "erros" in existentes else pd.DataFrame()
         df_inventario = pd.read_sql_query(
-            "SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id LIMIT 5000",
+            "SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-2200','S-2299','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id LIMIT 5000",
             conn,
         )
         df_layout = pd.read_sql_query("SELECT tipo, quantidade AS xml_localizados FROM contagem_eventos ORDER BY tipo", conn) if "contagem_eventos" in existentes else pd.DataFrame()

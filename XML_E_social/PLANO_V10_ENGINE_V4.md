@@ -3,8 +3,11 @@
 ## 1. Estado do documento
 
 - Tipo: especificação de arquitetura, implementação, migração e aceite.
-- Situação: implementação incremental iniciada; inspeção estrutural compartilhada do
-  Pacote 1 ativa na ingestão, com equivalência coberta por testes.
+- Situação: implementação técnica V10 concluída em 27/08/2026, com rollout
+  conservador por feature flags. Pacotes 0, 1 e 8.1 permanecem ativos; parser S-1200,
+  ingestão seletiva e XSD ficam em sombra/opcionais até benchmark e homologação. O
+  gate corretivo de recibos/S-3000 e migração histórica está ativo após conciliação
+  independente com relatórios LaraTex da FEDEX.
 - Base de comparação: V9.5.2/V9.5 com Workspace persistente, carga incremental,
   SQLite, relatório em streaming, Levantamento por Workspace e progresso em duas barras.
 - Fontes técnicas analisadas:
@@ -80,6 +83,17 @@ Observação decisiva: a inclusão do S-2299 altera o universo de movimentos. El
 tratada como otimização mecânica. Exigirá especificação tributária, parser, schema,
 reconciliação, relatório e testes próprios antes de ser habilitada por padrão.
 
+#### 4.1.1 Evidência complementar FEDEX — 27/08/2026
+
+O corpus FEDEX acrescentou S-1000, S-1010, S-1020, S-1200, S-2200, S-2299 e duas
+visões S-5011. As duas visões S-5011 apresentaram a mesma base CP total apesar de
+granularidades distintas, reforçando seu uso como controle independente. A análise
+também comprovou que `ideEvento/nrRecibo` de uma retificação é referência ao evento
+anterior e não pode ser promovido a recibo atual do movimento.
+
+Esses relatórios continuam sendo corpus comparativo. XML, XSD e documentação oficial
+permanecem como autoridade estrutural/funcional.
+
 ### 4.2 Esquemas XSD S-1.3
 
 Os dois pacotes possuem 52 arquivos. Seis tiveram alteração de conteúdo entre as
@@ -151,6 +165,21 @@ Identificador rápido (namespace, evento, versão, envelope)
 
 ## 6. Pacotes de implementação
 
+### Gate corretivo transversal — recibos, S-3000 e histórico
+
+Status: implementado e coberto por migração/testes em 27/08/2026.
+
+- separar recibo atual de recibo referenciado em toda extração analítica;
+- considerar cópia somente quando dois XMLs distintos possuírem o mesmo recibo atual;
+- preservar como histórico, sem rótulo de cópia, o evento substituído por retificação;
+- aplicar S-3000 ao recibo atual autoritativo da tabela `eventos`;
+- migrar Workspaces anteriores de forma idempotente e reconstruir somente derivados;
+- preservar eventos, objetos, hashes e tabelas brutas;
+- não sobrescrever workbooks já entregues; gerar revisão versionada após a migração.
+
+Este gate não renumera nem substitui os Pacotes 0 a 12. Ele é pré-condição de
+equivalência para os Pacotes 2, 3, 4, 5, 9 e 12.
+
 ### Pacote 0 — Linha de base e observabilidade
 
 Status: implementado em 20/08/2026 para a ingestão. As métricas são acumuladas em
@@ -198,6 +227,9 @@ homologado; divergências vão para auditoria e usam o parser legado.
 
 ### Pacote 2 — Parser especializado S-1200
 
+Status: implementado em modo `legacy|shadow|v10`, com fallback automático ao legado
+quando a assinatura normalizada divergir. O padrão permanece legado até homologação.
+
 - Percorrer a estrutura seguindo a hierarquia oficial, evitando chamadas repetidas a
   `root.iter()`, `first_text_by_localname()` e `all_elements_by_localname()`.
 - Tratar `infoPerApur`, `infoPerAnt`, múltiplos `dmDev`, estabelecimentos, lotações,
@@ -212,6 +244,9 @@ faz parte deste pacote.
 
 ### Pacote 3 — S-1010 temporal completo
 
+Status: implementado sobre o histórico de operações/vigências já persistido, incluindo
+reclassificação derivada após complemento sem releitura das fontes originais.
+
 - Consolidar inclusão, alteração, nova validade e exclusão como operações temporais.
 - Preservar arquivo, fonte, recibo quando disponível, período e ordem de aplicação.
 - Resolver a rubrica válida na competência sem perder histórico.
@@ -223,6 +258,9 @@ Não mudar códigos de incidência nem regras CP; apenas tornar explícito e ver
 estado temporal que já fundamenta o cruzamento.
 
 ### Pacote 4 — Parser e integração S-2299
+
+Status: parser e persistência segregada implementados. O evento participa apenas da
+reconciliação e permanece fora do cálculo CP padrão até homologação tributária.
 
 - Mapear remuneração de desligamento conforme XSD e documentação oficial.
 - Persistir origem do movimento (`S-1200` ou `S-2299`).
@@ -237,6 +275,9 @@ desligamentos. O pacote poderá permanecer desabilitado por feature flag até ho
 
 ### Pacote 5 — Parsers especializados S-5001 e S-5011
 
+Status: extração dirigida e materialização dos campos analíticos mantidas/estendidas;
+S-5011 passou a alimentar a nova reconciliação por chave compatível.
+
 - S-5001: trabalhador, matrícula, categoria, estabelecimento, lotação, período,
   `infoBaseCS`, períodos anteriores e recibo-base.
 - S-5011: estabelecimento, lotação, categoria, incidência, FPAS, terceiros, RAT/FAP e
@@ -247,6 +288,8 @@ desligamentos. O pacote poderá permanecer desabilitado por feature flag até ho
 
 ### Pacote 6 — Contexto complementar S-1000, S-1020 e S-2200
 
+Status: parsers e tabelas de contexto implementados, sem inferência tributária nova.
+
 - S-1000: classificação tributária/desoneração e vigência, sem criar cálculo novo não
   homologado.
 - S-1020: lotação, FPAS/terceiros/processos conforme disponibilidade e vigência.
@@ -255,6 +298,9 @@ desligamentos. O pacote poderá permanecer desabilitado por feature flag até ho
 - O enriquecimento será opcional e não bloqueará o Relatório de Incidência CP.
 
 ### Pacote 7 — Ingestão seletiva com inventário completo
+
+Status: implementado atrás de `ESOCIAL_V10_INGESTAO_SELETIVA`; desligado por padrão
+até benchmark de inventário equivalente no corpus grande.
 
 - Continuar calculando hash e catalogando todos os XMLs.
 - Para evento não analítico, evitar árvore completa quando a identificação mínima for
@@ -267,6 +313,10 @@ desligamentos. O pacote poderá permanecer desabilitado por feature flag até ho
 Resultado: menos CPU/memória sem sacrificar o inventário.
 
 ### Pacote 8 — Escrita SQLite e lotes adaptativos
+
+Status: escritor central, limites por itens/bytes, cache configurável e redução por
+pressão de memória implementados. Paralelismo permanece deliberadamente desativado,
+pois o plano exige prova de ganho antes de sua adoção.
 
 Execução reorganizada em blocos independentes:
 
@@ -298,6 +348,9 @@ workers de parsing e um escritor; somente aumentará após prova de ganho e mem�
 
 ### Pacote 9 — Materialização e reconciliação analítica
 
+Status: materialização por cursor/lote e reconciliação S-1200/S-2299/S-5011
+implementadas, preservando origem e valores brutos.
+
 - Materializar por cursor/lote, sem DataFrames gigantes.
 - Criar métricas teóricas por período, trabalhador, estabelecimento, lotação e categoria.
 - Comparar com S-5001/S-5011 nas chaves compatíveis.
@@ -308,6 +361,9 @@ workers de parsing e um escritor; somente aumentará após prova de ganho e mem�
 - Preservar valores brutos e permitir rastrear cada agregado às fontes.
 
 ### Pacote 10 — Relatórios e UX
+
+Status: exportação SQLite por cursor, versões no Workspace, métricas S-2299 e prévia
+da reconciliação acrescentadas; UX e fluxos anteriores preservados.
 
 - Preservar Relatório de Incidência CP e Levantamento atuais.
 - Acrescentar controles da V10 apenas de forma compatível/versionada.
@@ -321,6 +377,9 @@ workers de parsing e um escritor; somente aumentará após prova de ganho e mem�
 
 ### Pacote 11 — Validação XSD opcional
 
+Status: modos desligado/amostral/completo implementados; padrão desligado e falhas de
+configuração não impedem o relatório.
+
 - Modos: desligada (padrão), amostral e completa.
 - Selecionar XSD pelo namespace/versão.
 - Guardar erros com arquivo, evento, versão e localização quando disponível.
@@ -328,6 +387,9 @@ workers de parsing e um escritor; somente aumentará após prova de ganho e mem�
 - Nunca ativar validação completa automaticamente em grandes volumes.
 
 ### Pacote 12 — Workspace, migração e compatibilidade
+
+Status: migração idempotente com backup lógico, reconstrução apenas de derivados e
+nomes revisionados de relatório implementados. Workspaces e XLSX antigos são preservados.
 
 - Migração idempotente do schema.
 - Novas colunas/tabelas terão valores padrão seguros.

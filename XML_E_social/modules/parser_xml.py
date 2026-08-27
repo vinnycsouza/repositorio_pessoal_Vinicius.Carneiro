@@ -96,6 +96,77 @@ class BaseContribuicao:
     nr_recibo_base: str
 
 
+@dataclass
+class RubricaDesligamento:
+    arquivo: str
+    cpf: str
+    matricula: str
+    per_apur: str
+    data_desligamento: str
+    ide_dm_dev: str
+    cod_categ: str
+    tp_insc_estab: str
+    nr_insc_estab: str
+    cod_lotacao: str
+    cod_rubr: str
+    ide_tab_rubr: str
+    vr_rubr: float
+    nat_rubr: str
+    cod_inc_cp: str
+    dsc_rubr: str
+    tp_rubr: str
+    ini_valid: str
+    fim_valid: str
+    criterio_cruzamento_s1010: str
+    origem_validacao: str
+    nivel_confianca: str
+    status_auditoria: str
+    observacao_validacao: str
+    nr_recibo_evento: str
+    origem_movimento: str = "S-2299"
+
+
+@dataclass
+class ContextoEmpregador:
+    arquivo: str
+    tp_insc: str
+    nr_insc: str
+    operacao: str
+    ini_valid: str
+    fim_valid: str
+    classificacao_tributaria: str
+    indicador_desoneracao: str
+    nome_empresa: str
+
+
+@dataclass
+class ContextoLotacao:
+    arquivo: str
+    tp_insc: str
+    nr_insc: str
+    cod_lotacao: str
+    operacao: str
+    ini_valid: str
+    fim_valid: str
+    tp_lotacao: str
+    fpas: str
+    cod_tercs: str
+
+
+@dataclass
+class ContextoTrabalhador:
+    arquivo: str
+    cpf: str
+    matricula: str
+    data_admissao: str
+    cod_categ: str
+    tp_reg_trab: str
+    tp_reg_prev: str
+    cod_cargo: str
+    cod_funcao: str
+    cbo_cargo: str
+
+
 EVENTOS_MAPA = {
     "evtInfoEmpregador": "S-1000",
     "evtTabEstab": "S-1005",
@@ -149,6 +220,39 @@ def obter_recibo_principal(root: ET.Element) -> str:
         or first_text_by_localname(root, "nrProtEntr")
         or ""
     )
+
+
+def obter_recibo_evento_atual(root: ET.Element) -> str:
+    """Obtém o recibo do evento processado sem confundi-lo com a retificação.
+
+    Em eventos retificadores, ``ideEvento/nrRecibo`` referencia o evento anterior.
+    O recibo atual, quando o download contém o envelope completo, fica no bloco
+    ``recibo``. Para um XML retificador sem esse envelope não há recibo atual
+    confiável; nesse caso retornamos vazio em vez de promover a referência.
+    """
+    ide_evento = next(
+        (elemento for elemento in root.iter() if localname(elemento.tag) == "ideEvento"),
+        None,
+    )
+    ind_retif = (
+        first_text_by_localname(ide_evento, "indRetif")
+        if ide_evento is not None
+        else ""
+    ) or ""
+    bloco_recibo = next(
+        (elemento for elemento in root.iter() if localname(elemento.tag) == "recibo"),
+        None,
+    )
+    recibo_atual = (
+        first_text_by_localname(bloco_recibo, "nrRecibo")
+        if bloco_recibo is not None
+        else ""
+    ) or ""
+    if recibo_atual:
+        return recibo_atual
+    if ind_retif == "2":
+        return ""
+    return obter_recibo_principal(root)
 
 
 
@@ -463,7 +567,7 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
 
     cpf = only_digits(first_text_by_localname(root, "cpfTrab"))
     per_apur = first_text_by_localname(root, "perApur") or ""
-    nr_recibo_evento = obter_recibo_principal(root)
+    nr_recibo_evento = obter_recibo_evento_atual(root)
 
     for dm_dev in all_elements_by_localname(root, "dmDev"):
         cod_categ = first_text_by_localname(dm_dev, "codCateg") or ""
@@ -541,6 +645,187 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
                                 )
                             )
 
+    return saida
+
+
+def _descendentes_por_nome(root: ET.Element, nome: str):
+    for elemento in root.iter():
+        if elemento is not root and localname(elemento.tag) == nome:
+            yield elemento
+
+
+def parse_s1200_v10(
+    root: ET.Element,
+    rubricas_map: Dict[Tuple[str, str], List[RubricaInfo]],
+    arquivo: str,
+) -> List[RubricaPagamento]:
+    """Parser dirigido pela hierarquia do S-1200.
+
+    A função limita as buscas aos blocos correntes (evento, demonstrativo,
+    estabelecimento, remuneração e item), evitando novas varreduras de toda a
+    árvore para cada campo. O contrato de saída permanece idêntico ao legado.
+    """
+    evento = next(
+        (elemento for elemento in root.iter() if localname(elemento.tag) == "evtRemun"),
+        root,
+    )
+    ide_evento = first_child_by_localname(evento, "ideEvento")
+    ide_trabalhador = first_child_by_localname(evento, "ideTrabalhador")
+    cpf = only_digits(first_text_by_localname(ide_trabalhador, "cpfTrab"))
+    per_apur = first_text_by_localname(ide_evento, "perApur") or ""
+    nr_recibo_evento = obter_recibo_evento_atual(root)
+    saida: List[RubricaPagamento] = []
+
+    escopo_demonstrativos = ide_trabalhador if ide_trabalhador is not None else evento
+    for dm_dev in _descendentes_por_nome(escopo_demonstrativos, "dmDev"):
+        cod_categ = first_text_by_localname(dm_dev, "codCateg") or ""
+        blocos_periodo = [
+            elemento
+            for elemento in list(dm_dev)
+            if localname(elemento.tag) in {"infoPerApur", "infoPerAnt"}
+        ]
+        if not blocos_periodo:
+            blocos_periodo = [dm_dev]
+
+        for bloco_periodo in blocos_periodo:
+            for ide_estab in _descendentes_por_nome(bloco_periodo, "ideEstabLot"):
+                tp_insc_estab = first_text_by_localname(ide_estab, "tpInsc") or ""
+                nr_insc_estab = first_text_by_localname(ide_estab, "nrInsc") or ""
+                cod_lotacao = first_text_by_localname(ide_estab, "codLotacao") or ""
+                blocos_remun = [
+                    elemento
+                    for elemento in list(ide_estab)
+                    if localname(elemento.tag) in {"remunPerApur", "remunPerAnt"}
+                ]
+                if not blocos_remun:
+                    blocos_remun = [ide_estab]
+
+                for remun in blocos_remun:
+                    matricula = (
+                        first_text_by_localname(remun, "matricula")
+                        or first_text_by_localname(dm_dev, "matricula")
+                        or ""
+                    )
+                    competencia_movimento = (
+                        first_text_by_localname(remun, "perRef")
+                        or first_text_by_localname(bloco_periodo, "perRef")
+                        or per_apur
+                    )
+                    for item in _descendentes_por_nome(remun, "itensRemun"):
+                        cod_rubr = first_text_by_localname(item, "codRubr") or ""
+                        if not cod_rubr:
+                            continue
+                        ide_tab_rubr = first_text_by_localname(item, "ideTabRubr") or ""
+                        selecao = selecionar_rubrica_vigente(
+                            rubricas_map, cod_rubr, ide_tab_rubr, competencia_movimento
+                        )
+                        rubrica = selecao.rubrica
+                        saida.append(RubricaPagamento(
+                            arquivo=arquivo,
+                            cpf=cpf,
+                            matricula=matricula,
+                            per_apur=competencia_movimento,
+                            cod_categ=cod_categ,
+                            tp_insc_estab=tp_insc_estab,
+                            nr_insc_estab=nr_insc_estab,
+                            cod_lotacao=cod_lotacao,
+                            cod_rubr=cod_rubr,
+                            ide_tab_rubr=ide_tab_rubr,
+                            vr_rubr=safe_float(first_text_by_localname(item, "vrRubr")),
+                            nat_rubr=rubrica.nat_rubr if rubrica else "",
+                            cod_inc_cp=(
+                                rubrica.cod_inc_cp
+                                if rubrica and selecao.usar_incidencia
+                                else ""
+                            ),
+                            dsc_rubr=rubrica.dsc_rubr if rubrica else "",
+                            tp_rubr=rubrica.tp_rubr if rubrica else "",
+                            ini_valid=rubrica.ini_valid if rubrica else "",
+                            fim_valid=rubrica.fim_valid if rubrica else "",
+                            origem_bloco_s1010=rubrica.origem_bloco if rubrica else "",
+                            fonte_s1010=rubrica.fonte_dados if rubrica else "",
+                            arquivo_s1010=rubrica.arquivo_origem if rubrica else "",
+                            criterio_cruzamento_s1010=selecao.criterio,
+                            origem_validacao=selecao.origem_validacao,
+                            nivel_confianca=selecao.nivel_confianca,
+                            status_auditoria=selecao.status_auditoria,
+                            observacao_validacao=selecao.observacao_validacao,
+                            nr_recibo_evento=nr_recibo_evento,
+                        ))
+    return saida
+
+
+def parse_s2299(
+    root: ET.Element,
+    rubricas_map: Dict[Tuple[str, str], List[RubricaInfo]],
+    arquivo: str,
+) -> List[RubricaDesligamento]:
+    """Extrai remunerações de desligamento sem incorporá-las automaticamente à CP."""
+    evento = next(
+        (elemento for elemento in root.iter() if localname(elemento.tag) == "evtDeslig"),
+        root,
+    )
+    ide_vinculo = first_child_by_localname(evento, "ideVinculo")
+    info_deslig = first_child_by_localname(evento, "infoDeslig")
+    cpf = only_digits(first_text_by_localname(ide_vinculo, "cpfTrab"))
+    matricula = first_text_by_localname(ide_vinculo, "matricula") or ""
+    data_desligamento = first_text_by_localname(info_deslig, "dtDeslig") or ""
+    per_apur = data_desligamento[:7] if len(data_desligamento) >= 7 else ""
+    cod_categ_evento = first_text_by_localname(info_deslig, "codCateg") or ""
+    nr_recibo_evento = obter_recibo_evento_atual(root)
+    saida: List[RubricaDesligamento] = []
+
+    escopo = info_deslig if info_deslig is not None else evento
+    for dm_dev in _descendentes_por_nome(escopo, "dmDev"):
+        ide_dm_dev = first_text_by_localname(dm_dev, "ideDmDev") or ""
+        cod_categ = first_text_by_localname(dm_dev, "codCateg") or cod_categ_evento
+        estabelecimentos = list(_descendentes_por_nome(dm_dev, "ideEstabLot"))
+        if not estabelecimentos:
+            estabelecimentos = [dm_dev]
+        for ide_estab in estabelecimentos:
+            tp_insc_estab = first_text_by_localname(ide_estab, "tpInsc") or ""
+            nr_insc_estab = first_text_by_localname(ide_estab, "nrInsc") or ""
+            cod_lotacao = first_text_by_localname(ide_estab, "codLotacao") or ""
+            for item in _descendentes_por_nome(ide_estab, "detVerbas"):
+                cod_rubr = first_text_by_localname(item, "codRubr") or ""
+                if not cod_rubr:
+                    continue
+                ide_tab_rubr = first_text_by_localname(item, "ideTabRubr") or ""
+                selecao = selecionar_rubrica_vigente(
+                    rubricas_map, cod_rubr, ide_tab_rubr, per_apur
+                )
+                rubrica = selecao.rubrica
+                saida.append(RubricaDesligamento(
+                    arquivo=arquivo,
+                    cpf=cpf,
+                    matricula=matricula,
+                    per_apur=per_apur,
+                    data_desligamento=data_desligamento,
+                    ide_dm_dev=ide_dm_dev,
+                    cod_categ=cod_categ,
+                    tp_insc_estab=tp_insc_estab,
+                    nr_insc_estab=nr_insc_estab,
+                    cod_lotacao=cod_lotacao,
+                    cod_rubr=cod_rubr,
+                    ide_tab_rubr=ide_tab_rubr,
+                    vr_rubr=safe_float(first_text_by_localname(item, "vrRubr")),
+                    nat_rubr=rubrica.nat_rubr if rubrica else "",
+                    cod_inc_cp=(
+                        rubrica.cod_inc_cp
+                        if rubrica and selecao.usar_incidencia
+                        else ""
+                    ),
+                    dsc_rubr=rubrica.dsc_rubr if rubrica else "",
+                    tp_rubr=rubrica.tp_rubr if rubrica else "",
+                    ini_valid=rubrica.ini_valid if rubrica else "",
+                    fim_valid=rubrica.fim_valid if rubrica else "",
+                    criterio_cruzamento_s1010=selecao.criterio,
+                    origem_validacao=selecao.origem_validacao,
+                    nivel_confianca=selecao.nivel_confianca,
+                    status_auditoria=selecao.status_auditoria,
+                    observacao_validacao=selecao.observacao_validacao,
+                    nr_recibo_evento=nr_recibo_evento,
+                ))
     return saida
 
 
@@ -682,3 +967,97 @@ def parse_s5011(root: ET.Element, arquivo: str) -> List[BaseContribuicao]:
                 )
 
     return saida
+
+
+def _operacoes_tabela(root: ET.Element):
+    encontrou = False
+    for operacao in ("inclusao", "alteracao", "novaValidade", "exclusao"):
+        for bloco in _descendentes_por_nome(root, operacao):
+            encontrou = True
+            yield operacao, bloco
+    if not encontrou:
+        yield "raiz", root
+
+
+def parse_s1000_contexto(root: ET.Element, arquivo: str) -> List[ContextoEmpregador]:
+    empresa = parse_empresa_info(root, arquivo)
+    saida: List[ContextoEmpregador] = []
+    for operacao, bloco in _operacoes_tabela(root):
+        ide_periodo = first_child_by_localname(bloco, "idePeriodo")
+        dados = first_child_by_localname(bloco, "infoCadastro")
+        if ide_periodo is None:
+            ide_periodo = bloco
+        if dados is None:
+            dados = bloco
+        saida.append(ContextoEmpregador(
+            arquivo=arquivo,
+            tp_insc=empresa["tp_insc_empregador"],
+            nr_insc=empresa["cnpj_empregador"],
+            operacao=operacao,
+            ini_valid=first_text_by_localname(ide_periodo, "iniValid") or "",
+            fim_valid=first_text_by_localname(ide_periodo, "fimValid") or "",
+            classificacao_tributaria=(
+                first_text_by_localname(dados, "classTrib") or ""
+            ),
+            indicador_desoneracao=(
+                first_text_by_localname(dados, "indDesFolha") or ""
+            ),
+            nome_empresa=empresa["nome_empresa"],
+        ))
+    return saida
+
+
+def parse_s1020_contexto(root: ET.Element, arquivo: str) -> List[ContextoLotacao]:
+    empresa = parse_empresa_info(root, arquivo)
+    saida: List[ContextoLotacao] = []
+    for operacao, bloco in _operacoes_tabela(root):
+        ide = first_child_by_localname(bloco, "ideLotacao")
+        dados = first_child_by_localname(bloco, "dadosLotacao")
+        if ide is None:
+            ide = bloco
+        if dados is None:
+            dados = bloco
+        saida.append(ContextoLotacao(
+            arquivo=arquivo,
+            tp_insc=empresa["tp_insc_empregador"],
+            nr_insc=empresa["cnpj_empregador"],
+            cod_lotacao=first_text_by_localname(ide, "codLotacao") or "",
+            operacao=operacao,
+            ini_valid=first_text_by_localname(ide, "iniValid") or "",
+            fim_valid=first_text_by_localname(ide, "fimValid") or "",
+            tp_lotacao=first_text_by_localname(dados, "tpLotacao") or "",
+            fpas=first_text_by_localname(dados, "fpas") or "",
+            cod_tercs=first_text_by_localname(dados, "codTercs") or "",
+        ))
+    return saida
+
+
+def parse_s2200_contexto(root: ET.Element, arquivo: str) -> List[ContextoTrabalhador]:
+    evento = next(
+        (elemento for elemento in root.iter() if localname(elemento.tag) == "evtAdmissao"),
+        root,
+    )
+    trabalhador = first_child_by_localname(evento, "trabalhador")
+    vinculo = first_child_by_localname(evento, "vinculo")
+    info_contrato = (
+        first_child_by_localname(vinculo, "infoContrato")
+        if vinculo is not None
+        else None
+    )
+    info_regime = (
+        first_child_by_localname(vinculo, "infoRegimeTrab")
+        if vinculo is not None
+        else None
+    )
+    return [ContextoTrabalhador(
+        arquivo=arquivo,
+        cpf=only_digits(first_text_by_localname(trabalhador, "cpfTrab")),
+        matricula=first_text_by_localname(vinculo, "matricula") or "",
+        data_admissao=first_text_by_localname(vinculo, "dtAdm") or "",
+        cod_categ=first_text_by_localname(info_contrato, "codCateg") or "",
+        tp_reg_trab=first_text_by_localname(info_regime, "tpRegTrab") or "",
+        tp_reg_prev=first_text_by_localname(info_regime, "tpRegPrev") or "",
+        cod_cargo=first_text_by_localname(info_contrato, "codCargo") or "",
+        cod_funcao=first_text_by_localname(info_contrato, "codFuncao") or "",
+        cbo_cargo=first_text_by_localname(info_contrato, "CBOCargo") or "",
+    )]

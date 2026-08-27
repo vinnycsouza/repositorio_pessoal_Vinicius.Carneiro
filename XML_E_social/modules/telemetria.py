@@ -8,6 +8,8 @@ import sqlite3
 import sys
 import time
 
+from modules.v10_core import ENGINE_VERSION, PARSER_VERSION, SCHEMA_SQLITE_VERSION
+
 
 def memoria_processo_bytes() -> tuple[int, int]:
     """Retorna RSS atual e pico quando o sistema oferece a informacao."""
@@ -65,11 +67,11 @@ class TelemetriaCarga:
             "espera_aproximada_segundos": (max(parede - cpu, 0.0), "s"),
             "memoria_atual_bytes": (atual, "bytes"),
             "memoria_pico_bytes": (pico, "bytes"),
-            "versao_engine": ("V10-pacotes-0-1-8.1", "texto"),
+            "versao_engine": (ENGINE_VERSION, "texto"),
             "versao_python": (platform.python_version(), "texto"),
             "plataforma": (sys.platform, "texto"),
-            "versao_schema_sqlite": (2, "numero"),
-            "parser": ("ElementTree+EventSniffer", "texto"),
+            "versao_schema_sqlite": (SCHEMA_SQLITE_VERSION, "numero"),
+            "parser": ("ElementTree+EventSniffer+" + PARSER_VERSION, "texto"),
         }
         for chave, valor in self.contadores.items():
             metricas[chave] = (valor, "quantidade")

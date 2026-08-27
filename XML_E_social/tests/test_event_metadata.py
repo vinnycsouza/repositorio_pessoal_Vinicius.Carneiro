@@ -1,8 +1,17 @@
 import xml.etree.ElementTree as ET
 import unittest
 
-from modules.event_metadata import identificar_evento_rapido, inspecionar_evento
-from modules.parser_xml import detectar_tipo_evento, obter_recibo_principal, parse_empresa_info
+from modules.event_metadata import (
+    identificar_evento_rapido,
+    inspecionar_evento,
+    inspecionar_evento_streaming,
+)
+from modules.parser_xml import (
+    detectar_tipo_evento,
+    obter_recibo_evento_atual,
+    obter_recibo_principal,
+    parse_empresa_info,
+)
 from modules.processador_zip import _eh_retorno_evento_completo, _metadados_retificacao
 
 
@@ -63,6 +72,20 @@ class EventMetadataTest(unittest.TestCase):
             obter_recibo_principal(root),
         )
 
+    def test_retificacao_separa_recibo_atual_da_referencia(self):
+        root = ET.fromstring(AMOSTRAS[1])
+        metadados = inspecionar_evento(root)
+        self.assertEqual(metadados.recibo_evento, "REC-NOVO")
+        self.assertEqual(metadados.recibo_referencia, "REC-ANTERIOR")
+        self.assertEqual(obter_recibo_evento_atual(root), "REC-NOVO")
+
+    def test_retificacao_sem_envelope_nao_promove_referencia(self):
+        root = ET.fromstring(
+            "<eSocial><evtRemun><ideEvento><indRetif>2</indRetif>"
+            "<nrRecibo>REC-ANTERIOR</nrRecibo></ideEvento></evtRemun></eSocial>"
+        )
+        self.assertEqual(obter_recibo_evento_atual(root), "")
+
     def test_namespace_versao_e_sniffer_confirmado(self):
         xml = AMOSTRAS[0].encode()
         pista = identificar_evento_rapido(xml)
@@ -79,6 +102,20 @@ class EventMetadataTest(unittest.TestCase):
         )
         self.assertEqual(metadados.tipo, "S-1200")
         self.assertTrue(metadados.versao_desconhecida)
+
+    def test_inspecao_streaming_preserva_metadados_comuns(self):
+        for xml in AMOSTRAS[:3]:
+            with self.subTest(xml=xml[:50]):
+                bruto = xml.encode()
+                pista = identificar_evento_rapido(bruto)
+                completo = inspecionar_evento(ET.fromstring(bruto), pista)
+                streaming = inspecionar_evento_streaming(bruto, pista)
+                self.assertEqual(streaming.tipo, completo.tipo)
+                self.assertEqual(streaming.id_evento_esocial, completo.id_evento_esocial)
+                self.assertEqual(streaming.recibo_evento, completo.recibo_evento)
+                self.assertEqual(streaming.recibo_referencia, completo.recibo_referencia)
+                self.assertEqual(streaming.periodo, completo.periodo)
+                self.assertEqual(streaming.cnpj_empregador, completo.cnpj_empregador)
 
 
 if __name__ == "__main__":

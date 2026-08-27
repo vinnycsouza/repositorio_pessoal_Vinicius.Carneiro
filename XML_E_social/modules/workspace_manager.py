@@ -23,6 +23,9 @@ class WorkspaceInfo:
     quantidade_xml: int = 0
     periodo_minimo: str = ""
     periodo_maximo: str = ""
+    versao_engine: str = ""
+    versao_parser: str = ""
+    versao_consistencia: str = ""
 
 
 @dataclass(frozen=True)
@@ -286,6 +289,9 @@ def obter_info_workspace(resultado: Mapping[str, object]) -> WorkspaceInfo:
     quantidade_xml = 0
     periodo_minimo = ""
     periodo_maximo = ""
+    versao_engine = ""
+    versao_parser = ""
+    versao_consistencia = ""
     if db_path.is_file():
         conn = sqlite3.connect(str(db_path), timeout=5)
         try:
@@ -304,6 +310,19 @@ def obter_info_workspace(resultado: Mapping[str, object]) -> WorkspaceInfo:
                     "SELECT COALESCE(MIN(per_apur),''),COALESCE(MAX(per_apur),'') "
                     "FROM rel_movimentos_cp"
                 ).fetchone()
+            if "meta" in tabelas:
+                metadados = {
+                    str(chave): str(valor)
+                    for chave, valor in conn.execute(
+                        "SELECT chave,valor FROM meta WHERE chave IN "
+                        "('versao_engine','versao_parser','versao_consistencia_recibo_s1200')"
+                    )
+                }
+                versao_engine = metadados.get("versao_engine", "")
+                versao_parser = metadados.get("versao_parser", "")
+                versao_consistencia = metadados.get(
+                    "versao_consistencia_recibo_s1200", ""
+                )
         except sqlite3.Error:
             pass
         finally:
@@ -319,6 +338,9 @@ def obter_info_workspace(resultado: Mapping[str, object]) -> WorkspaceInfo:
         quantidade_xml=quantidade_xml,
         periodo_minimo=str(periodo_minimo or ""),
         periodo_maximo=str(periodo_maximo or ""),
+        versao_engine=versao_engine,
+        versao_parser=versao_parser,
+        versao_consistencia=versao_consistencia,
     )
 
 

@@ -26,6 +26,7 @@ from modules.auditoria import (
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
 from modules.progresso import emitir_progresso
+from modules.sqlite_writer import BatchPolicy, SQLiteWriter
 
 ProgressCallback = Callable[[float, str], None]
 MAX_DADOS_ABA = 1_048_575
@@ -39,10 +40,17 @@ CROSS JOIN eventos AS e ON e.arquivo = r.arquivo
 WHERE e.tipo='S-1200'
   AND e.ativo=1
   AND e.duplicado_logico_de IS NULL
-  AND COALESCE(r.nr_recibo_evento,'') NOT IN (
-    SELECT COALESCE(nrRecEvt,'')
-    FROM dados_exclusoes
-    WHERE COALESCE(nrRecEvt,'')<>''
+  AND NOT EXISTS (
+    SELECT 1
+    FROM dados_exclusoes AS x
+    WHERE COALESCE(x.nrRecEvt,'')<>''
+      AND x.nrRecEvt = CASE
+        WHEN COALESCE(e.recibo_evento,'')<>'' THEN e.recibo_evento
+        WHEN COALESCE(e.ind_retif,'')<>'2'
+         AND COALESCE(r.nr_recibo_evento,'')<>COALESCE(e.recibo_referencia,'')
+          THEN COALESCE(r.nr_recibo_evento,'')
+        ELSE ''
+      END
   )
 """
 
@@ -51,9 +59,13 @@ SCHEMAS_PADRAO = {
     "dados_rubricas": {"cod_rubr":"", "ide_tab_rubr":"", "dsc_rubr":"", "nat_rubr":"", "cod_inc_cp":"", "cod_inc_fgts":"", "cod_inc_irrf":"", "tp_rubr":"", "origem_bloco":"", "ini_valid":"", "fim_valid":"", "arquivo_origem":"", "fonte_dados":""},
     "dados_exclusoes": {"nrRecEvt":"", "arquivo_origem":""},
     "dados_remuneracoes": {"arquivo":"", "cpf":"", "matricula":"", "per_apur":"", "cod_categ":"", "tp_insc_estab":"", "nr_insc_estab":"", "cod_lotacao":"", "cod_rubr":"", "ide_tab_rubr":"", "vr_rubr":0.0, "nat_rubr":"", "cod_inc_cp":"", "dsc_rubr":"", "tp_rubr":"", "ini_valid":"", "fim_valid":"", "origem_bloco_s1010":"", "fonte_s1010":"", "arquivo_s1010":"", "criterio_cruzamento_s1010":"", "origem_validacao":"", "nivel_confianca":"", "status_auditoria":"", "observacao_validacao":"", "nr_recibo_evento":"", "status_cp":"", "considerado_cp":"", "tipo_verba":"", "carater_verba":""},
+    "dados_remuneracoes_s2299": {"arquivo":"", "cpf":"", "matricula":"", "per_apur":"", "data_desligamento":"", "ide_dm_dev":"", "cod_categ":"", "tp_insc_estab":"", "nr_insc_estab":"", "cod_lotacao":"", "cod_rubr":"", "ide_tab_rubr":"", "vr_rubr":0.0, "nat_rubr":"", "cod_inc_cp":"", "dsc_rubr":"", "tp_rubr":"", "ini_valid":"", "fim_valid":"", "criterio_cruzamento_s1010":"", "origem_validacao":"", "nivel_confianca":"", "status_auditoria":"", "observacao_validacao":"", "nr_recibo_evento":"", "origem_movimento":"S-2299", "status_cp":"", "considerado_cp":"", "tipo_verba":"", "carater_verba":""},
     "dados_bases_trabalhador": {"arquivo":"", "cpf":"", "matricula":"", "per_apur":"", "per_ref":"", "cod_categ":"", "tp_insc_estab":"", "nr_insc_estab":"", "cod_lotacao":"", "ind13":"", "tp_valor":"", "valor":0.0, "origem_valor":"", "nr_recibo_base":""},
     "dados_bases_contribuicao": {"arquivo":"", "per_apur":"", "tp_insc_estab":"", "nr_insc_estab":"", "cod_lotacao":"", "cod_categ":"", "ind_incid":"", "fpas":"", "cod_tercs":"", "aliq_rat_ajust":0.0, "vr_bc_cp":0.0, "vr_bc_cp_00":0.0, "vr_bc_cp_15":0.0, "vr_bc_cp_20":0.0, "vr_bc_cp_25":0.0, "nr_recibo_base":""},
     "dados_empresa": {"nome_empresa":"", "cnpj_empregador":""},
+    "dados_contexto_empregador": {"arquivo":"", "tp_insc":"", "nr_insc":"", "operacao":"", "ini_valid":"", "fim_valid":"", "classificacao_tributaria":"", "indicador_desoneracao":"", "nome_empresa":""},
+    "dados_contexto_lotacao": {"arquivo":"", "tp_insc":"", "nr_insc":"", "cod_lotacao":"", "operacao":"", "ini_valid":"", "fim_valid":"", "tp_lotacao":"", "fpas":"", "cod_tercs":""},
+    "dados_contexto_trabalhador": {"arquivo":"", "cpf":"", "matricula":"", "data_admissao":"", "cod_categ":"", "tp_reg_trab":"", "tp_reg_prev":"", "cod_cargo":"", "cod_funcao":"", "cbo_cargo":""},
 }
 
 
@@ -80,13 +92,13 @@ def _obj_dict(obj: object) -> dict:
 
 def _iter_payloads(conn: sqlite3.Connection, categoria: str, apos_id: int = 0):
     cur = conn.execute(
-        "SELECT id, payload FROM objetos WHERE categoria=? AND id>? ORDER BY id",
+        "SELECT id, evento_id, payload FROM objetos WHERE categoria=? AND id>? ORDER BY id",
         (categoria, apos_id),
     )
-    for obj_id, payload in cur:
+    for obj_id, evento_id, payload in cur:
         bloco = pickle.loads(zlib.decompress(payload))
         itens = bloco if isinstance(bloco, list) else [bloco]
-        yield int(obj_id), itens
+        yield int(obj_id), evento_id, itens
 
 
 def _criar_tabela_por_amostra(conn: sqlite3.Connection, tabela: str, amostra: dict) -> list[str]:
@@ -112,10 +124,15 @@ def materializar_tabelas_analiticas(
         ("rubricas", "dados_rubricas"),
         ("exclusoes", "dados_exclusoes"),
         ("remuneracoes", "dados_remuneracoes"),
+        ("remuneracoes_s2299", "dados_remuneracoes_s2299"),
         ("bases_trabalhador", "dados_bases_trabalhador"),
         ("bases_contribuicao", "dados_bases_contribuicao"),
         ("empresa", "dados_empresa"),
+        ("contexto_empregador", "dados_contexto_empregador"),
+        ("contexto_lotacao", "dados_contexto_lotacao"),
+        ("contexto_trabalhador", "dados_contexto_trabalhador"),
     ]
+    escritor = SQLiteWriter(conn, BatchPolicy.atual("analitico"))
     for tabela, amostra in SCHEMAS_PADRAO.items():
         if not _colunas_tabela(conn, tabela):
             _criar_tabela_por_amostra(conn, tabela, amostra)
@@ -142,12 +159,14 @@ def materializar_tabelas_analiticas(
         ).fetchone()[0])
         colunas = _colunas_tabela(conn, tabela)
         buffer: list[tuple] = []
+        bytes_buffer = 0
         payloads_desde_commit = 0
 
-        for obj_id, itens in _iter_payloads(conn, categoria, ultimo):
+        for obj_id, evento_id, itens in _iter_payloads(conn, categoria, ultimo):
             for obj in itens:
                 d = _obj_dict(obj)
-                if categoria == "remuneracoes":
+                d.setdefault("evento_id_origem", evento_id)
+                if categoria in {"remuneracoes", "remuneracoes_s2299"}:
                     d["status_cp"] = classificar_status_cp(d.get("cod_inc_cp", ""))
                     d["considerado_cp"] = "Sim" if entra_base_cp(d.get("cod_inc_cp", "")) else "Não"
                     d["tipo_verba"] = classificar_tipo_verba(d.get("dsc_rubr", ""), d.get("nat_rubr", ""), d.get("tp_rubr", ""))
@@ -159,17 +178,27 @@ def materializar_tabelas_analiticas(
                 for c in faltantes:
                     conn.execute(f"ALTER TABLE {_q(tabela)} ADD COLUMN {_q(c)} {_sql_type(d[c])}")
                     colunas.append(c)
-                buffer.append(tuple(d.get(c, None) for c in colunas))
+                linha = tuple(d.get(c, None) for c in colunas)
+                buffer.append(linha)
+                bytes_buffer += sum(
+                    len(str(valor).encode("utf-8", "replace"))
+                    for valor in linha if valor is not None
+                )
 
             payloads_desde_commit += 1
             feitos_global += 1
-            if len(buffer) >= 10_000 or payloads_desde_commit >= 250:
+            if (
+                len(buffer) >= escritor.policy.max_itens
+                or bytes_buffer >= escritor.policy.max_bytes
+                or payloads_desde_commit >= 250
+            ):
                 marks = ",".join("?" for _ in colunas)
-                conn.executemany(
+                escritor.executemany(
                     f"INSERT INTO {_q(tabela)} ({','.join(_q(c) for c in colunas)}) VALUES ({marks})",
                     buffer,
                 )
                 buffer.clear()
+                bytes_buffer = 0
                 conn.execute(
                     "INSERT INTO meta(chave,valor) VALUES(?,?) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
                     (chave, str(obj_id)),
@@ -178,7 +207,7 @@ def materializar_tabelas_analiticas(
                     "INSERT INTO meta(chave,valor) VALUES('atualizado_em',?) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
                     (str(time.time()),),
                 )
-                conn.commit()
+                escritor.commit()
                 payloads_desde_commit = 0
                 emitir_progresso(
                     progress_callback, "materializacao", feitos_global / total_payloads,
@@ -187,7 +216,7 @@ def materializar_tabelas_analiticas(
                 )
         if buffer:
             marks = ",".join("?" for _ in colunas)
-            conn.executemany(
+            escritor.executemany(
                 f"INSERT INTO {_q(tabela)} ({','.join(_q(c) for c in colunas)}) VALUES ({marks})",
                 buffer,
             )
@@ -195,13 +224,15 @@ def materializar_tabelas_analiticas(
                 "INSERT INTO meta(chave,valor) VALUES(?,?) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
                 (chave, str(obj_id)),
             )
-            conn.commit()
+            escritor.commit()
 
     emitir_progresso(
         progress_callback, "materializacao", 0.98,
         "Criando índices para acelerar as consultas...",
     )
     _criar_indices(conn)
+    escritor.registrar_telemetria()
+    conn.commit()
     emitir_progresso(
         progress_callback, "materializacao", 1.0,
         "Materialização analítica concluída.",
@@ -217,9 +248,12 @@ def reiniciar_materializacao_analitica(conn: sqlite3.Connection) -> None:
     """
     tabelas = [
         "dados_rubricas", "dados_exclusoes", "dados_remuneracoes",
+        "dados_remuneracoes_s2299", "dados_contexto_empregador",
+        "dados_contexto_lotacao", "dados_contexto_trabalhador",
         "dados_bases_trabalhador", "dados_bases_contribuicao", "dados_empresa",
-        "rel_movimentos_cp", "rel_rubricas_cp_base", "rel_sem_s1010",
+        "rel_movimentos_cp", "rel_movimentos_s2299", "rel_rubricas_cp_base", "rel_sem_s1010",
         "rel_s5001_resumo", "rel_base_trabalhador", "rel_controle_integridade",
+        "rel_reconciliacao_s5011",
     ]
     for tabela in tabelas:
         conn.execute(f"DROP TABLE IF EXISTS {_q(tabela)}")
@@ -238,6 +272,11 @@ def _criar_indices(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_base_trab_chave ON dados_bases_trabalhador(per_apur, cpf, matricula, cod_categ, cod_lotacao)",
         "CREATE INDEX IF NOT EXISTS idx_base_trab_recibo ON dados_bases_trabalhador(nr_recibo_base)",
         "CREATE INDEX IF NOT EXISTS idx_excl_recibo ON dados_exclusoes(nrRecEvt)",
+        "CREATE INDEX IF NOT EXISTS idx_s2299_arquivo ON dados_remuneracoes_s2299(arquivo)",
+        "CREATE INDEX IF NOT EXISTS idx_s2299_per ON dados_remuneracoes_s2299(per_apur)",
+        "CREATE INDEX IF NOT EXISTS idx_s2299_rubr ON dados_remuneracoes_s2299(cod_rubr, ide_tab_rubr)",
+        "CREATE INDEX IF NOT EXISTS idx_contexto_lotacao_chave ON dados_contexto_lotacao(cod_lotacao,ini_valid)",
+        "CREATE INDEX IF NOT EXISTS idx_contexto_trabalhador_chave ON dados_contexto_trabalhador(cpf,matricula)",
     ]
     for sql in comandos:
         try:
@@ -324,6 +363,13 @@ def _recriar_tabela_derivada(
 
 
 def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | None) -> None:
+    # Migrações de Workspace podem reconstruir derivados sem passar novamente
+    # pela materialização. As tabelas novas da V10 precisam existir, ainda que
+    # vazias, para manter compatibilidade com bancos V9.
+    for tabela, amostra in SCHEMAS_PADRAO.items():
+        if not _colunas_tabela(conn, tabela):
+            _criar_tabela_por_amostra(conn, tabela, amostra)
+    conn.commit()
     emitir_progresso(
         cb, "consolidacao", 0.0,
         "Consolidando rubricas e totais diretamente no SQLite...",
@@ -349,6 +395,31 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
     CREATE INDEX IF NOT EXISTS idx_rel_mov_cp ON rel_movimentos_cp(cod_inc_cp);
     CREATE INDEX IF NOT EXISTS idx_rel_mov_rubr ON rel_movimentos_cp(cod_rubr, ide_tab_rubr);
     CREATE INDEX IF NOT EXISTS idx_rel_mov_trab ON rel_movimentos_cp(per_apur, cpf, matricula);
+    """)
+    conn.commit()
+
+    _recriar_tabela_derivada(conn, "rel_movimentos_s2299", """
+    SELECT r.*
+    FROM dados_remuneracoes_s2299 AS r
+    CROSS JOIN eventos AS e ON e.arquivo=r.arquivo
+    WHERE e.tipo='S-2299'
+      AND e.ativo=1
+      AND e.duplicado_logico_de IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM dados_exclusoes AS x
+        WHERE COALESCE(x.nrRecEvt,'')<>''
+          AND x.nrRecEvt=CASE
+            WHEN COALESCE(e.recibo_evento,'')<>'' THEN e.recibo_evento
+            WHEN COALESCE(e.ind_retif,'')<>'2'
+             AND COALESCE(r.nr_recibo_evento,'')<>COALESCE(e.recibo_referencia,'')
+              THEN COALESCE(r.nr_recibo_evento,'')
+            ELSE '' END
+      )
+    """, cb, 0.42, "Preparando movimentos S-2299 para reconciliação...")
+    conn.executescript("""
+    CREATE INDEX IF NOT EXISTS idx_rel_s2299_per ON rel_movimentos_s2299(per_apur);
+    CREATE INDEX IF NOT EXISTS idx_rel_s2299_chave
+      ON rel_movimentos_s2299(per_apur,nr_insc_estab,cod_lotacao,cod_categ);
     """)
     conn.commit()
 
@@ -411,6 +482,45 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
     FROM oficial o LEFT JOIN teorica t USING(per_apur,cpf,matricula,cod_categ,cod_lotacao)
     WHERE t.cpf IS NULL
     """, cb, 0.82, "Consolidando bases por trabalhador...")
+
+    _recriar_tabela_derivada(conn, "rel_reconciliacao_s5011", """
+    WITH s1200 AS (
+      SELECT per_apur,nr_insc_estab,cod_lotacao,cod_categ,
+             SUM(CASE WHEN considerado_cp='Sim' THEN CAST(vr_rubr AS REAL) ELSE 0 END) base_s1200
+      FROM rel_movimentos_cp
+      GROUP BY per_apur,nr_insc_estab,cod_lotacao,cod_categ
+    ), s2299 AS (
+      SELECT per_apur,nr_insc_estab,cod_lotacao,cod_categ,
+             SUM(CASE WHEN considerado_cp='Sim' THEN CAST(vr_rubr AS REAL) ELSE 0 END) base_s2299
+      FROM rel_movimentos_s2299
+      GROUP BY per_apur,nr_insc_estab,cod_lotacao,cod_categ
+    ), oficial AS (
+      SELECT per_apur,nr_insc_estab,cod_lotacao,cod_categ,
+             SUM(CAST(vr_bc_cp AS REAL)) base_s5011
+      FROM dados_bases_contribuicao
+      GROUP BY per_apur,nr_insc_estab,cod_lotacao,cod_categ
+    ), chaves AS (
+      SELECT per_apur,nr_insc_estab,cod_lotacao,cod_categ FROM s1200
+      UNION SELECT per_apur,nr_insc_estab,cod_lotacao,cod_categ FROM s2299
+      UNION SELECT per_apur,nr_insc_estab,cod_lotacao,cod_categ FROM oficial
+    )
+    SELECT c.per_apur,c.nr_insc_estab,c.cod_lotacao,c.cod_categ,
+           COALESCE(a.base_s1200,0) base_s1200,
+           COALESCE(d.base_s2299,0) base_s2299,
+           COALESCE(o.base_s5011,0) base_s5011,
+           COALESCE(a.base_s1200,0)+COALESCE(d.base_s2299,0) base_teorica_total,
+           COALESCE(a.base_s1200,0)-COALESCE(o.base_s5011,0) diferenca_s1200_s5011,
+           COALESCE(a.base_s1200,0)+COALESCE(d.base_s2299,0)-COALESCE(o.base_s5011,0) diferenca_total_s5011,
+           CASE
+             WHEN o.per_apur IS NULL THEN 'Sem S-5011'
+             WHEN ABS(COALESCE(a.base_s1200,0)+COALESCE(d.base_s2299,0)-COALESCE(o.base_s5011,0))<=0.05 THEN 'OK'
+             ELSE 'Revisar'
+           END status_reconciliacao
+    FROM chaves c
+    LEFT JOIN s1200 a USING(per_apur,nr_insc_estab,cod_lotacao,cod_categ)
+    LEFT JOIN s2299 d USING(per_apur,nr_insc_estab,cod_lotacao,cod_categ)
+    LEFT JOIN oficial o USING(per_apur,nr_insc_estab,cod_lotacao,cod_categ)
+    """, cb, 0.90, "Reconciliando S-1200 e S-2299 com S-5011...")
     conn.commit()
     emitir_progresso(
         cb, "consolidacao", 0.95,
@@ -424,6 +534,8 @@ def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | No
     SELECT 'rel_movimentos_cp' tabela, COUNT(*) quantidade, COALESCE(SUM(CAST(vr_rubr AS REAL)),0) soma_valores FROM rel_movimentos_cp
     UNION ALL SELECT 'dados_bases_trabalhador', COUNT(*), COALESCE(SUM(CAST(valor AS REAL)),0) FROM dados_bases_trabalhador
     UNION ALL SELECT 'dados_bases_contribuicao', COUNT(*), COALESCE(SUM(CAST(vr_bc_cp AS REAL)),0) FROM dados_bases_contribuicao
+    UNION ALL SELECT 'rel_movimentos_s2299', COUNT(*), COALESCE(SUM(CAST(vr_rubr AS REAL)),0) FROM rel_movimentos_s2299
+    UNION ALL SELECT 'rel_reconciliacao_s5011', COUNT(*), COALESCE(SUM(CAST(diferenca_total_s5011 AS REAL)),0) FROM rel_reconciliacao_s5011
     UNION ALL SELECT 'eventos', COUNT(*), COALESCE(SUM(tamanho_bytes),0) FROM eventos
     """, cb, 0.98, "Atualizando os controles de integridade...")
     conn.commit()
@@ -478,6 +590,13 @@ def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) ->
         resumo_rows = []
         metricas = _metricas_movimentos(conn)
         def scalar(sql: str): return conn.execute(sql).fetchone()[0]
+        def existe_tabela(nome: str) -> bool:
+            return conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (nome,)
+            ).fetchone() is not None
+        qtd_s2299 = int(scalar("SELECT COUNT(*) FROM rel_movimentos_s2299")) if existe_tabela("rel_movimentos_s2299") else 0
+        valor_s2299 = float(scalar("SELECT COALESCE(SUM(CAST(vr_rubr AS REAL)),0) FROM rel_movimentos_s2299")) if existe_tabela("rel_movimentos_s2299") else 0.0
+        qtd_reconciliacao_revisar = int(scalar("SELECT COUNT(*) FROM rel_reconciliacao_s5011 WHERE status_reconciliacao='Revisar'")) if existe_tabela("rel_reconciliacao_s5011") else 0
         resumo_rows.extend([
             {"indicador":"Rubricas únicas no S-1200","valor":len(rub)},
             {"indicador":"Rubricas com incidência CP","valor":int((rub.get("status_cp",pd.Series(dtype=str))=="Incide CP").sum())},
@@ -487,7 +606,20 @@ def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) ->
             {"indicador":"Valor com incidência CP","valor":float(metricas["valor_incide"])},
             {"indicador":"Valor sem incidência CP","valor":float(metricas["valor_nao_incide"])},
             {"indicador":"Linhas S-5001 detalhadas","valor":int(scalar("SELECT COUNT(*) FROM dados_bases_trabalhador"))},
+            {"indicador":"Movimentos S-2299 segregados","valor":qtd_s2299},
+            {"indicador":"Valor S-2299 segregado","valor":valor_s2299},
+            {"indicador":"Reconciliações S-5011 para revisar","valor":qtd_reconciliacao_revisar},
         ])
+        reconciliacao = (
+            pd.read_sql_query(
+                f"SELECT * FROM rel_reconciliacao_s5011 "
+                f"ORDER BY status_reconciliacao DESC,ABS(diferenca_total_s5011) DESC "
+                f"LIMIT {int(limite_previa)}",
+                conn,
+            )
+            if existe_tabela("rel_reconciliacao_s5011")
+            else pd.DataFrame()
+        )
         return {
             "resumo_visual": pd.DataFrame(resumo_rows),
             "rubricas_cp": rub,
@@ -496,6 +628,8 @@ def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) ->
             "sem_cadastro": pd.read_sql_query(f"SELECT * FROM rel_sem_s1010 ORDER BY valor_rubrica DESC LIMIT {int(limite_previa)}", conn),
             "s5001_resumo": pd.read_sql_query(f"SELECT * FROM rel_s5001_resumo LIMIT {int(limite_previa)}", conn),
             "controle_integridade": pd.read_sql_query("SELECT * FROM rel_controle_integridade", conn),
+            "reconciliacao_s5011": reconciliacao,
+            "total_movimentos_s2299": qtd_s2299,
             "total_movimentos_cp": int(metricas["total"]),
             "total_movimentos_cp_padrao": int(metricas["qtd_padrao"]),
             "total_movimentos_analise_prioritaria": int(metricas["qtd_prioritaria"]),
@@ -567,7 +701,7 @@ def gerar_excel_saida_sqlite(
     progress_callback: ProgressCallback | None = None,
     gerar_manifesto: bool = False,
 ) -> str:
-    """Gera um unico relatório V9.5 em streaming e valida antes da entrega."""
+    """Gera um único relatório V10 em streaming e valida antes da entrega."""
     from modules.processador_zip import preparar_workspace_para_relatorios
 
     preparar_workspace_para_relatorios(
@@ -630,11 +764,28 @@ def gerar_excel_saida_sqlite(
                 if df_levantamento is not None
                 else pd.DataFrame(),
             ),
+            FontePlanilha(
+                "08_reconciliacao_s5011",
+                query="SELECT * FROM rel_reconciliacao_s5011 "
+                "ORDER BY status_reconciliacao DESC,ABS(diferenca_total_s5011) DESC",
+                total_esperado=totais_controle.get("rel_reconciliacao_s5011"),
+            ),
+            FontePlanilha(
+                "09_versoes",
+                query="SELECT chave,valor FROM meta WHERE chave IN "
+                "('versao_engine','versao_schema_sqlite','versao_parser',"
+                "'versao_consistencia_recibo_s1200') ORDER BY chave",
+            ),
             FontePlanilha("apoio_s1010", query="SELECT * FROM dados_rubricas"),
             FontePlanilha(
                 "apoio_s1200",
                 query="SELECT * FROM rel_movimentos_cp",
                 total_esperado=int(metricas["total"]),
+            ),
+            FontePlanilha(
+                "apoio_s2299",
+                query="SELECT * FROM rel_movimentos_s2299",
+                total_esperado=totais_controle.get("rel_movimentos_s2299"),
             ),
             FontePlanilha(
                 "apoio_s5001", query="SELECT * FROM dados_bases_trabalhador",
@@ -647,11 +798,11 @@ def gerar_excel_saida_sqlite(
             FontePlanilha("apoio_s3000", query="SELECT * FROM dados_exclusoes"),
             FontePlanilha(
                 "checagem_layout",
-                query="SELECT c.tipo,c.quantidade xml_localizados,CASE WHEN c.tipo IN ('S-1200','S-5001','S-5011') THEN (SELECT COUNT(*) FROM eventos e WHERE e.tipo=c.tipo AND e.processado_segunda=1) ELSE c.quantidade END xml_parseados,0 nao_parseados FROM contagem_eventos c",
+                query="SELECT c.tipo,c.quantidade xml_localizados,CASE WHEN c.tipo IN ('S-1200','S-2299','S-5001','S-5011') THEN (SELECT COUNT(*) FROM eventos e WHERE e.tipo=c.tipo AND e.processado_segunda=1) ELSE c.quantidade END xml_parseados,0 nao_parseados FROM contagem_eventos c",
             ),
             FontePlanilha(
                 "inventario",
-                query="SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id",
+                query="SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-2200','S-2299','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id",
                 total_esperado=totais_controle.get("eventos"),
             ),
             FontePlanilha(
@@ -834,9 +985,9 @@ def gerar_pacote_excel_saida_sqlite(
     progress_callback: ProgressCallback | None = None,
     gerar_manifesto: bool = False,
 ) -> dict:
-    """Compatibilidade V9.4: entrega agora um unico workbook consolidado V9.5."""
+    """Compatibilidade V9.4: entrega um único workbook consolidado V10."""
     saida_compat = Path(pasta_saida).expanduser().resolve()
-    caminho_unico = saida_compat / "relatorio_incidencia_cp_esocial_v9_5.xlsx"
+    caminho_unico = saida_compat / "relatorio_incidencia_cp_esocial_v10.xlsx"
     caminho = gerar_excel_saida_sqlite(
         db_path=db_path,
         caminho_saida=caminho_unico,
@@ -926,8 +1077,8 @@ def gerar_pacote_excel_saida_sqlite(
             ("apoio_s5001", "apoio_s5001", "SELECT * FROM dados_bases_trabalhador", 0.86, 0.91),
             ("apoio_s5011", "apoio_s5011", "SELECT * FROM dados_bases_contribuicao", 0.91, 0.94),
             ("apoio_s3000", "apoio_s3000", "SELECT * FROM dados_exclusoes", 0.94, 0.955),
-            ("checagem_layout", "checagem_layout", "SELECT c.tipo,c.quantidade xml_localizados,CASE WHEN c.tipo IN ('S-1200','S-5001','S-5011') THEN (SELECT COUNT(*) FROM eventos e WHERE e.tipo=c.tipo AND e.processado_segunda=1) ELSE c.quantidade END xml_parseados,0 nao_parseados FROM contagem_eventos c", 0.955, 0.965),
-            ("inventario", "inventario", "SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id", 0.965, 0.985),
+            ("checagem_layout", "checagem_layout", "SELECT c.tipo,c.quantidade xml_localizados,CASE WHEN c.tipo IN ('S-1200','S-2299','S-5001','S-5011') THEN (SELECT COUNT(*) FROM eventos e WHERE e.tipo=c.tipo AND e.processado_segunda=1) ELSE c.quantidade END xml_parseados,0 nao_parseados FROM contagem_eventos c", 0.955, 0.965),
+            ("inventario", "inventario", "SELECT arquivo,tipo,tamanho_bytes,CASE WHEN tipo IN ('S-1000','S-1005','S-1010','S-1020','S-1200','S-2200','S-2299','S-3000','S-5001','S-5011') THEN 1 ELSE 0 END parseado,CASE envelope_recibo WHEN 1 THEN 'Sim' ELSE 'Não' END envelope_recibo FROM eventos ORDER BY id", 0.965, 0.985),
             ("erros_xml", "erros_xml", "SELECT arquivo,erro FROM erros ORDER BY id", 0.985, 0.992),
         ]
 

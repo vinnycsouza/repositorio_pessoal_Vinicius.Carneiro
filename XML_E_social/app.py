@@ -51,7 +51,7 @@ st.set_page_config(page_title="Composição da Incidência CP — eSocial", layo
 
 st.title("Composição da Incidência CP — eSocial")
 st.caption(
-    "Versão 9.5.2 Engine V3: SQLite persistente, Excel consolidado e gerenciamento seguro do Workspace atual."
+    "Versão 10.0 Engine V4: parsers versionados, migração segura, reconciliação S-5011 e Workspace persistente."
 )
 
 
@@ -390,6 +390,14 @@ with st.sidebar:
                 st.markdown(f"**Período carregado:** {periodo_workspace}")
                 st.markdown(
                     f"**XMLs catalogados:** {info_workspace.quantidade_xml:,}".replace(",", ".")
+                )
+                st.markdown(
+                    f"**Engine / parser:** {info_workspace.versao_engine or 'Legado'} / "
+                    f"{info_workspace.versao_parser or 'Legado'}"
+                )
+                st.markdown(
+                    f"**Consistência de recibos:** versão "
+                    f"{info_workspace.versao_consistencia or 'pendente de verificação'}"
                 )
 
                 if st.button(
@@ -949,6 +957,12 @@ if modo_sqlite_seguro:
         df_base_trabalhador = pacote_sqlite.get("base_trabalhador", pd.DataFrame()).copy()
         df_sem_cadastro = pacote_sqlite.get("sem_cadastro", pd.DataFrame()).copy()
         df_s5001_resumo = pacote_sqlite.get("s5001_resumo", pd.DataFrame()).copy()
+        df_reconciliacao_s5011 = pacote_sqlite.get(
+            "reconciliacao_s5011", pd.DataFrame()
+        ).copy()
+        total_movimentos_s2299 = int(
+            pacote_sqlite.get("total_movimentos_s2299", 0)
+        )
         atualizar_analise(1.0, "Relatório consolidado no SQLite carregado sem bases gigantes na memória.")
 elif modo_excel_consolidado:
         atualizar_analise(0.15, "Carregando dados consolidados do Excel...")
@@ -957,6 +971,8 @@ elif modo_excel_consolidado:
         df_base_trabalhador = pd.DataFrame()
         df_sem_cadastro = pd.DataFrame()
         df_s5001_resumo = pd.DataFrame()
+        df_reconciliacao_s5011 = pd.DataFrame()
+        total_movimentos_s2299 = 0
         df_resumo_visual = gerar_resumo_visual(df_rubricas_cp, df_movimentos_cp, df_sem_cadastro, df_bases_trab)
         atualizar_analise(1.0, "Relatório consolidado carregado.")
 else:
@@ -974,6 +990,8 @@ else:
             df_bases_contribuicao=df_bases_contrib,
             progress_callback=atualizar_analise,
         )
+        df_reconciliacao_s5011 = pd.DataFrame()
+        total_movimentos_s2299 = 0
 status_analise.success("Preparação do relatório concluída.")
 
 # Consolidação específica para orientar a busca dos recibos faltantes.
@@ -1033,6 +1051,21 @@ if modulo_ativo == "Relatório de Incidência CP":
     col4.metric("Sem S-1010", f"{qtd_sem_s1010:,}".replace(",", "."))
     col5.metric("Valor com incidência CP", f"R$ {decimal_br(valor_incide)}")
 
+    if modo_sqlite_seguro:
+        revisoes_s5011 = int(
+            df_reconciliacao_s5011.get(
+                "status_reconciliacao", pd.Series(dtype=str)
+            ).eq("Revisar").sum()
+        )
+        v10a, v10b, v10c = st.columns(3)
+        v10a.metric("S-2299 segregados", f"{total_movimentos_s2299:,}".replace(",", "."))
+        v10b.metric("Reconciliações S-5011", f"{len(df_reconciliacao_s5011):,}".replace(",", "."))
+        v10c.metric("Reconciliações a revisar", f"{revisoes_s5011:,}".replace(",", "."))
+        st.caption(
+            "Na V10, valores S-2299 permanecem separados do Relatório de Incidência CP "
+            "e são usados somente no controle de reconciliação, sem alterar regras tributárias."
+        )
+
     st.markdown("## Resumo")
     if df_resumo_visual.empty:
         st.warning("Não foi possível montar o resumo.")
@@ -1065,6 +1098,17 @@ if modulo_ativo == "Relatório de Incidência CP":
         st.warning("Sem dados suficientes para montar base por trabalhador.")
     else:
         st.dataframe(df_base_trabalhador, use_container_width=True, hide_index=True)
+
+    if modo_sqlite_seguro:
+        st.markdown("## Reconciliação com S-5011")
+        if df_reconciliacao_s5011.empty:
+            st.caption("Não há chaves suficientes para reconciliação S-1200/S-2299 versus S-5011.")
+        else:
+            st.dataframe(
+                df_reconciliacao_s5011,
+                use_container_width=True,
+                hide_index=True,
+            )
 
     st.markdown("## Rubricas sem correspondência no S-1010")
     if df_sem_cadastro.empty:
@@ -1658,7 +1702,7 @@ if modulo_ativo == "Levantamento de Verbas":
                 if levantamento_sqlite:
                     resultado_levantamento = gerar_excel_levantamento_sqlite(
                         fonte_levantamento_sqlite,
-                        pasta_levantamento / "levantamento_verbas_cp_v9_5.xlsx",
+                        pasta_levantamento / "levantamento_verbas_cp_v10.xlsx",
                         filtros_levantamento,
                         chaves_selecionadas,
                         resultado_lev_sqlite,
@@ -1684,7 +1728,7 @@ if modulo_ativo == "Levantamento de Verbas":
                             ],
                         })
                     resultado_levantamento = gerar_workbook(
-                        pasta_levantamento / "levantamento_verbas_cp_v9_5.xlsx",
+                        pasta_levantamento / "levantamento_verbas_cp_v10.xlsx",
                         [
                             FontePlanilha("00_empresa", dataframe=df_empresa),
                             FontePlanilha("01_resumo", dataframe=df_parametros_lev),
@@ -1731,7 +1775,7 @@ if modulo_ativo == "Levantamento de Verbas":
                 _oferecer_arquivo_gerado(
                     caminho_levantamento,
                     label="Baixar levantamento de verbas",
-                    nome=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v9_5.xlsx"),
+                    nome=st.session_state.get("levantamento_excel_nome", "levantamento_verbas_cp_v10.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_levantamento_verbas",
                 )
@@ -1812,7 +1856,7 @@ if modulo_ativo == "Relatório de Incidência CP":
         value=False,
         key="gerar_manifesto_relatorio_v95",
     )
-    assinatura_exportacao = f"v9_5:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}"
+    assinatura_exportacao = f"v10:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}"
     if st.session_state.get("relatorio_excel_assinatura") != assinatura_exportacao:
         st.session_state.pop("relatorio_excel_bytes", None)
         st.session_state.pop("relatorio_excel_path", None)
@@ -1831,8 +1875,17 @@ if modulo_ativo == "Relatório de Incidência CP":
             Path(resultado.get("workspace_temporario", tempfile.gettempdir()))
             / "output"
         )
-        caminho_saida = pasta_saida / "relatorio_incidencia_cp_esocial_v9_5.xlsx"
-        if modo_sqlite_seguro:
+        caminho_saida = pasta_saida / "relatorio_incidencia_cp_esocial_v10.xlsx"
+        if caminho_saida.exists():
+            caminho_saida = pasta_saida / (
+                "relatorio_incidencia_cp_esocial_v10_revisado_"
+                + datetime.now().strftime("%Y%m%d_%H%M%S")
+                + ".xlsx"
+            )
+        # Na V10, todo Workspace SQLite usa a mesma exportação por cursor,
+        # independentemente do porte. O caminho DataFrame permanece apenas
+        # para a origem Excel legada.
+        if db_path_sqlite:
             caminho_relatorio = gerar_excel_saida_sqlite(
                 db_path=db_path_sqlite,
                 caminho_saida=caminho_saida,

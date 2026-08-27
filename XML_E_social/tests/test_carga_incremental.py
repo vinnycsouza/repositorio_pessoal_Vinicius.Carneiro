@@ -43,6 +43,9 @@ S1200 = """<eSocial><evtRemun Id="ID1200"><ideEvento><indRetif>1</indRetif><perA
 S1010 = """<eSocial><evtTabRubrica Id="ID1010"><ideEvento><iniValid>2026-01</iniValid></ideEvento><ideEmpregador><tpInsc>1</tpInsc><nrInsc>12345678000199</nrInsc></ideEmpregador><infoRubrica><inclusao><ideRubrica><codRubr>100</codRubr><ideTabRubr>1</ideTabRubr><iniValid>2026-01</iniValid></ideRubrica><dadosRubrica><dscRubr>Salário</dscRubr><natRubr>1000</natRubr><tpRubr>1</tpRubr><codIncCP>11</codIncCP></dadosRubrica></inclusao></infoRubrica></evtTabRubrica></eSocial>"""
 
 S3000 = """<eSocial><evtExclusao Id="ID3000"><ideEvento><perApur>2026-01</perApur></ideEvento><ideEmpregador><tpInsc>1</tpInsc><nrInsc>12345678000199</nrInsc></ideEmpregador><infoExclusao><tpEvento>S-1200</tpEvento><nrRecEvt>R1</nrRecEvt></infoExclusao></evtExclusao></eSocial>"""
+S3000_R2 = S3000.replace('Id="ID3000"', 'Id="ID3000-R2"').replace(
+    "<nrRecEvt>R1</nrRecEvt>", "<nrRecEvt>R2</nrRecEvt>"
+)
 
 S1200_RETIF = S1200.replace(
     '<indRetif>1</indRetif><perApur>',
@@ -277,7 +280,7 @@ class CargaIncrementalTest(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(movimentos, 1)
-        self.assertEqual(versao, "3")
+        self.assertEqual(versao, "4")
         self.assertIsNone(temporaria)
         self.assertTrue(carregado["modo_sqlite_seguro"])
         self.assertTrue(any(
@@ -341,6 +344,85 @@ class CargaIncrementalTest(unittest.TestCase):
             workspace, [("exclusao.zip", zip_xmls(**{"s3000.xml": S3000}))]
         )
         self.assertEqual(atualizado["pacote_sqlite"]["total_movimentos_cp"], 0)
+
+    def test_s3000_exclui_recibo_atual_da_retificacao(self):
+        inicial = self._inicial()
+        workspace = Path(inicial["workspace_temporario"])
+        atualizar_workspace_incremental(
+            workspace,
+            [("retificacao.zip", zip_xmls(**{"retificacao.xml": S1200_RETIF}))],
+        )
+        atualizado = atualizar_workspace_incremental(
+            workspace,
+            [("exclusao_r2.zip", zip_xmls(**{"s3000_r2.xml": S3000_R2}))],
+        )
+        self.assertEqual(atualizado["pacote_sqlite"]["total_movimentos_cp"], 0)
+
+    def test_s3000_do_recibo_anterior_nao_exclui_retificacao_atual(self):
+        inicial = self._inicial()
+        workspace = Path(inicial["workspace_temporario"])
+        atualizar_workspace_incremental(
+            workspace,
+            [("retificacao.zip", zip_xmls(**{"retificacao.xml": S1200_RETIF}))],
+        )
+        atualizado = atualizar_workspace_incremental(
+            workspace,
+            [("exclusao_r1.zip", zip_xmls(**{"s3000_r1.xml": S3000}))],
+        )
+        conn = sqlite3.connect(workspace / "processamento.db")
+        try:
+            quantidade, total = conn.execute(
+                "SELECT COUNT(*),SUM(CAST(vr_rubr AS REAL)) FROM rel_movimentos_cp"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(quantidade, 1)
+        self.assertAlmostEqual(total, 250.0)
+        self.assertEqual(atualizado["pacote_sqlite"]["total_movimentos_cp"], 1)
+
+    def test_migracao_v4_reclassifica_historico_sem_chamar_de_copia(self):
+        resultado = processar_fontes_esocial([
+            ("cadeia.zip", zip_xmls(**{"original.xml": S1200, "retificacao.xml": S1200_RETIF}))
+        ])
+        db = Path(resultado["db_path"])
+        conn = sqlite3.connect(db)
+        try:
+            anterior = conn.execute(
+                "SELECT id FROM eventos WHERE tipo='S-1200' AND recibo_evento='R1'"
+            ).fetchone()[0]
+            atual = conn.execute(
+                "SELECT id FROM eventos WHERE tipo='S-1200' AND recibo_evento='R2'"
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE eventos SET duplicado_logico_de=? WHERE id=?",
+                (atual, anterior),
+            )
+            conn.execute(
+                "UPDATE dados_remuneracoes SET nr_recibo_evento='R1' "
+                "WHERE arquivo='retificacao.xml'"
+            )
+            conn.execute(
+                "INSERT INTO meta(chave,valor) VALUES('versao_consistencia_recibo_s1200','3') "
+                "ON CONFLICT(chave) DO UPDATE SET valor='3'"
+            )
+            conn.commit()
+            resumo = corrigir_duplicados_s1200_por_recibo(conn)
+            vinculo = conn.execute(
+                "SELECT duplicado_logico_de FROM eventos WHERE id=?", (anterior,)
+            ).fetchone()[0]
+            quantidade, total = conn.execute(
+                "SELECT COUNT(*),SUM(CAST(vr_rubr AS REAL)) FROM rel_movimentos_cp"
+            ).fetchone()
+            versao = conn.execute(
+                "SELECT valor FROM meta WHERE chave='versao_consistencia_recibo_s1200'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(resumo["retificacoes_reclassificadas"], 1)
+        self.assertIsNone(vinculo)
+        self.assertEqual(quantidade, 1)
+        self.assertAlmostEqual(total, 250.0)
+        self.assertEqual(versao, "4")
 
     def test_retificacao_substitui_evento_anterior(self):
         inicial = self._inicial()
