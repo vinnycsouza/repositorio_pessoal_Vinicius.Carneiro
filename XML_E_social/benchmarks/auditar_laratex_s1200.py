@@ -37,7 +37,7 @@ def _valores_linha(bloco: bytes) -> list[str]:
     ]
 
 
-def _linhas_xlsx(caminho: Path):
+def _blocos_linhas_xlsx(caminho: Path):
     with zipfile.ZipFile(caminho) as pacote:
         planilhas = sorted(
             nome for nome in pacote.namelist()
@@ -55,18 +55,36 @@ def _linhas_xlsx(caminho: Path):
                     for parte in partes:
                         inicio = parte.rfind(b"<x:row")
                         if inicio >= 0:
-                            yield _valores_linha(parte[inicio:] + FIM_LINHA)
+                            yield parte[inicio:] + FIM_LINHA
                 inicio = pendente.rfind(b"<x:row")
                 if inicio >= 0 and FIM_LINHA in pendente[inicio:]:
-                    yield _valores_linha(pendente[inicio:])
+                    yield pendente[inicio:]
+
+
+def _valores_indices(bloco: bytes, indices: set[int]) -> dict[int, str]:
+    """Lê somente as primeiras células necessárias, sem dividir as 61 colunas."""
+    encontrados: dict[int, str] = {}
+    inicio = 0
+    for indice in range(max(indices) + 1):
+        fim = bloco.find(b"</x:c>", inicio)
+        if fim < 0:
+            break
+        if indice in indices:
+            localizado = TEXTOS.search(bloco, inicio, fim)
+            encontrados[indice] = (
+                html.unescape(localizado.group(1).decode("utf-8", "replace")).strip()
+                if localizado is not None else ""
+            )
+        inicio = fim + len(b"</x:c>")
+    return encontrados
 
 
 def carregar_laratex(pasta: Path) -> tuple[dict[tuple[str, str, str], list[int]], int]:
     agregado: dict[tuple[str, str, str], list[int]] = defaultdict(lambda: [0, 0])
     total = 0
     for caminho in sorted(pasta.glob("*.xlsx")):
-        linhas = _linhas_xlsx(caminho)
-        cabecalho = next(linhas, [])
+        linhas = _blocos_linhas_xlsx(caminho)
+        cabecalho = _valores_linha(next(linhas, b""))
         indices = {nome: posicao for posicao, nome in enumerate(cabecalho)}
         obrigatorios = {
             "periodo_apuracao", "identificador_rubrica", "codigo_rubrica",
@@ -76,23 +94,32 @@ def carregar_laratex(pasta: Path) -> tuple[dict[tuple[str, str, str], list[int]]
         if faltantes:
             raise ValueError(f"{caminho.name}: colunas ausentes: {sorted(faltantes)}")
         processadas = 0
-        for valores in linhas:
-            if len(valores) < len(cabecalho):
-                valores += [""] * (len(cabecalho) - len(valores))
+        indices_necessarios = {
+            indices["codigo_rubrica"],
+            indices["identificador_rubrica"],
+            indices["periodo_apuracao"],
+            indices["vlr_total_rubrica"],
+        }
+        for bloco in linhas:
+            valores = _valores_indices(bloco, indices_necessarios)
             chave = (
-                valores[indices["codigo_rubrica"]].strip(),
-                valores[indices["identificador_rubrica"]].strip(),
-                valores[indices["periodo_apuracao"]].strip(),
+                valores.get(indices["codigo_rubrica"], ""),
+                valores.get(indices["identificador_rubrica"], ""),
+                valores.get(indices["periodo_apuracao"], ""),
             )
             if not chave[0]:
                 continue
             agregado[chave][0] += 1
             agregado[chave][1] += _centavos(
-                valores[indices["vlr_total_rubrica"]]
+                valores.get(indices["vlr_total_rubrica"], "")
             )
             processadas += 1
         total += processadas
-        print(json.dumps({"arquivo": caminho.name, "linhas": processadas}), flush=True)
+        print(json.dumps({
+            "arquivo": caminho.name,
+            "linhas": processadas,
+            "chaves_acumuladas": len(agregado),
+        }), flush=True)
     return dict(agregado), total
 
 
