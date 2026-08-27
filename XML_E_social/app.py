@@ -15,7 +15,11 @@ from modules.auditoria import (
     preparar_pacote_analitico,
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
-from modules.busca_rubricas import filtrar_rubricas_por_multibusca
+from modules.busca_rubricas import (
+    atualizar_selecao_rubricas,
+    filtrar_rubricas_por_multibusca,
+    termos_sem_correspondencia,
+)
 from modules.entrega_arquivo import copiar_para_downloads, exige_entrega_local
 from modules.hud_progresso import extrair_hud_ingestao
 from modules.data_source import SQLiteDataSource, WorkspaceContext
@@ -1365,12 +1369,18 @@ if modulo_ativo == "Levantamento de Verbas":
             df_opts_busca, termos_busca = filtrar_rubricas_por_multibusca(
                 df_opts, busca_lev
             )
+            termos_ausentes = termos_sem_correspondencia(df_opts, termos_busca)
             if termos_busca:
                 st.caption(
                     f"Busca ativa: {len(termos_busca)} termo(s) · "
                     f"{len(df_opts_busca):,} rubrica(s) encontrada(s). "
                     "O código exige correspondência exata; a descrição aceita trechos e ignora acentos.".replace(",", ".")
                 )
+                if termos_ausentes:
+                    st.warning(
+                        "Sem correspondência no catálogo filtrado: "
+                        + "; ".join(termos_ausentes)
+                    )
             else:
                 st.caption(
                     "Digite um código exato ou parte da descrição. A busca vazia não seleciona rubricas automaticamente."
@@ -1382,45 +1392,54 @@ if modulo_ativo == "Levantamento de Verbas":
                     "com exatidão no cálculo e na exportação."
                 )
 
-            b1, b2, b3, b4 = st.columns([1.4, 1.4, 0.8, 1.4])
+            b1, b2, b3, b4 = st.columns([1.7, 1.2, 1.2, 0.8])
             chaves_resultado = set(df_opts_busca["chave_rubrica"].astype(str).tolist())
             chaves_filtradas = set(df_opts["chave_rubrica"].astype(str).tolist())
             chaves_atuais = set(st.session_state["lev_chaves_rubricas_selecionadas"])
 
             if b1.button(
-                f"Selecionar resultados ({len(chaves_resultado)})",
+                f"Usar somente resultados ({len(chaves_resultado)})",
+                type="primary",
                 use_container_width=True,
                 disabled=not termos_busca or not chaves_resultado,
-                key="lev_btn_sel_busca",
+                key="lev_btn_substituir_busca",
             ):
-                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais | chaves_resultado)
+                st.session_state["lev_chaves_rubricas_selecionadas"] = atualizar_selecao_rubricas(
+                    chaves_atuais, chaves_resultado, "substituir"
+                )
                 st.session_state["lev_editor_versao"] += 1
                 st.rerun()
             if b2.button(
+                f"Adicionar resultados ({len(chaves_resultado)})",
+                use_container_width=True,
+                disabled=not termos_busca or not chaves_resultado,
+                key="lev_btn_adicionar_busca",
+            ):
+                st.session_state["lev_chaves_rubricas_selecionadas"] = atualizar_selecao_rubricas(
+                    chaves_atuais, chaves_resultado, "adicionar"
+                )
+                st.session_state["lev_editor_versao"] += 1
+                st.rerun()
+            if b3.button(
                 f"Remover resultados ({len(chaves_resultado)})",
                 use_container_width=True,
                 disabled=not termos_busca or not chaves_resultado,
                 key="lev_btn_limpa_busca",
             ):
-                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais - chaves_resultado)
+                st.session_state["lev_chaves_rubricas_selecionadas"] = atualizar_selecao_rubricas(
+                    chaves_atuais, chaves_resultado, "remover"
+                )
                 st.session_state["lev_editor_versao"] += 1
                 st.rerun()
-            if b3.button(
+            if b4.button(
                 f"Limpar seleção ({len(chaves_atuais)})",
                 use_container_width=True,
                 disabled=not chaves_atuais,
                 key="lev_btn_limpa_tudo",
             ):
-                st.session_state["lev_chaves_rubricas_selecionadas"] = []
-                st.session_state["lev_editor_versao"] += 1
-                st.rerun()
-            if b4.button(
-                f"Selecionar todas dos filtros ({len(chaves_filtradas)})",
-                use_container_width=True,
-                disabled=not chaves_filtradas,
-                key="lev_btn_sel_filtrado",
-            ):
-                st.session_state["lev_chaves_rubricas_selecionadas"] = sorted(chaves_atuais | chaves_filtradas)
+                st.session_state["lev_chaves_rubricas_selecionadas"] = atualizar_selecao_rubricas(
+                    chaves_atuais, set(), "limpar"
+                )
                 st.session_state["lev_editor_versao"] += 1
                 st.rerun()
 
@@ -1495,7 +1514,7 @@ if modulo_ativo == "Levantamento de Verbas":
             selecionadas_visiveis = chaves_selecionadas & chaves_filtradas
             selecionadas_fora = chaves_selecionadas - chaves_filtradas
             with st.expander(
-                f"Seleção consolidada — {len(chaves_selecionadas)} rubrica(s)",
+                f"Rubricas que entrarão no levantamento — {len(chaves_selecionadas)}",
                 expanded=bool(chaves_selecionadas),
             ):
                 st.caption(

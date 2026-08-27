@@ -3,8 +3,10 @@ import unittest
 import pandas as pd
 
 from modules.busca_rubricas import (
+    atualizar_selecao_rubricas,
     extrair_termos_busca,
     filtrar_rubricas_por_multibusca,
+    termos_sem_correspondencia,
 )
 
 
@@ -37,6 +39,31 @@ class BuscaRubricasTest(unittest.TestCase):
         )
         self.assertEqual(termos, ["100", "bonus", "300"])
         self.assertEqual(set(resultado["cod_rubr"]), {"100", "A.20", "300"})
+
+    def test_informa_termos_sem_correspondencia(self):
+        termos = ["100", "INEXISTENTE", "familia"]
+        self.assertEqual(
+            termos_sem_correspondencia(self.df, termos),
+            ["INEXISTENTE"],
+        )
+
+    def test_substituir_nao_mantem_selecao_antiga(self):
+        self.assertEqual(
+            atualizar_selecao_rubricas(
+                {"ANTIGA||1", "MANTER||1"}, {"NOVA||1"}, "substituir"
+            ),
+            ["NOVA||1"],
+        )
+
+    def test_adicionar_e_remover_sao_acoes_separadas(self):
+        adicionadas = atualizar_selecao_rubricas(
+            {"A||1"}, {"B||1"}, "adicionar"
+        )
+        self.assertEqual(adicionadas, ["A||1", "B||1"])
+        self.assertEqual(
+            atualizar_selecao_rubricas(adicionadas, {"A||1"}, "remover"),
+            ["B||1"],
+        )
 
 
 if __name__ == "__main__":

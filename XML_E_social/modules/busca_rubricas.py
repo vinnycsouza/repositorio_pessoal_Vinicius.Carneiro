@@ -57,3 +57,52 @@ def filtrar_rubricas_por_multibusca(
     resultado = df[mascara].copy()
     resultado["correspondencia_busca"] = motivos.loc[mascara]
     return resultado, termos
+
+
+def termos_sem_correspondencia(
+    df: pd.DataFrame, termos: list[str]
+) -> list[str]:
+    """Retorna termos que não casam com código exato nem trecho da descrição."""
+    if not termos:
+        return []
+    if df.empty:
+        return list(termos)
+    codigos = (
+        df["cod_rubr"].fillna("").astype(str).map(normalizar_busca)
+        if "cod_rubr" in df.columns else pd.Series("", index=df.index)
+    )
+    descricoes = (
+        df["dsc_rubr"].fillna("").astype(str).map(normalizar_busca)
+        if "dsc_rubr" in df.columns else pd.Series("", index=df.index)
+    )
+    ausentes: list[str] = []
+    for original in termos:
+        termo = normalizar_busca(original)
+        encontrou = bool(
+            codigos.eq(termo).any()
+            or descricoes.str.contains(re.escape(termo), regex=True, na=False).any()
+        )
+        if not encontrou:
+            ausentes.append(original)
+    return ausentes
+
+
+def atualizar_selecao_rubricas(
+    atuais: set[str] | list[str],
+    resultados: set[str] | list[str],
+    acao: str,
+) -> list[str]:
+    """Aplica uma ação explícita sem confundir busca com seleção acumulada."""
+    conjunto_atual = {str(chave) for chave in atuais}
+    conjunto_resultado = {str(chave) for chave in resultados}
+    if acao == "substituir":
+        nova = conjunto_resultado
+    elif acao == "adicionar":
+        nova = conjunto_atual | conjunto_resultado
+    elif acao == "remover":
+        nova = conjunto_atual - conjunto_resultado
+    elif acao == "limpar":
+        nova = set()
+    else:
+        raise ValueError(f"Ação de seleção desconhecida: {acao}")
+    return sorted(nova)
