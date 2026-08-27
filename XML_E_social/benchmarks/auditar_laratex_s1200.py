@@ -12,11 +12,13 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import xml.etree.ElementTree as ET
 import zipfile
 
 
-FIM_LINHA = b"</x:row>"
-TEXTOS = re.compile(br"<x:t[^>]*>(.*?)</x:t>", re.DOTALL)
+TEXTOS = re.compile(br"<(?:x:)?t[^>]*>(.*?)</(?:x:)?t>", re.DOTALL)
+VALOR = re.compile(br"<(?:x:)?v[^>]*>(.*?)</(?:x:)?v>", re.DOTALL)
+CELULAS = re.compile(br"<(?:x:)?c\b.*?</(?:x:)?c>", re.DOTALL)
 
 
 def _centavos(valor: str) -> int:
@@ -30,15 +32,47 @@ def _centavos(valor: str) -> int:
         return 0
 
 
-def _valores_linha(bloco: bytes) -> list[str]:
+def _valor_segmento(segmento: bytes, compartilhados: list[str]) -> str:
+    texto = TEXTOS.search(segmento)
+    if texto is not None:
+        return html.unescape(texto.group(1).decode("utf-8", "replace")).strip()
+    valor = VALOR.search(segmento)
+    if valor is None:
+        return ""
+    bruto = valor.group(1).decode("utf-8", "replace").strip()
+    if re.search(br'\bt="s"', segmento):
+        try:
+            return compartilhados[int(bruto)]
+        except (ValueError, IndexError):
+            return ""
+    return bruto
+
+
+def _valores_linha(bloco: bytes, compartilhados: list[str]) -> list[str]:
     return [
-        html.unescape(valor.decode("utf-8", "replace"))
-        for valor in TEXTOS.findall(bloco)
+        _valor_segmento(celula.group(0), compartilhados)
+        for celula in CELULAS.finditer(bloco)
     ]
+
+
+def _carregar_compartilhados(pacote: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in pacote.namelist():
+        return []
+    saida: list[str] = []
+    with pacote.open("xl/sharedStrings.xml") as origem:
+        for _, elemento in ET.iterparse(origem, events=("end",)):
+            if elemento.tag.rsplit("}", 1)[-1] == "si":
+                saida.append("".join(
+                    filho.text or "" for filho in elemento.iter()
+                    if filho.tag.rsplit("}", 1)[-1] == "t"
+                ))
+                elemento.clear()
+    return saida
 
 
 def _blocos_linhas_xlsx(caminho: Path):
     with zipfile.ZipFile(caminho) as pacote:
+        compartilhados = _carregar_compartilhados(pacote)
         planilhas = sorted(
             nome for nome in pacote.namelist()
             if nome.startswith("xl/worksheets/") and nome.endswith(".xml")
@@ -46,36 +80,41 @@ def _blocos_linhas_xlsx(caminho: Path):
         for nome in planilhas:
             with pacote.open(nome) as origem:
                 pendente = b""
+                fim_linha: bytes | None = None
+                inicio_linha: bytes | None = None
                 while True:
                     trecho = origem.read(4 * 1024 * 1024)
                     if not trecho:
                         break
-                    partes = (pendente + trecho).split(FIM_LINHA)
+                    combinado = pendente + trecho
+                    if fim_linha is None:
+                        if b"</x:row>" in combinado:
+                            inicio_linha, fim_linha = b"<x:row", b"</x:row>"
+                        elif b"</row>" in combinado:
+                            inicio_linha, fim_linha = b"<row", b"</row>"
+                        else:
+                            pendente = combinado
+                            continue
+                    partes = combinado.split(fim_linha)
                     pendente = partes.pop()
                     for parte in partes:
-                        inicio = parte.rfind(b"<x:row")
+                        inicio = parte.rfind(inicio_linha)
                         if inicio >= 0:
-                            yield parte[inicio:] + FIM_LINHA
-                inicio = pendente.rfind(b"<x:row")
-                if inicio >= 0 and FIM_LINHA in pendente[inicio:]:
-                    yield pendente[inicio:]
+                            yield parte[inicio:] + fim_linha, compartilhados
 
 
-def _valores_indices(bloco: bytes, indices: set[int]) -> dict[int, str]:
+def _valores_indices(
+    bloco: bytes, indices: set[int], compartilhados: list[str]
+) -> dict[int, str]:
     """Lê somente as primeiras células necessárias, sem dividir as 61 colunas."""
     encontrados: dict[int, str] = {}
-    inicio = 0
-    for indice in range(max(indices) + 1):
-        fim = bloco.find(b"</x:c>", inicio)
-        if fim < 0:
+    for indice, localizado in enumerate(CELULAS.finditer(bloco)):
+        if indice > max(indices):
             break
         if indice in indices:
-            localizado = TEXTOS.search(bloco, inicio, fim)
-            encontrados[indice] = (
-                html.unescape(localizado.group(1).decode("utf-8", "replace")).strip()
-                if localizado is not None else ""
+            encontrados[indice] = _valor_segmento(
+                localizado.group(0), compartilhados
             )
-        inicio = fim + len(b"</x:c>")
     return encontrados
 
 
@@ -84,7 +123,8 @@ def carregar_laratex(pasta: Path) -> tuple[dict[tuple[str, str, str], list[int]]
     total = 0
     for caminho in sorted(pasta.glob("*.xlsx")):
         linhas = _blocos_linhas_xlsx(caminho)
-        cabecalho = _valores_linha(next(linhas, b""))
+        primeiro_bloco, compartilhados = next(linhas, (b"", []))
+        cabecalho = _valores_linha(primeiro_bloco, compartilhados)
         indices = {nome: posicao for posicao, nome in enumerate(cabecalho)}
         obrigatorios = {
             "periodo_apuracao", "identificador_rubrica", "codigo_rubrica",
@@ -100,8 +140,10 @@ def carregar_laratex(pasta: Path) -> tuple[dict[tuple[str, str, str], list[int]]
             indices["periodo_apuracao"],
             indices["vlr_total_rubrica"],
         }
-        for bloco in linhas:
-            valores = _valores_indices(bloco, indices_necessarios)
+        for bloco, compartilhados in linhas:
+            valores = _valores_indices(
+                bloco, indices_necessarios, compartilhados
+            )
             chave = (
                 valores.get(indices["codigo_rubrica"], ""),
                 valores.get(indices["identificador_rubrica"], ""),
@@ -129,7 +171,7 @@ def carregar_workspace(db_path: Path) -> tuple[dict[tuple[str, str, str], list[i
         linhas = conn.execute("""
             SELECT COALESCE(cod_rubr,''),COALESCE(ide_tab_rubr,''),COALESCE(per_apur,''),
                    COUNT(*),ROUND(COALESCE(SUM(CAST(vr_rubr AS REAL)),0)*100)
-            FROM dados_remuneracoes
+            FROM rel_movimentos_cp
             GROUP BY cod_rubr,ide_tab_rubr,per_apur
         """).fetchall()
     finally:
@@ -159,6 +201,29 @@ def comparar(laratex, workspace) -> dict[str, object]:
     )
     rubricas_lara = {(c, t) for c, t, _ in chaves_lara}
     rubricas_ws = {(c, t) for c, t, _ in chaves_ws}
+    rubricas_ausentes = sorted(rubricas_lara - rubricas_ws)
+    ausencias_por_competencia: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    for chave in ausentes:
+        resumo = ausencias_por_competencia[chave[2]]
+        resumo[0] += 1
+        resumo[1] += laratex[chave][0]
+        resumo[2] += laratex[chave][1]
+
+    rubricas_ausentes_detalhe = []
+    for codigo, tabela in rubricas_ausentes:
+        chaves = [chave for chave in ausentes if chave[:2] == (codigo, tabela)]
+        rubricas_ausentes_detalhe.append({
+            "codigo": codigo,
+            "tabela": tabela,
+            "competencias": len(chaves),
+            "linhas_laratex": sum(laratex[chave][0] for chave in chaves),
+            "valor_laratex": sum(laratex[chave][1] for chave in chaves) / 100,
+            "primeira_competencia": min((chave[2] for chave in chaves), default=""),
+            "ultima_competencia": max((chave[2] for chave in chaves), default=""),
+        })
+    rubricas_ausentes_detalhe.sort(
+        key=lambda item: abs(item["valor_laratex"]), reverse=True
+    )
 
     def detalhe(chave, somente_lara=False):
         lara = laratex[chave]
@@ -178,6 +243,16 @@ def comparar(laratex, workspace) -> dict[str, object]:
         "rubricas_totalmente_ausentes": len(rubricas_lara - rubricas_ws),
         "chaves_competencia_ausentes": len(ausentes),
         "chaves_com_contagem_ou_valor_divergente": len(divergentes),
+        "ausencias_por_competencia": [
+            {
+                "competencia": competencia,
+                "chaves": valores[0],
+                "linhas": valores[1],
+                "valor": valores[2] / 100,
+            }
+            for competencia, valores in sorted(ausencias_por_competencia.items())
+        ],
+        "rubricas_ausentes": rubricas_ausentes_detalhe,
         "maiores_ausencias": [detalhe(chave, True) for chave in ausentes[:100]],
         "maiores_divergencias": [detalhe(chave) for chave in divergentes[:100]],
     }
