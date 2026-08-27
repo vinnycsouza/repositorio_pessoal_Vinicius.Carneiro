@@ -27,9 +27,11 @@ def extrair_termos_busca(texto: str) -> list[str]:
 
 
 def filtrar_rubricas_por_multibusca(
-    df: pd.DataFrame, texto_busca: str
+    df: pd.DataFrame, texto_busca: str, modo: str = "codigo_exato"
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Busca código exato ou trecho da descrição, ignorando caixa e acentos."""
+    """Busca uma lista de códigos exatos ou trechos de descrição."""
+    if modo not in {"codigo_exato", "descricao"}:
+        raise ValueError(f"Modo de busca desconhecido: {modo}")
     termos = extrair_termos_busca(texto_busca)
     if not termos or df.empty:
         return df.copy(), termos
@@ -46,8 +48,12 @@ def filtrar_rubricas_por_multibusca(
     motivos = pd.Series("", index=df.index, dtype="object")
     for termo_original in termos:
         termo = normalizar_busca(termo_original)
-        por_codigo = codigos.eq(termo)
-        por_descricao = descricoes.str.contains(re.escape(termo), regex=True, na=False)
+        por_codigo = codigos.eq(termo) if modo == "codigo_exato" else pd.Series(False, index=df.index)
+        por_descricao = (
+            descricoes.str.contains(re.escape(termo), regex=True, na=False)
+            if modo == "descricao"
+            else pd.Series(False, index=df.index)
+        )
         encontrado = por_codigo | por_descricao
         mascara |= encontrado
         motivos.loc[por_codigo & motivos.eq("")] = f"Código exato: {termo_original}"
@@ -60,9 +66,11 @@ def filtrar_rubricas_por_multibusca(
 
 
 def termos_sem_correspondencia(
-    df: pd.DataFrame, termos: list[str]
+    df: pd.DataFrame, termos: list[str], modo: str = "codigo_exato"
 ) -> list[str]:
-    """Retorna termos que não casam com código exato nem trecho da descrição."""
+    """Retorna termos sem correspondência no modo de busca selecionado."""
+    if modo not in {"codigo_exato", "descricao"}:
+        raise ValueError(f"Modo de busca desconhecido: {modo}")
     if not termos:
         return []
     if df.empty:
@@ -78,10 +86,12 @@ def termos_sem_correspondencia(
     ausentes: list[str] = []
     for original in termos:
         termo = normalizar_busca(original)
-        encontrou = bool(
-            codigos.eq(termo).any()
-            or descricoes.str.contains(re.escape(termo), regex=True, na=False).any()
-        )
+        if modo == "codigo_exato":
+            encontrou = bool(codigos.eq(termo).any())
+        else:
+            encontrou = bool(
+                descricoes.str.contains(re.escape(termo), regex=True, na=False).any()
+            )
         if not encontrou:
             ausentes.append(original)
     return ausentes

@@ -1357,24 +1357,58 @@ if modulo_ativo == "Levantamento de Verbas":
                 }
 
             st.markdown("### Seleção de rubricas")
+            tipo_busca_lev = st.radio(
+                "Tipo de busca",
+                ["Códigos exatos / lista", "Descrição contém"],
+                horizontal=True,
+                key="lev_tipo_busca_rubrica",
+                help=(
+                    "Use códigos exatos para colar listas fechadas. A busca por descrição "
+                    "aceita palavras e trechos."
+                ),
+            )
+            modo_busca_lev = (
+                "codigo_exato"
+                if tipo_busca_lev == "Códigos exatos / lista"
+                else "descricao"
+            )
             busca_lev = st.text_area(
-                "Buscar rubricas por código ou descrição",
+                (
+                    "Colar códigos de rubricas"
+                    if modo_busca_lev == "codigo_exato"
+                    else "Buscar rubricas pela descrição"
+                ),
                 value="",
                 key="lev_busca_rubrica",
                 height=90,
-                help="Aceita múltiplos termos separados por ponto e vírgula, vírgula, tabulação ou quebra de linha. Você pode colar uma lista direto do Excel.",
-                placeholder="Ex.: 0324P; BONUS; MATERNIDADE\nou cole uma coluna do Excel aqui",
+                help=(
+                    "Aceita múltiplos códigos separados por ponto e vírgula, vírgula, tabulação "
+                    "ou quebra de linha. Você pode colar uma coluna direto do Excel."
+                    if modo_busca_lev == "codigo_exato"
+                    else "Aceita palavras ou trechos da descrição, ignorando caixa e acentos."
+                ),
+                placeholder=(
+                    "Ex.: DIFE; D225; ADP4479_PAY_3563\nou cole uma coluna do Excel aqui"
+                    if modo_busca_lev == "codigo_exato"
+                    else "Ex.: DIFERENCIAL; FÉRIAS; MATERNIDADE"
+                ),
             )
 
             df_opts_busca, termos_busca = filtrar_rubricas_por_multibusca(
-                df_opts, busca_lev
+                df_opts, busca_lev, modo=modo_busca_lev
             )
-            termos_ausentes = termos_sem_correspondencia(df_opts, termos_busca)
+            termos_ausentes = termos_sem_correspondencia(
+                df_opts, termos_busca, modo=modo_busca_lev
+            )
             if termos_busca:
                 st.caption(
                     f"Busca ativa: {len(termos_busca)} termo(s) · "
                     f"{len(df_opts_busca):,} rubrica(s) encontrada(s). "
-                    "O código exige correspondência exata; a descrição aceita trechos e ignora acentos.".replace(",", ".")
+                    + (
+                        "Os códigos exigem correspondência exata."
+                        if modo_busca_lev == "codigo_exato"
+                        else "A descrição aceita trechos e ignora acentos."
+                    )
                 )
                 if termos_ausentes:
                     st.warning(
@@ -1383,7 +1417,9 @@ if modulo_ativo == "Levantamento de Verbas":
                     )
             else:
                 st.caption(
-                    "Digite um código exato ou parte da descrição. A busca vazia não seleciona rubricas automaticamente."
+                    "Informe um ou mais códigos exatos. A busca vazia não seleciona rubricas automaticamente."
+                    if modo_busca_lev == "codigo_exato"
+                    else "Digite parte da descrição. A busca vazia não seleciona rubricas automaticamente."
                 )
             if levantamento_sqlite:
                 st.caption(

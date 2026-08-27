@@ -25,7 +25,9 @@ class BuscaRubricasTest(unittest.TestCase):
         self.assertEqual(resultado.iloc[0]["correspondencia_busca"], "Código exato: 100")
 
     def test_descricao_ignora_acentos_e_caixa(self):
-        resultado, _ = filtrar_rubricas_por_multibusca(self.df, "SALARIO")
+        resultado, _ = filtrar_rubricas_por_multibusca(
+            self.df, "SALARIO", modo="descricao"
+        )
         self.assertEqual(set(resultado["cod_rubr"]), {"100", "300"})
 
     def test_ponto_nao_quebra_codigo(self):
@@ -35,17 +37,30 @@ class BuscaRubricasTest(unittest.TestCase):
 
     def test_lista_usa_logica_ou_e_remove_duplicados(self):
         resultado, termos = filtrar_rubricas_por_multibusca(
-            self.df, "100\nbonus; BÔNUS; 300"
+            self.df, "100\n300"
         )
-        self.assertEqual(termos, ["100", "bonus", "300"])
-        self.assertEqual(set(resultado["cod_rubr"]), {"100", "A.20", "300"})
+        self.assertEqual(termos, ["100", "300"])
+        self.assertEqual(set(resultado["cod_rubr"]), {"100", "300"})
 
     def test_informa_termos_sem_correspondencia(self):
-        termos = ["100", "INEXISTENTE", "familia"]
+        termos = ["100", "INEXISTENTE"]
         self.assertEqual(
             termos_sem_correspondencia(self.df, termos),
             ["INEXISTENTE"],
         )
+
+    def test_codigo_dife_nao_encontra_descricao_diferencial(self):
+        df = pd.DataFrame([
+            {"cod_rubr": "DIFE", "dsc_rubr": "Desconto INSS férias"},
+            {"cod_rubr": "V115", "dsc_rubr": "DIFERENCIAL GEOGRÁFICO"},
+        ])
+        por_codigo, _ = filtrar_rubricas_por_multibusca(df, "DIFE")
+        self.assertEqual(por_codigo["cod_rubr"].tolist(), ["DIFE"])
+
+        por_descricao, _ = filtrar_rubricas_por_multibusca(
+            df, "DIFE", modo="descricao"
+        )
+        self.assertEqual(por_descricao["cod_rubr"].tolist(), ["V115"])
 
     def test_substituir_nao_mantem_selecao_antiga(self):
         self.assertEqual(
