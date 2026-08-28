@@ -14,11 +14,17 @@ from modules.auditoria import (
     gerar_resumo_visual,
     preparar_pacote_analitico,
 )
+from modules.auditoria_movimentos import (
+    auditar_movimentos_workspace,
+    corrigir_duplicidades_tecnicas,
+    listar_auditoria_movimentos,
+)
 from modules.excel_builder import FontePlanilha, gerar_workbook
 from modules.busca_rubricas import (
     atualizar_selecao_rubricas,
     filtrar_dataframe_por_chaves,
     filtrar_rubricas_por_multibusca,
+    montar_manifesto_escopo_rubricas,
     termos_sem_correspondencia,
 )
 from modules.entrega_arquivo import copiar_para_downloads, exige_entrega_local
@@ -539,6 +545,70 @@ with st.sidebar:
                                 f"erros: {resumo_inc.get('quantidade_erros', 0):,}."
                             ).replace(",", ".")
                             st.rerun()
+
+                st.markdown("#### Consistência dos movimentos S-1200")
+                st.caption(
+                    "A prévia compara repetições do SQLite com o XML compactado já "
+                    "armazenado neste Workspace. Nenhuma linha é alterada durante a verificação."
+                )
+                db_auditoria = info_workspace.caminho / "processamento.db"
+                if st.button(
+                    "Verificar consistência dos movimentos",
+                    use_container_width=True,
+                    disabled=info_workspace.status == "Em processamento",
+                    key="auditar_movimentos_workspace_v10",
+                ):
+                    barra_aud = st.progress(0, text="Preparando auditoria...")
+                    def progresso_aud(valor, mensagem, *_):
+                        barra_aud.progress(int(valor * 100), text=mensagem)
+                    try:
+                        st.session_state["resumo_auditoria_movimentos_v10"] = (
+                            auditar_movimentos_workspace(db_auditoria, progresso_aud)
+                        )
+                    except Exception as exc:
+                        st.error(f"Não foi possível concluir a auditoria: {exc}")
+
+                resumo_aud = st.session_state.get("resumo_auditoria_movimentos_v10")
+                if resumo_aud is not None:
+                    a1, a2, a3 = st.columns(3)
+                    a1.metric("Eventos com repetição", resumo_aud.eventos_com_repeticao)
+                    a2.metric("Repetições legítimas no XML", resumo_aud.grupos_legitimos_no_xml)
+                    a3.metric("Linhas técnicas excedentes", resumo_aud.linhas_excedentes_confirmadas)
+                    st.caption(
+                        "Impacto confirmado das linhas excedentes: "
+                        f"R$ {resumo_aud.impacto_excedente:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    )
+                    detalhes_aud = listar_auditoria_movimentos(db_auditoria)
+                    if detalhes_aud:
+                        with st.expander("Prévia técnica da auditoria"):
+                            st.dataframe(pd.DataFrame(detalhes_aud), use_container_width=True, hide_index=True)
+                    if resumo_aud.linhas_excedentes_confirmadas:
+                        confirmar_correcao = st.checkbox(
+                            "Confirmo a correção somente das inconsistências comprovadas pelo XML",
+                            key="confirmar_correcao_movimentos_v10",
+                        )
+                        if st.button(
+                            "Corrigir duplicidades técnicas confirmadas",
+                            type="primary",
+                            use_container_width=True,
+                            disabled=not confirmar_correcao,
+                            key="corrigir_movimentos_workspace_v10",
+                        ):
+                            barra_cor = st.progress(0, text="Preparando correção transacional...")
+                            def progresso_cor(valor, mensagem, *_):
+                                barra_cor.progress(int(valor * 100), text=mensagem)
+                            try:
+                                resultado_cor = corrigir_duplicidades_tecnicas(
+                                    db_auditoria, confirmar=True,
+                                    progress_callback=progresso_cor,
+                                )
+                                st.success(
+                                    f"Correção concluída: {resultado_cor['eventos_corrigidos']} "
+                                    "evento(s) regravado(s) e projeções reconstruídas."
+                                )
+                                st.cache_data.clear()
+                            except Exception as exc:
+                                st.error(f"Correção interrompida com segurança: {exc}")
 
                 if not st.session_state.get("confirmar_lixeira_workspace_v952"):
                     if st.button(
@@ -2086,8 +2156,23 @@ if modulo_ativo == "Relatório de Incidência CP":
         value=False,
         key="gerar_manifesto_relatorio_v95",
     )
+    perfil_relatorio = st.radio(
+        "Perfil do workbook",
+        ["Relatório específico enxuto", "Auditoria completa"],
+        index=0 if chaves_rubricas_relatorio is not None else 1,
+        horizontal=True,
+        help=(
+            "O perfil enxuto evita repetir 03_movimentos_cp em apoio_s1200 e "
+            "mantém a empresa consolidada. Auditoria completa preserva todas as bases de apoio."
+        ),
+        key="perfil_workbook_incidencia_v10",
+    )
+    perfil_relatorio_sql = (
+        "enxuto" if perfil_relatorio.startswith("Relatório específico")
+        else "auditoria_completa"
+    )
     assinatura_rubricas = "todas" if chaves_rubricas_relatorio is None else "|".join(chaves_rubricas_relatorio)
-    assinatura_exportacao = f"v10:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}:{assinatura_rubricas}"
+    assinatura_exportacao = f"v10:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}:{perfil_relatorio_sql}:{assinatura_rubricas}"
     if st.session_state.get("relatorio_excel_assinatura") != assinatura_exportacao:
         st.session_state.pop("relatorio_excel_bytes", None)
         st.session_state.pop("relatorio_excel_path", None)
@@ -2129,6 +2214,12 @@ if modulo_ativo == "Relatório de Incidência CP":
             df_rubricas_export = filtrar_dataframe_por_chaves(
                 df_rubricas_cp, chaves_rubricas_relatorio
             )
+            escopo_export = montar_manifesto_escopo_rubricas(
+                catalogo_rel,
+                chaves_rubricas_relatorio,
+                termos_rel if chaves_rubricas_relatorio is not None else [],
+                modo_rel if chaves_rubricas_relatorio is not None else "codigo_exato",
+            )
             caminho_relatorio = gerar_excel_saida_sqlite(
                 db_path=db_path_sqlite,
                 caminho_saida=caminho_saida,
@@ -2140,6 +2231,8 @@ if modulo_ativo == "Relatório de Incidência CP":
                 chaves_rubricas=chaves_rubricas_relatorio,
                 progress_callback=atualizar_excel_rel,
                 gerar_manifesto=gerar_manifesto_rel,
+                perfil_relatorio=perfil_relatorio_sql,
+                df_escopo_rubricas=escopo_export,
             )
         else:
             movimentos_escopo = filtrar_dataframe_por_chaves(

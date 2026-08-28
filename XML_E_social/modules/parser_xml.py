@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import hashlib
 from typing import Dict, List, Tuple, Sequence, Optional
 import xml.etree.ElementTree as ET
 
@@ -56,6 +57,15 @@ class RubricaPagamento:
     status_auditoria: str
     observacao_validacao: str
     nr_recibo_evento: str
+    ide_dm_dev: str = ""
+    origem_periodo: str = ""
+    per_ref: str = ""
+    indice_dm_dev: int = 0
+    indice_estab: int = 0
+    indice_remun: int = 0
+    indice_item: int = 0
+    caminho_item: str = ""
+    hash_item: str = ""
 
 
 @dataclass
@@ -126,6 +136,32 @@ class RubricaDesligamento:
     origem_movimento: str = "S-2299"
 
 
+def _proveniencia_s1200(
+    dm_dev: ET.Element,
+    bloco_periodo: ET.Element,
+    item: ET.Element,
+    indice_dm_dev: int,
+    indice_estab: int,
+    indice_remun: int,
+    indice_item: int,
+) -> dict:
+    origem_periodo = localname(bloco_periodo.tag)
+    caminho = (
+        f"dmDev[{indice_dm_dev}]/{origem_periodo or 'periodo'}"
+        f"/ideEstabLot[{indice_estab}]/remun[{indice_remun}]"
+        f"/itensRemun[{indice_item}]"
+    )
+    return {
+        "ide_dm_dev": first_text_by_localname(dm_dev, "ideDmDev") or "",
+        "origem_periodo": origem_periodo,
+        "per_ref": first_text_by_localname(bloco_periodo, "perRef") or "",
+        "indice_dm_dev": indice_dm_dev,
+        "indice_estab": indice_estab,
+        "indice_remun": indice_remun,
+        "indice_item": indice_item,
+        "caminho_item": caminho,
+        "hash_item": hashlib.sha256(ET.tostring(item, encoding="utf-8")).hexdigest(),
+    }
 @dataclass
 class ContextoEmpregador:
     arquivo: str
@@ -569,7 +605,7 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
     per_apur = first_text_by_localname(root, "perApur") or ""
     nr_recibo_evento = obter_recibo_evento_atual(root)
 
-    for dm_dev in all_elements_by_localname(root, "dmDev"):
+    for indice_dm_dev, dm_dev in enumerate(all_elements_by_localname(root, "dmDev"), 1):
         cod_categ = first_text_by_localname(dm_dev, "codCateg") or ""
 
         # S-1200 pode trazer período atual (infoPerApur) e/ou períodos anteriores (infoPerAnt).
@@ -578,7 +614,7 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
             blocos_periodo = [dm_dev]
 
         for bloco_periodo in blocos_periodo:
-            for ide_estab in all_elements_by_localname(bloco_periodo, "ideEstabLot"):
+            for indice_estab, ide_estab in enumerate(all_elements_by_localname(bloco_periodo, "ideEstabLot"), 1):
                 tp_insc_estab = first_text_by_localname(ide_estab, "tpInsc") or ""
                 nr_insc_estab = first_text_by_localname(ide_estab, "nrInsc") or ""
                 cod_lotacao = first_text_by_localname(ide_estab, "codLotacao") or ""
@@ -587,7 +623,7 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
                 if not blocos_remun:
                     blocos_remun = [ide_estab]
 
-                for remun in blocos_remun:
+                for indice_remun, remun in enumerate(blocos_remun, 1):
                     matricula = first_text_by_localname(remun, "matricula") or first_text_by_localname(dm_dev, "matricula") or ""
                     competencia_movimento = (
                         first_text_by_localname(remun, "perRef")
@@ -595,7 +631,7 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
                         or per_apur
                     )
 
-                    for item in all_elements_by_localname(remun, "itensRemun"):
+                    for indice_item, item in enumerate(all_elements_by_localname(remun, "itensRemun"), 1):
                         cod_rubr = first_text_by_localname(item, "codRubr") or ""
                         ide_tab_rubr = first_text_by_localname(item, "ideTabRubr") or ""
                         vr_rubr = safe_float(first_text_by_localname(item, "vrRubr"))
@@ -642,6 +678,10 @@ def parse_s1200(root: ET.Element, rubricas_map: Dict[Tuple[str, str], List[Rubri
                                     status_auditoria=selecao.status_auditoria,
                                     observacao_validacao=selecao.observacao_validacao,
                                     nr_recibo_evento=nr_recibo_evento,
+                                    **_proveniencia_s1200(
+                                        dm_dev, bloco_periodo, item, indice_dm_dev,
+                                        indice_estab, indice_remun, indice_item,
+                                    ),
                                 )
                             )
 
@@ -677,7 +717,9 @@ def parse_s1200_v10(
     saida: List[RubricaPagamento] = []
 
     escopo_demonstrativos = ide_trabalhador if ide_trabalhador is not None else evento
-    for dm_dev in _descendentes_por_nome(escopo_demonstrativos, "dmDev"):
+    for indice_dm_dev, dm_dev in enumerate(
+        _descendentes_por_nome(escopo_demonstrativos, "dmDev"), 1
+    ):
         cod_categ = first_text_by_localname(dm_dev, "codCateg") or ""
         blocos_periodo = [
             elemento
@@ -688,7 +730,9 @@ def parse_s1200_v10(
             blocos_periodo = [dm_dev]
 
         for bloco_periodo in blocos_periodo:
-            for ide_estab in _descendentes_por_nome(bloco_periodo, "ideEstabLot"):
+            for indice_estab, ide_estab in enumerate(
+                _descendentes_por_nome(bloco_periodo, "ideEstabLot"), 1
+            ):
                 tp_insc_estab = first_text_by_localname(ide_estab, "tpInsc") or ""
                 nr_insc_estab = first_text_by_localname(ide_estab, "nrInsc") or ""
                 cod_lotacao = first_text_by_localname(ide_estab, "codLotacao") or ""
@@ -700,7 +744,7 @@ def parse_s1200_v10(
                 if not blocos_remun:
                     blocos_remun = [ide_estab]
 
-                for remun in blocos_remun:
+                for indice_remun, remun in enumerate(blocos_remun, 1):
                     matricula = (
                         first_text_by_localname(remun, "matricula")
                         or first_text_by_localname(dm_dev, "matricula")
@@ -711,7 +755,9 @@ def parse_s1200_v10(
                         or first_text_by_localname(bloco_periodo, "perRef")
                         or per_apur
                     )
-                    for item in _descendentes_por_nome(remun, "itensRemun"):
+                    for indice_item, item in enumerate(
+                        _descendentes_por_nome(remun, "itensRemun"), 1
+                    ):
                         cod_rubr = first_text_by_localname(item, "codRubr") or ""
                         if not cod_rubr:
                             continue
@@ -751,6 +797,10 @@ def parse_s1200_v10(
                             status_auditoria=selecao.status_auditoria,
                             observacao_validacao=selecao.observacao_validacao,
                             nr_recibo_evento=nr_recibo_evento,
+                            **_proveniencia_s1200(
+                                dm_dev, bloco_periodo, item, indice_dm_dev,
+                                indice_estab, indice_remun, indice_item,
+                            ),
                         ))
     return saida
 

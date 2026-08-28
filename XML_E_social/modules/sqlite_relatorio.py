@@ -8,7 +8,7 @@ import tempfile
 import sqlite3
 import time
 import zlib
-from dataclasses import asdict
+from dataclasses import MISSING, fields, is_dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -84,8 +84,18 @@ def _sql_type(valor: object) -> str:
 
 
 def _obj_dict(obj: object) -> dict:
-    if hasattr(obj, "__dataclass_fields__"):
-        return asdict(obj)
+    if is_dataclass(obj):
+        resultado = {}
+        for campo in fields(obj):
+            if hasattr(obj, campo.name):
+                resultado[campo.name] = getattr(obj, campo.name)
+            elif campo.default is not MISSING:
+                resultado[campo.name] = campo.default
+            elif campo.default_factory is not MISSING:
+                resultado[campo.name] = campo.default_factory()
+            else:
+                resultado[campo.name] = None
+        return resultado
     if isinstance(obj, dict):
         return dict(obj)
     return {"valor": str(obj)}
@@ -270,6 +280,8 @@ def _criar_indices(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_remun_cp ON dados_remuneracoes(cod_inc_cp)",
         "CREATE INDEX IF NOT EXISTS idx_remun_trab ON dados_remuneracoes(per_apur, cpf, matricula)",
         "CREATE INDEX IF NOT EXISTS idx_remun_recibo ON dados_remuneracoes(nr_recibo_evento)",
+        "CREATE INDEX IF NOT EXISTS idx_remun_evento ON dados_remuneracoes(evento_id_origem)",
+        "CREATE INDEX IF NOT EXISTS idx_remun_item_origem ON dados_remuneracoes(evento_id_origem,caminho_item)",
         "CREATE INDEX IF NOT EXISTS idx_base_trab_chave ON dados_bases_trabalhador(per_apur, cpf, matricula, cod_categ, cod_lotacao)",
         "CREATE INDEX IF NOT EXISTS idx_base_trab_recibo ON dados_bases_trabalhador(nr_recibo_base)",
         "CREATE INDEX IF NOT EXISTS idx_excl_recibo ON dados_exclusoes(nrRecEvt)",
@@ -727,6 +739,8 @@ def gerar_excel_saida_sqlite(
     chaves_rubricas: list[str] | set[str] | None = None,
     progress_callback: ProgressCallback | None = None,
     gerar_manifesto: bool = False,
+    perfil_relatorio: str = "auditoria_completa",
+    df_escopo_rubricas: pd.DataFrame | None = None,
 ) -> str:
     """Gera um único relatório V10 em streaming e valida antes da entrega."""
     from modules.processador_zip import preparar_workspace_para_relatorios
@@ -766,9 +780,20 @@ def gerar_excel_saida_sqlite(
             "analise_prioritaria": int(metricas["qtd_prioritaria"]),
             "classificados": int(metricas["qtd_classificados"]),
         }
+        if perfil_relatorio not in {"enxuto", "auditoria_completa"}:
+            raise ValueError(f"Perfil de relatório desconhecido: {perfil_relatorio}")
+        empresa_saida = (
+            df_empresa.drop(columns=["arquivo_origem"], errors="ignore")
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
         fontes = [
-            FontePlanilha("00_empresa", dataframe=df_empresa),
+            FontePlanilha("00_empresa", dataframe=empresa_saida),
             FontePlanilha("01_resumo", dataframe=df_resumo_visual),
+            FontePlanilha(
+                "escopo_rubricas",
+                dataframe=(df_escopo_rubricas if df_escopo_rubricas is not None else pd.DataFrame()),
+            ),
             FontePlanilha("02_rubricas_cp", dataframe=df_rubricas_cp),
             FontePlanilha(
                 "03_movimentos_cp",
@@ -816,6 +841,15 @@ def gerar_excel_saida_sqlite(
                 "('versao_engine','versao_schema_sqlite','versao_parser',"
                 "'versao_consistencia_recibo_s1200') ORDER BY chave",
             ),
+        ]
+        if perfil_relatorio == "enxuto":
+            conjuntos_enxutos = {
+                "00_empresa", "01_resumo", "escopo_rubricas", "02_rubricas_cp",
+                "03_movimentos_cp", "05_sem_s1010", "05_busca_recibos", "09_versoes",
+            }
+            fontes = [fonte for fonte in fontes if fonte.nome in conjuntos_enxutos]
+        if perfil_relatorio == "auditoria_completa":
+            fontes.extend([
             FontePlanilha(
                 "apoio_s1010", query="SELECT * FROM dados_rubricas" + filtro_rubricas
             ),
@@ -858,7 +892,7 @@ def gerar_excel_saida_sqlite(
             FontePlanilha(
                 "erros_xml", query="SELECT arquivo,erro FROM erros ORDER BY id"
             ),
-        ]
+            ])
         banco_df = pd.read_sql_query("SELECT * FROM rel_controle_integridade", conn)
         fontes.append(FontePlanilha("controle_banco", dataframe=banco_df))
         resultado = gerar_workbook(

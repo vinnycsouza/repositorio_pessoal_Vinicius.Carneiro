@@ -174,3 +174,65 @@ def combinar_filtros_sql(filtro_existente: str, condicao: str) -> str:
     if filtro:
         return f" {filtro} AND {condicao}"
     return f" WHERE {condicao}"
+
+
+def montar_manifesto_escopo_rubricas(
+    catalogo: pd.DataFrame,
+    chaves_selecionadas: list[str] | set[str] | None,
+    termos_solicitados: list[str] | None = None,
+    modo_busca: str = "codigo_exato",
+) -> pd.DataFrame:
+    """Cria a trilha auditável entre o pedido do usuário e o que será exportado."""
+    colunas = [
+        "termo_solicitado", "cod_rubr", "ide_tab_rubr", "dsc_rubr",
+        "encontrada", "versoes_historicas", "qtd_lancamentos", "valor_total",
+        "motivo_correspondencia", "incluida",
+    ]
+    if chaves_selecionadas is None:
+        selecionado = catalogo.copy()
+    else:
+        selecionado = filtrar_dataframe_por_chaves(catalogo, chaves_selecionadas)
+    termos = list(termos_solicitados or [])
+    linhas: list[dict] = []
+    versoes = (
+        catalogo.groupby("cod_rubr").size().to_dict()
+        if not catalogo.empty and "cod_rubr" in catalogo.columns else {}
+    )
+    for _, row in selecionado.iterrows():
+        codigo = str(row.get("cod_rubr", "") or "")
+        descricao = str(row.get("dsc_rubr", "") or "")
+        correspondentes = []
+        for termo in termos:
+            normalizado = normalizar_busca(termo)
+            if modo_busca == "codigo_exato" and normalizar_busca(codigo) == normalizado:
+                correspondentes.append(termo)
+            elif modo_busca == "descricao" and normalizado in normalizar_busca(descricao):
+                correspondentes.append(termo)
+        linhas.append({
+            "termo_solicitado": "; ".join(correspondentes),
+            "cod_rubr": codigo,
+            "ide_tab_rubr": str(row.get("ide_tab_rubr", "") or ""),
+            "dsc_rubr": descricao,
+            "encontrada": "Sim",
+            "versoes_historicas": int(versoes.get(codigo, 1)),
+            "qtd_lancamentos": row.get("qtd_lancamentos", ""),
+            "valor_total": row.get("valor_total", ""),
+            "motivo_correspondencia": (
+                "Código exato" if modo_busca == "codigo_exato" else "Trecho da descrição"
+            ) if correspondentes else ("Seleção explícita" if termos else "Relatório completo"),
+            "incluida": "Sim",
+        })
+    encontrados_norm = {
+        normalizar_busca(termo)
+        for linha in linhas for termo in str(linha["termo_solicitado"]).split("; ") if termo
+    }
+    for termo in termos:
+        if normalizar_busca(termo) not in encontrados_norm:
+            linhas.append({
+                "termo_solicitado": termo, "cod_rubr": "", "ide_tab_rubr": "",
+                "dsc_rubr": "", "encontrada": "Não", "versoes_historicas": 0,
+                "qtd_lancamentos": 0, "valor_total": 0,
+                "motivo_correspondencia": "Sem correspondência no catálogo",
+                "incluida": "Não",
+            })
+    return pd.DataFrame(linhas, columns=colunas)

@@ -12,6 +12,7 @@ from modules.busca_rubricas import (
     filtrar_dataframe_por_chaves,
     filtrar_rubricas_por_multibusca,
     filtro_sql_chaves_rubricas,
+    montar_manifesto_escopo_rubricas,
     termos_sem_correspondencia,
 )
 from modules.sqlite_relatorio import contar_movimentos_exportacao_sqlite
@@ -30,6 +31,22 @@ class BuscaRubricasTest(unittest.TestCase):
         resultado, _ = filtrar_rubricas_por_multibusca(self.df, "100")
         self.assertEqual(resultado["cod_rubr"].tolist(), ["100"])
         self.assertEqual(resultado.iloc[0]["correspondencia_busca"], "Código exato: 100")
+
+    def test_manifesto_distingue_encontradas_e_ausentes(self):
+        catalogo = pd.DataFrame([
+            {"cod_rubr": "100", "ide_tab_rubr": "T1", "dsc_rubr": "Salário",
+             "qtd_lancamentos": 4, "valor_total": 50},
+            {"cod_rubr": "100", "ide_tab_rubr": "T2", "dsc_rubr": "Salário antigo",
+             "qtd_lancamentos": 2, "valor_total": 10},
+        ])
+        manifesto = montar_manifesto_escopo_rubricas(
+            catalogo, ["100||T1"], ["100", "999"], "codigo_exato"
+        )
+        incluida = manifesto[manifesto["incluida"].eq("Sim")].iloc[0]
+        ausente = manifesto[manifesto["termo_solicitado"].eq("999")].iloc[0]
+        self.assertEqual(incluida["versoes_historicas"], 2)
+        self.assertEqual(incluida["qtd_lancamentos"], 4)
+        self.assertEqual(ausente["encontrada"], "Não")
 
     def test_descricao_ignora_acentos_e_caixa(self):
         resultado, _ = filtrar_rubricas_por_multibusca(
