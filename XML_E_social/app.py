@@ -17,6 +17,7 @@ from modules.auditoria import (
 from modules.excel_builder import FontePlanilha, gerar_workbook
 from modules.busca_rubricas import (
     atualizar_selecao_rubricas,
+    filtrar_dataframe_por_chaves,
     filtrar_rubricas_por_multibusca,
     termos_sem_correspondencia,
 )
@@ -39,7 +40,10 @@ from modules.processador_zip import (
     organizar_fontes_carga_inicial,
     processar_fontes_esocial,
 )
-from modules.sqlite_relatorio import gerar_excel_saida_sqlite
+from modules.sqlite_relatorio import (
+    contar_movimentos_exportacao_sqlite,
+    gerar_excel_saida_sqlite,
+)
 from modules.workspace_manager import (
     abrir_workspace,
     enviar_workspace_para_lixeira,
@@ -1840,7 +1844,165 @@ if modulo_ativo == "Levantamento de Verbas":
 if modulo_ativo == "Relatório de Incidência CP":
     st.markdown("## Exportação")
 
+    escopo_relatorio_cp = st.radio(
+        "Escopo do relatório",
+        ["Todas as rubricas", "Rubricas específicas"],
+        horizontal=True,
+        key="relatorio_escopo_rubricas",
+        help=(
+            "O modo padrão mantém o relatório completo. O modo específico filtra "
+            "as abas de rubricas e movimentos pela chave codRubr + ideTabRubr."
+        ),
+    )
+    chaves_rubricas_relatorio: list[str] | None = None
+    if escopo_relatorio_cp == "Rubricas específicas":
+        catalogo_rel = df_rubricas_cp.copy()
+        colunas_catalogo = {"cod_rubr", "ide_tab_rubr", "dsc_rubr"}
+        if catalogo_rel.empty or not colunas_catalogo.issubset(catalogo_rel.columns):
+            st.warning("O catálogo de rubricas não está disponível para esta origem.")
+            chaves_rubricas_relatorio = []
+        else:
+            catalogo_rel["chave_rubrica"] = (
+                catalogo_rel["cod_rubr"].fillna("").astype(str)
+                + "||"
+                + catalogo_rel["ide_tab_rubr"].fillna("").astype(str)
+            )
+            catalogo_rel = catalogo_rel.drop_duplicates("chave_rubrica")
+            assinatura_fonte_rel = (
+                f"{db_path_sqlite or resultado.get('workspace_temporario', '')}:"
+                f"{len(catalogo_rel)}"
+            )
+            if st.session_state.get("rel_fonte_assinatura") != assinatura_fonte_rel:
+                st.session_state["rel_fonte_assinatura"] = assinatura_fonte_rel
+                st.session_state["rel_chaves_rubricas_selecionadas"] = []
+            if "rel_chaves_rubricas_selecionadas" not in st.session_state:
+                st.session_state["rel_chaves_rubricas_selecionadas"] = []
+
+            st.markdown("### Seleção de rubricas do relatório")
+            tipo_busca_rel = st.radio(
+                "Tipo de busca das rubricas",
+                ["Códigos exatos / lista", "Descrição contém"],
+                horizontal=True,
+                key="rel_tipo_busca_rubrica",
+            )
+            modo_busca_rel = (
+                "codigo_exato"
+                if tipo_busca_rel == "Códigos exatos / lista"
+                else "descricao"
+            )
+            busca_rel = st.text_area(
+                "Colar códigos de rubricas"
+                if modo_busca_rel == "codigo_exato"
+                else "Buscar rubricas pela descrição",
+                key="rel_busca_rubrica",
+                height=90,
+                placeholder=(
+                    "Ex.: DIFE; D225; ADP4479_PAY_3563\nou cole uma coluna do Excel aqui"
+                    if modo_busca_rel == "codigo_exato"
+                    else "Ex.: DIFERENCIAL; FÉRIAS; MATERNIDADE"
+                ),
+            )
+            resultados_rel, termos_rel = filtrar_rubricas_por_multibusca(
+                catalogo_rel, busca_rel, modo=modo_busca_rel
+            )
+            ausentes_rel = termos_sem_correspondencia(
+                catalogo_rel, termos_rel, modo=modo_busca_rel
+            )
+            if termos_rel:
+                st.caption(
+                    f"Busca ativa: {len(termos_rel)} termo(s) · "
+                    f"{len(resultados_rel)} rubrica(s) encontrada(s)."
+                )
+                if ausentes_rel:
+                    st.warning(
+                        "Sem correspondência no catálogo: " + "; ".join(ausentes_rel)
+                    )
+            else:
+                st.caption(
+                    "A busca vazia não seleciona rubricas automaticamente."
+                )
+
+            atuais_rel = set(st.session_state["rel_chaves_rubricas_selecionadas"])
+            encontradas_rel = set(
+                resultados_rel["chave_rubrica"].astype(str).tolist()
+            )
+            rb1, rb2, rb3, rb4 = st.columns([1.7, 1.2, 1.2, 0.8])
+            if rb1.button(
+                f"Usar somente resultados ({len(encontradas_rel)})",
+                type="primary",
+                use_container_width=True,
+                disabled=not termos_rel or not encontradas_rel,
+                key="rel_btn_substituir_busca",
+            ):
+                st.session_state["rel_chaves_rubricas_selecionadas"] = atualizar_selecao_rubricas(
+                    atuais_rel, encontradas_rel, "substituir"
+                )
+                st.rerun()
+            if rb2.button(
+                f"Adicionar resultados ({len(encontradas_rel)})",
+                use_container_width=True,
+                disabled=not termos_rel or not encontradas_rel,
+                key="rel_btn_adicionar_busca",
+            ):
+                st.session_state["rel_chaves_rubricas_selecionadas"] = atualizar_selecao_rubricas(
+                    atuais_rel, encontradas_rel, "adicionar"
+                )
+                st.rerun()
+            if rb3.button(
+                f"Remover resultados ({len(encontradas_rel)})",
+                use_container_width=True,
+                disabled=not termos_rel or not encontradas_rel,
+                key="rel_btn_remover_busca",
+            ):
+                st.session_state["rel_chaves_rubricas_selecionadas"] = atualizar_selecao_rubricas(
+                    atuais_rel, encontradas_rel, "remover"
+                )
+                st.rerun()
+            if rb4.button(
+                f"Limpar seleção ({len(atuais_rel)})",
+                use_container_width=True,
+                disabled=not atuais_rel,
+                key="rel_btn_limpar_busca",
+            ):
+                st.session_state["rel_chaves_rubricas_selecionadas"] = []
+                st.rerun()
+
+            chaves_rubricas_relatorio = sorted(
+                set(st.session_state["rel_chaves_rubricas_selecionadas"])
+            )
+            selecionadas_rel = catalogo_rel[
+                catalogo_rel["chave_rubrica"].isin(chaves_rubricas_relatorio)
+            ]
+            with st.expander(
+                f"Rubricas que entrarão no relatório — {len(selecionadas_rel)}",
+                expanded=bool(chaves_rubricas_relatorio),
+            ):
+                if selecionadas_rel.empty:
+                    st.caption("Nenhuma rubrica selecionada.")
+                else:
+                    st.dataframe(
+                        selecionadas_rel[["cod_rubr", "ide_tab_rubr", "dsc_rubr"]]
+                        .rename(columns={
+                            "cod_rubr": "Código",
+                            "ide_tab_rubr": "Tabela",
+                            "dsc_rubr": "Descrição",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
     total_movimentos_cp = int(pacote_sqlite.get("total_movimentos_cp", 0)) if modo_sqlite_seguro else (len(df_movimentos_cp) if df_movimentos_cp is not None else 0)
+    if chaves_rubricas_relatorio is not None:
+        if db_path_sqlite:
+            total_movimentos_cp = contar_movimentos_exportacao_sqlite(
+                db_path_sqlite, "todos", chaves_rubricas_relatorio
+            )
+        else:
+            total_movimentos_cp = len(
+                filtrar_dataframe_por_chaves(
+                    df_movimentos_cp, chaves_rubricas_relatorio
+                )
+            )
     excede_limite_excel = total_movimentos_cp > MAX_LINHAS_DADOS_EXCEL
 
     if excede_limite_excel:
@@ -1882,10 +2044,23 @@ if modulo_ativo == "Relatório de Incidência CP":
             "todos": total_movimentos_cp,
         }
         qtd_exportacao = totais_modo[modo_exportacao_movimentos_cp]
+        if chaves_rubricas_relatorio is not None and db_path_sqlite:
+            qtd_exportacao = contar_movimentos_exportacao_sqlite(
+                db_path_sqlite,
+                modo_exportacao_movimentos_cp,
+                chaves_rubricas_relatorio,
+            )
         qtd_sem_s1010 = int(pacote_sqlite.get("total_movimentos_sem_s1010", 0))
+        if chaves_rubricas_relatorio is not None and db_path_sqlite:
+            qtd_sem_s1010 = contar_movimentos_exportacao_sqlite(
+                db_path_sqlite, "sem_s1010", chaves_rubricas_relatorio
+            )
     else:
-        qtd_exportacao = len(_filtrar_movimentos_cp_exportacao(df_movimentos_cp, modo_exportacao_movimentos_cp))
-        qtd_sem_s1010 = int(df_movimentos_cp["status_cp"].eq("Sem S-1010").sum()) if not df_movimentos_cp.empty and "status_cp" in df_movimentos_cp.columns else len(df_sem_cadastro)
+        movimentos_contagem = filtrar_dataframe_por_chaves(
+            df_movimentos_cp, chaves_rubricas_relatorio
+        )
+        qtd_exportacao = len(_filtrar_movimentos_cp_exportacao(movimentos_contagem, modo_exportacao_movimentos_cp))
+        qtd_sem_s1010 = int(movimentos_contagem["status_cp"].eq("Sem S-1010").sum()) if not movimentos_contagem.empty and "status_cp" in movimentos_contagem.columns else len(filtrar_dataframe_por_chaves(df_sem_cadastro, chaves_rubricas_relatorio))
 
     descricoes_modo = {
         "incidencia_cp_padrao": "somente movimentos classificados como Incide CP",
@@ -1911,7 +2086,8 @@ if modulo_ativo == "Relatório de Incidência CP":
         value=False,
         key="gerar_manifesto_relatorio_v95",
     )
-    assinatura_exportacao = f"v10:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}"
+    assinatura_rubricas = "todas" if chaves_rubricas_relatorio is None else "|".join(chaves_rubricas_relatorio)
+    assinatura_exportacao = f"v10:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}:{assinatura_rubricas}"
     if st.session_state.get("relatorio_excel_assinatura") != assinatura_exportacao:
         st.session_state.pop("relatorio_excel_bytes", None)
         st.session_state.pop("relatorio_excel_path", None)
@@ -1923,6 +2099,10 @@ if modulo_ativo == "Relatório de Incidência CP":
         type="primary",
         use_container_width=True,
         key="preparar_excel_relatorio_incidencia",
+        disabled=(
+            chaves_rubricas_relatorio is not None
+            and not chaves_rubricas_relatorio
+        ),
     )
     if preparar_excel_rel:
         atualizar_excel_rel, barra_excel_rel, status_excel_rel = _criar_progresso("Progresso da geração do Excel do relatório")
@@ -1930,7 +2110,12 @@ if modulo_ativo == "Relatório de Incidência CP":
             Path(resultado.get("workspace_temporario", tempfile.gettempdir()))
             / "output"
         )
-        caminho_saida = pasta_saida / "relatorio_incidencia_cp_esocial_v10.xlsx"
+        sufixo_escopo = (
+            "_rubricas_especificas"
+            if chaves_rubricas_relatorio is not None
+            else ""
+        )
+        caminho_saida = pasta_saida / f"relatorio_incidencia_cp_esocial_v10{sufixo_escopo}.xlsx"
         if caminho_saida.exists():
             caminho_saida = pasta_saida / (
                 "relatorio_incidencia_cp_esocial_v10_revisado_"
@@ -1941,33 +2126,40 @@ if modulo_ativo == "Relatório de Incidência CP":
         # independentemente do porte. O caminho DataFrame permanece apenas
         # para a origem Excel legada.
         if db_path_sqlite:
+            df_rubricas_export = filtrar_dataframe_por_chaves(
+                df_rubricas_cp, chaves_rubricas_relatorio
+            )
             caminho_relatorio = gerar_excel_saida_sqlite(
                 db_path=db_path_sqlite,
                 caminho_saida=caminho_saida,
                 df_empresa=df_empresa,
                 df_resumo_visual=df_resumo_visual,
-                df_rubricas_cp=df_rubricas_cp,
+                df_rubricas_cp=df_rubricas_export,
                 df_levantamento=df_levantamento_export,
                 modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+                chaves_rubricas=chaves_rubricas_relatorio,
                 progress_callback=atualizar_excel_rel,
                 gerar_manifesto=gerar_manifesto_rel,
             )
         else:
+            movimentos_escopo = filtrar_dataframe_por_chaves(
+                df_movimentos_cp, chaves_rubricas_relatorio
+            )
             movimentos_export = _filtrar_movimentos_cp_exportacao(
-                df_movimentos_cp, modo_exportacao_movimentos_cp
+                movimentos_escopo, modo_exportacao_movimentos_cp
             )
             fontes = [
                 FontePlanilha("00_empresa", dataframe=df_empresa),
                 FontePlanilha("01_resumo", dataframe=df_resumo_visual),
-                FontePlanilha("02_rubricas_cp", dataframe=df_rubricas_cp),
+                FontePlanilha("02_rubricas_cp", dataframe=filtrar_dataframe_por_chaves(df_rubricas_cp, chaves_rubricas_relatorio)),
                 FontePlanilha("03_movimentos_cp", dataframe=movimentos_export),
                 FontePlanilha("04_base_trabalhador", dataframe=df_base_trabalhador),
-                FontePlanilha("05_sem_s1010", dataframe=df_sem_cadastro),
-                FontePlanilha("05_busca_recibos", dataframe=df_busca_recibos),
+                FontePlanilha("05_sem_s1010", dataframe=filtrar_dataframe_por_chaves(df_sem_cadastro, chaves_rubricas_relatorio)),
+                FontePlanilha("05_busca_recibos", dataframe=filtrar_dataframe_por_chaves(df_busca_recibos, chaves_rubricas_relatorio)),
                 FontePlanilha("06_s5001_tpvalor", dataframe=df_s5001_resumo),
                 FontePlanilha("07_levantamento", dataframe=df_levantamento_export),
-                FontePlanilha("apoio_s1010", dataframe=df_rubricas),
-                FontePlanilha("apoio_s1200", dataframe=df_remun),
+                FontePlanilha("apoio_s1010", dataframe=filtrar_dataframe_por_chaves(df_rubricas, chaves_rubricas_relatorio)),
+                FontePlanilha("apoio_s1200", dataframe=filtrar_dataframe_por_chaves(df_remun, chaves_rubricas_relatorio)),
                 FontePlanilha("apoio_s5001", dataframe=df_bases_trab),
                 FontePlanilha("apoio_s5011", dataframe=df_bases_contrib),
                 FontePlanilha("apoio_s3000", dataframe=df_exclusoes),

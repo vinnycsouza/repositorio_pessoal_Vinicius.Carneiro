@@ -25,6 +25,7 @@ from modules.auditoria import (
     entra_base_cp,
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
+from modules.busca_rubricas import combinar_filtros_sql, filtro_sql_chaves_rubricas
 from modules.progresso import emitir_progresso
 from modules.sqlite_writer import BatchPolicy, SQLiteWriter
 
@@ -682,6 +683,8 @@ def _exportar_query(wb: Workbook, conn: sqlite3.Connection, nome: str, query: st
 
 def _filtro_sql_movimentos_exportacao(modo: str) -> str:
     """Retorna o WHERE da aba 03; Sem S-1010 permanece no relatório 05."""
+    if modo == "sem_s1010":
+        return " WHERE status_cp='Sem S-1010'"
     if modo == "incidencia_cp_padrao":
         return " WHERE status_cp='Incide CP'"
     if modo == "analise_prioritaria":
@@ -689,6 +692,29 @@ def _filtro_sql_movimentos_exportacao(modo: str) -> str:
     if modo == "classificados":
         return " WHERE status_cp IN ('Incide CP','Não incide CP','Revisar codIncCP')"
     return ""
+
+
+def contar_movimentos_exportacao_sqlite(
+    db_path: str | Path,
+    modo_exportacao_movimentos_cp: str,
+    chaves_rubricas: list[str] | set[str] | None = None,
+) -> int:
+    """Conta a exportação com os mesmos filtros que serão usados no workbook."""
+    filtro = combinar_filtros_sql(
+        _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp),
+        filtro_sql_chaves_rubricas(chaves_rubricas),
+    )
+    conn = sqlite3.connect(
+        f"file:{Path(db_path).resolve().as_posix()}?mode=ro", uri=True, timeout=120
+    )
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("PRAGMA busy_timeout = 120000")
+        return int(
+            conn.execute("SELECT COUNT(*) FROM rel_movimentos_cp" + filtro).fetchone()[0]
+        )
+    finally:
+        conn.close()
 
 def gerar_excel_saida_sqlite(
     db_path: str | Path,
@@ -698,6 +724,7 @@ def gerar_excel_saida_sqlite(
     df_rubricas_cp: pd.DataFrame,
     df_levantamento: pd.DataFrame | None = None,
     modo_exportacao_movimentos_cp: str = "todos",
+    chaves_rubricas: list[str] | set[str] | None = None,
     progress_callback: ProgressCallback | None = None,
     gerar_manifesto: bool = False,
 ) -> str:
@@ -720,7 +747,12 @@ def gerar_excel_saida_sqlite(
     conn.execute("PRAGMA temp_store = FILE")
     conn.execute("PRAGMA cache_size = -262144")
     try:
-        filtro = _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp)
+        condicao_rubricas = filtro_sql_chaves_rubricas(chaves_rubricas)
+        filtro = combinar_filtros_sql(
+            _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp),
+            condicao_rubricas,
+        )
+        filtro_rubricas = combinar_filtros_sql("", condicao_rubricas)
         metricas = _metricas_movimentos(conn)
         totais_controle = {
             str(tabela): int(quantidade)
@@ -741,8 +773,14 @@ def gerar_excel_saida_sqlite(
             FontePlanilha(
                 "03_movimentos_cp",
                 query="SELECT * FROM rel_movimentos_cp" + filtro,
-                total_esperado=totais_modo.get(
-                    modo_exportacao_movimentos_cp, int(metricas["total"])
+                total_esperado=(
+                    contar_movimentos_exportacao_sqlite(
+                        db_path, modo_exportacao_movimentos_cp, chaves_rubricas
+                    )
+                    if chaves_rubricas is not None
+                    else totais_modo.get(
+                        modo_exportacao_movimentos_cp, int(metricas["total"])
+                    )
                 ),
             ),
             FontePlanilha(
@@ -751,11 +789,13 @@ def gerar_excel_saida_sqlite(
             ),
             FontePlanilha(
                 "05_sem_s1010",
-                query="SELECT * FROM rel_sem_s1010 ORDER BY per_apur, valor_rubrica DESC",
+                query="SELECT * FROM rel_sem_s1010" + filtro_rubricas
+                + " ORDER BY per_apur, valor_rubrica DESC",
             ),
             FontePlanilha(
                 "05_busca_recibos",
-                query="SELECT cod_rubr,ide_tab_rubr,MAX(dsc_rubr) dsc_rubr,MIN(per_apur) primeira_competencia,MAX(per_apur) ultima_competencia,COUNT(DISTINCT per_apur) qtd_competencias,SUM(qtd_lancamentos) qtd_lancamentos,COUNT(DISTINCT cpf) qtd_cpfs,SUM(valor_rubrica) valor_total,'Baixar recibo S-1010 da rubrica e aplicar na complementação do relatório.' acao_recomendada FROM rel_sem_s1010 GROUP BY cod_rubr,ide_tab_rubr",
+                query="SELECT cod_rubr,ide_tab_rubr,MAX(dsc_rubr) dsc_rubr,MIN(per_apur) primeira_competencia,MAX(per_apur) ultima_competencia,COUNT(DISTINCT per_apur) qtd_competencias,SUM(qtd_lancamentos) qtd_lancamentos,COUNT(DISTINCT cpf) qtd_cpfs,SUM(valor_rubrica) valor_total,'Baixar recibo S-1010 da rubrica e aplicar na complementação do relatório.' acao_recomendada FROM rel_sem_s1010"
+                + filtro_rubricas + " GROUP BY cod_rubr,ide_tab_rubr",
             ),
             FontePlanilha("06_s5001_tpvalor", query="SELECT * FROM rel_s5001_resumo"),
             FontePlanilha(
@@ -776,16 +816,26 @@ def gerar_excel_saida_sqlite(
                 "('versao_engine','versao_schema_sqlite','versao_parser',"
                 "'versao_consistencia_recibo_s1200') ORDER BY chave",
             ),
-            FontePlanilha("apoio_s1010", query="SELECT * FROM dados_rubricas"),
+            FontePlanilha(
+                "apoio_s1010", query="SELECT * FROM dados_rubricas" + filtro_rubricas
+            ),
             FontePlanilha(
                 "apoio_s1200",
-                query="SELECT * FROM rel_movimentos_cp",
-                total_esperado=int(metricas["total"]),
+                query="SELECT * FROM rel_movimentos_cp" + filtro_rubricas,
+                total_esperado=(
+                    contar_movimentos_exportacao_sqlite(db_path, "todos", chaves_rubricas)
+                    if chaves_rubricas is not None
+                    else int(metricas["total"])
+                ),
             ),
             FontePlanilha(
                 "apoio_s2299",
-                query="SELECT * FROM rel_movimentos_s2299",
-                total_esperado=totais_controle.get("rel_movimentos_s2299"),
+                query="SELECT * FROM rel_movimentos_s2299" + filtro_rubricas,
+                total_esperado=(
+                    None
+                    if chaves_rubricas is not None
+                    else totais_controle.get("rel_movimentos_s2299")
+                ),
             ),
             FontePlanilha(
                 "apoio_s5001", query="SELECT * FROM dados_bases_trabalhador",
@@ -981,6 +1031,7 @@ def gerar_pacote_excel_saida_sqlite(
     df_rubricas_cp: pd.DataFrame,
     df_levantamento: pd.DataFrame | None = None,
     modo_exportacao_movimentos_cp: str = "todos",
+    chaves_rubricas: list[str] | set[str] | None = None,
     linhas_por_arquivo: int = MAX_LINHAS_ARQUIVO_SEGMENTADO,
     progress_callback: ProgressCallback | None = None,
     gerar_manifesto: bool = False,
@@ -996,6 +1047,7 @@ def gerar_pacote_excel_saida_sqlite(
         df_rubricas_cp=df_rubricas_cp,
         df_levantamento=df_levantamento,
         modo_exportacao_movimentos_cp=modo_exportacao_movimentos_cp,
+        chaves_rubricas=chaves_rubricas,
         progress_callback=progress_callback,
         gerar_manifesto=gerar_manifesto,
     )

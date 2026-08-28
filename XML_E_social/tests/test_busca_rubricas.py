@@ -1,13 +1,20 @@
 import unittest
+import sqlite3
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
 from modules.busca_rubricas import (
     atualizar_selecao_rubricas,
+    combinar_filtros_sql,
     extrair_termos_busca,
+    filtrar_dataframe_por_chaves,
     filtrar_rubricas_por_multibusca,
+    filtro_sql_chaves_rubricas,
     termos_sem_correspondencia,
 )
+from modules.sqlite_relatorio import contar_movimentos_exportacao_sqlite
 
 
 class BuscaRubricasTest(unittest.TestCase):
@@ -79,6 +86,59 @@ class BuscaRubricasTest(unittest.TestCase):
             atualizar_selecao_rubricas(adicionadas, {"A||1"}, "remover"),
             ["B||1"],
         )
+
+    def test_filtro_dataframe_respeita_codigo_e_tabela(self):
+        df = pd.DataFrame([
+            {"cod_rubr": "100", "ide_tab_rubr": "A", "valor": 10},
+            {"cod_rubr": "100", "ide_tab_rubr": "B", "valor": 20},
+            {"cod_rubr": "200", "ide_tab_rubr": "A", "valor": 30},
+        ])
+        resultado = filtrar_dataframe_por_chaves(df, ["100||B"])
+        self.assertEqual(resultado["valor"].tolist(), [20])
+
+    def test_filtro_sql_combina_modo_e_chave_com_exatidao(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE movimentos(cod_rubr TEXT,ide_tab_rubr TEXT,status_cp TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO movimentos VALUES(?,?,?)",
+            [("100", "A", "Incide CP"), ("100", "B", "Incide CP"),
+             ("100", "B", "Não incide CP")],
+        )
+        filtro = combinar_filtros_sql(
+            "WHERE status_cp='Incide CP'",
+            filtro_sql_chaves_rubricas(["100||B"]),
+        )
+        linhas = conn.execute("SELECT cod_rubr,ide_tab_rubr FROM movimentos" + filtro).fetchall()
+        conn.close()
+        self.assertEqual(linhas, [("100", "B")])
+
+    def test_none_mantem_completo_e_lista_vazia_nao_exporta(self):
+        self.assertEqual(filtro_sql_chaves_rubricas(None), "")
+        self.assertEqual(filtro_sql_chaves_rubricas([]), "0=1")
+
+    def test_contagem_sqlite_aplica_modo_e_rubrica(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            banco = Path(pasta) / "processamento.db"
+            conn = sqlite3.connect(banco)
+            conn.execute(
+                "CREATE TABLE rel_movimentos_cp("
+                "cod_rubr TEXT,ide_tab_rubr TEXT,status_cp TEXT)"
+            )
+            conn.executemany(
+                "INSERT INTO rel_movimentos_cp VALUES(?,?,?)",
+                [("100", "A", "Incide CP"), ("100", "B", "Incide CP"),
+                 ("100", "B", "Não incide CP")],
+            )
+            conn.commit()
+            conn.close()
+            self.assertEqual(
+                contar_movimentos_exportacao_sqlite(
+                    banco, "incidencia_cp_padrao", ["100||B"]
+                ),
+                1,
+            )
 
 
 if __name__ == "__main__":

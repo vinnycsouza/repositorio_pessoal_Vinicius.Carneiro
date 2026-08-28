@@ -116,3 +116,61 @@ def atualizar_selecao_rubricas(
     else:
         raise ValueError(f"Ação de seleção desconhecida: {acao}")
     return sorted(nova)
+
+
+def chave_rubrica(codigo: object, tabela: object) -> str:
+    """Identificador estável usado pelos módulos sem misturar tabelas distintas."""
+    return f"{str(codigo or '')}||{str(tabela or '')}"
+
+
+def separar_chave_rubrica(chave: object) -> tuple[str, str]:
+    codigo, separador, tabela = str(chave or "").partition("||")
+    return codigo, tabela if separador else ""
+
+
+def filtrar_dataframe_por_chaves(
+    df: pd.DataFrame, chaves: set[str] | list[str] | None
+) -> pd.DataFrame:
+    """Filtra por codRubr + ideTabRubr; None mantém o relatório completo."""
+    if chaves is None:
+        return df.copy()
+    if df.empty or "cod_rubr" not in df.columns:
+        return df.iloc[0:0].copy()
+    tabelas = (
+        df["ide_tab_rubr"].fillna("").astype(str)
+        if "ide_tab_rubr" in df.columns
+        else pd.Series("", index=df.index)
+    )
+    chaves_df = df["cod_rubr"].fillna("").astype(str) + "||" + tabelas
+    return df[chaves_df.isin({str(chave) for chave in chaves})].copy()
+
+
+def filtro_sql_chaves_rubricas(
+    chaves: set[str] | list[str] | None, alias: str = ""
+) -> str:
+    """Produz condição SQL segura a partir de chaves vindas do próprio catálogo."""
+    if chaves is None:
+        return ""
+    prefixo = f"{alias}." if alias else ""
+    if not chaves:
+        return "0=1"
+
+    def literal(valor: str) -> str:
+        return "'" + valor.replace("'", "''") + "'"
+
+    pares = sorted({separar_chave_rubrica(chave) for chave in chaves})
+    return "(" + " OR ".join(
+        f"({prefixo}cod_rubr={literal(codigo)} AND "
+        f"COALESCE({prefixo}ide_tab_rubr,'')={literal(tabela)})"
+        for codigo, tabela in pares
+    ) + ")"
+
+
+def combinar_filtros_sql(filtro_existente: str, condicao: str) -> str:
+    """Combina um WHERE opcional com a condição de rubricas."""
+    filtro = str(filtro_existente or "").strip()
+    if not condicao:
+        return f" {filtro}" if filtro else ""
+    if filtro:
+        return f" {filtro} AND {condicao}"
+    return f" WHERE {condicao}"
