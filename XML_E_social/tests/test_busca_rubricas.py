@@ -48,6 +48,20 @@ class BuscaRubricasTest(unittest.TestCase):
         self.assertEqual(incluida["qtd_lancamentos"], 4)
         self.assertEqual(ausente["encontrada"], "Não")
 
+    def test_manifesto_registra_correspondencia_por_descricao(self):
+        catalogo = pd.DataFrame([{
+            "cod_rubr": "DIFE", "ide_tab_rubr": "T1",
+            "dsc_rubr": "Desconto de INSS de férias",
+            "qtd_lancamentos": 3, "valor_total": 100,
+        }])
+        manifesto = montar_manifesto_escopo_rubricas(
+            catalogo, ["DIFE||T1"], ["férias"], "descricao"
+        )
+        self.assertEqual(manifesto.iloc[0]["termo_solicitado"], "férias")
+        self.assertEqual(
+            manifesto.iloc[0]["motivo_correspondencia"], "Trecho da descrição"
+        )
+
     def test_descricao_ignora_acentos_e_caixa(self):
         resultado, _ = filtrar_rubricas_por_multibusca(
             self.df, "SALARIO", modo="descricao"

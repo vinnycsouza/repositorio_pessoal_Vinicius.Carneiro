@@ -2218,7 +2218,7 @@ if modulo_ativo == "Relatório de Incidência CP":
                 catalogo_rel,
                 chaves_rubricas_relatorio,
                 termos_rel if chaves_rubricas_relatorio is not None else [],
-                modo_rel if chaves_rubricas_relatorio is not None else "codigo_exato",
+                modo_busca_rel if chaves_rubricas_relatorio is not None else "codigo_exato",
             )
             caminho_relatorio = gerar_excel_saida_sqlite(
                 db_path=db_path_sqlite,
