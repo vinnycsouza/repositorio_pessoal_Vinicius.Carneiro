@@ -1,49 +1,147 @@
 import io
+
 import pandas as pd
 import streamlit as st
-from src.analyzer import competence_summary, organize_records, reconcile
-from src.parsers import ExtractionError, iter_pdf_files, parse_consolidated_pdf, parse_individual_pdf
 
-def brl(v):
-    if v is None: return "Não informado"
-    return "R$ "+f"{v:,.2f}".replace(",","X").replace(".",",").replace("X",".")
+from src.analyzer import competence_summary, organize_records
+from src.parsers import ExtractionError, iter_pdf_files, parse_individual_pdf
+
+
+def brl(value):
+    if value is None:
+        return "Não informado"
+    formatted = f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {formatted}"
+
+
 def excel_bytes(sheets):
-    output=io.BytesIO()
-    with pd.ExcelWriter(output,engine="openpyxl") as writer:
-        for name,frame in sheets.items(): frame.to_excel(writer,sheet_name=name,index=False)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, frame in sheets.items():
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)
     return output.getvalue()
 
-st.set_page_config(page_title="Analisador PER/DCOMP",page_icon="📊",layout="wide")
+
+st.set_page_config(page_title="Analisador PER/DCOMP", page_icon="📊", layout="wide")
 st.title("Analisador de créditos PER/DCOMP")
-tab1,tab2=st.tabs(["PDFs individuais","Relatório consolidado"])
-with tab1:
-    uploads=st.file_uploader("Envie PDFs ou ZIPs",type=["pdf","zip"],accept_multiple_files=True,key="individual")
-    if uploads:
-        pdfs,errors=iter_pdf_files([(f.name,f.getvalue()) for f in uploads]); records=[]
-        for name,data in pdfs:
-            try: records.append(parse_individual_pdf(name,data))
-            except ExtractionError as exc: errors.append(f"{name}: {exc}")
-        if records:
-            ordered=organize_records(records); st.session_state["individual_records"]=ordered
-            summary=pd.DataFrame([{"Competência":r["competence"],"Crédito inicial":brl(r["initial_credit"]),"Saldo atual":brl(r["current_balance"]),"Situação":r["status"],"Última transmissão":r["latest_transmission"].strftime("%d/%m/%Y"),"Último PER/DCOMP":r["latest_number"],"Documentos":r["record_count"]} for r in competence_summary(ordered)])
-            details=pd.DataFrame([{"Competência":r.competence,"Transmissão":r.transmission_date.strftime("%d/%m/%Y"),"PER/DCOMP":r.number,"Crédito passível de restituição":brl(r.refundable_credit),"Crédito original na entrega":brl(r.original_credit_at_delivery),"Crédito original utilizado":brl(r.original_credit_used),"Saldo":brl(r.original_credit_balance),"Situação interna":"Válido" if r.effective else "Retificado/substituído","Observação":r.note} for r in ordered])
-            st.subheader("Saldo por competência"); st.dataframe(summary,use_container_width=True,hide_index=True)
-            st.subheader("Histórico cronológico"); selected=st.selectbox("Competência",["Todas"]+sorted(details["Competência"].unique().tolist()))
-            st.dataframe(details if selected=="Todas" else details[details["Competência"]==selected],use_container_width=True,hide_index=True)
-            st.download_button("Baixar Excel",excel_bytes({"Resumo":summary,"Histórico":details}),"analise_perdcomp.xlsx")
-        if errors:
-            with st.expander(f"Avisos ({len(errors)})"):
-                for error in errors: st.warning(error)
-with tab2:
-    uploads=st.file_uploader("Envie o PDF consolidado",type="pdf",accept_multiple_files=True,key="report")
-    if uploads:
-        reports=[]
-        for f in uploads:
-            try: reports.extend(parse_consolidated_pdf(f.name,f.getvalue()))
-            except ExtractionError as exc: st.warning(f"{f.name}: {exc}")
-        individual=st.session_state.get("individual_records",[])
-        if reports and individual:
-            frame=pd.DataFrame(reconcile(individual,reports)); frame["Valor utilizado"]=frame["Valor utilizado"].map(brl); frame["Saldo"]=frame["Saldo"].map(brl)
-            st.subheader("Conciliação"); st.dataframe(frame,use_container_width=True,hide_index=True)
-        elif reports: st.info("Envie primeiro os PDFs individuais na primeira aba.")
-st.caption("Arquivos processados em memória; nenhum documento é armazenado.")
+st.write(
+    "Envie os demonstrativos individuais em PDF ou uma pasta ZIP. "
+    "O sistema organiza as declarações por competência e transmissão, identifica "
+    "retificações e apresenta o saldo atual do crédito."
+)
+
+with st.container(border=True):
+    st.subheader("1. Selecione os documentos")
+    uploads = st.file_uploader(
+        "PDFs individuais ou arquivos ZIP",
+        type=["pdf", "zip"],
+        accept_multiple_files=True,
+        help="Você pode combinar vários PDFs e arquivos ZIP no mesmo processamento.",
+    )
+    st.caption("Os documentos são processados em memória e não ficam armazenados.")
+
+if not uploads:
+    st.info("Envie ao menos um PDF ou ZIP para iniciar a análise.")
+    st.stop()
+
+pdfs, errors = iter_pdf_files([(item.name, item.getvalue()) for item in uploads])
+records = []
+for file_name, content in pdfs:
+    try:
+        records.append(parse_individual_pdf(file_name, content))
+    except ExtractionError as exc:
+        errors.append(f"{file_name}: {exc}")
+
+if not records:
+    st.error("Nenhum demonstrativo PER/DCOMP válido foi encontrado nos arquivos enviados.")
+    if errors:
+        with st.expander("Ver detalhes do processamento"):
+            for error in errors:
+                st.warning(error)
+    st.stop()
+
+ordered = organize_records(records)
+summaries = competence_summary(ordered)
+available_count = sum(row["status"] == "Crédito disponível" for row in summaries)
+zero_count = len(summaries) - available_count
+total_balance = sum(row["current_balance"] for row in summaries)
+
+st.subheader("2. Resultado geral")
+metric_a, metric_b, metric_c, metric_d = st.columns(4)
+metric_a.metric("PDFs processados", len(records))
+metric_b.metric("Competências", len(summaries))
+metric_c.metric("Com crédito", available_count)
+metric_d.metric("Saldo total identificado", brl(total_balance))
+
+summary_df = pd.DataFrame(
+    [
+        {
+            "Competência": row["competence"],
+            "Crédito passível de restituição": brl(row["initial_credit"]),
+            "Crédito utilizado": brl(row["used_credit"]),
+            "Saldo atual": brl(row["current_balance"]),
+            "Situação": row["status"],
+            "Última transmissão": row["latest_transmission"].strftime("%d/%m/%Y"),
+            "Último PER/DCOMP": row["latest_number"],
+            "Declarações": row["record_count"],
+        }
+        for row in summaries
+    ]
+)
+st.dataframe(summary_df, use_container_width=True, hide_index=True)
+st.caption(f"{available_count} competência(s) com saldo e {zero_count} com crédito zerado.")
+
+st.subheader("3. Histórico por competência")
+selected_competence = st.selectbox(
+    "Selecione a competência para conferir a sequência",
+    [row["competence"] for row in summaries],
+)
+selected_records = [r for r in ordered if r.competence == selected_competence]
+details_df = pd.DataFrame(
+    [
+        {
+            "Transmissão": record.transmission_date.strftime("%d/%m/%Y"),
+            "PER/DCOMP": record.number,
+            "Crédito passível de restituição": brl(record.refundable_credit),
+            "Crédito original na entrega": brl(record.original_credit_at_delivery),
+            "Crédito original utilizado": brl(record.original_credit_used),
+            "Saldo do crédito original": brl(record.original_credit_balance),
+            "Situação": "Válido" if record.effective else "Retificado/substituído",
+            "Observação": record.note,
+        }
+        for record in selected_records
+    ]
+)
+st.dataframe(details_df, use_container_width=True, hide_index=True)
+
+all_details_df = pd.DataFrame(
+    [
+        {
+            "Competência": record.competence,
+            "Transmissão": record.transmission_date.strftime("%d/%m/%Y"),
+            "PER/DCOMP": record.number,
+            "Crédito passível de restituição": brl(record.refundable_credit),
+            "Crédito original na entrega": brl(record.original_credit_at_delivery),
+            "Crédito original utilizado": brl(record.original_credit_used),
+            "Saldo do crédito original": brl(record.original_credit_balance),
+            "Situação": "Válido" if record.effective else "Retificado/substituído",
+            "Observação": record.note,
+            "Arquivo de origem": record.source_file,
+        }
+        for record in ordered
+    ]
+)
+
+st.subheader("4. Exportar relatório")
+st.download_button(
+    "Baixar relatório em Excel",
+    data=excel_bytes({"Resumo por competência": summary_df, "Histórico completo": all_details_df}),
+    file_name="relatorio_creditos_perdcomp.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+)
+
+if errors:
+    with st.expander(f"Avisos do processamento ({len(errors)})"):
+        for error in errors:
+            st.warning(error)
