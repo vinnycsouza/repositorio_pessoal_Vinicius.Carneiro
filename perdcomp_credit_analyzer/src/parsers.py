@@ -15,7 +15,7 @@ MEBIBYTE = 1024 * 1024
 MAX_UPLOAD_BYTES = 25 * MEBIBYTE
 MAX_DIRECT_PDF_BYTES = 10 * MEBIBYTE
 MAX_ZIP_UNCOMPRESSED_BYTES = 100 * MEBIBYTE
-MAX_PDF_FILES = 50
+MAX_PDF_FILES = 250
 MAX_PDF_PAGES = 100
 MAX_COMPRESSION_RATIO = 100
 
@@ -126,6 +126,19 @@ def parse_individual_pdf(name, data):
     if refundable is None:
         refundable = first(rf"Documento Inicial\s+({MONEY})", text)
     original_match = first(rf"({MONEY})Crédito Original na Data da Entrega", text)
+    document_type = required(r"Tipo de Documento\s+([^\r\n]+)", text, "tipo de documento")
+    used_match = first(
+        rf"Total do Crédito Original Utilizado neste Documento\s+({MONEY})", text
+    )
+    balance_match = first(rf"Saldo do Crédito Original\s+({MONEY})", text)
+    is_refund_request = document_type == "Pedido de Restituição"
+    if used_match is None and not is_refund_request:
+        raise ExtractionError("campo ausente: crédito original utilizado")
+    if balance_match is None and not is_refund_request:
+        raise ExtractionError("campo ausente: saldo do crédito")
+    initial_balance = original_match or refundable
+    if is_refund_request and initial_balance is None:
+        raise ExtractionError("pedido de restituição sem valor de crédito identificável")
 
     return PerdcompRecord(
         source_file=name,
@@ -137,19 +150,13 @@ def parse_individual_pdf(name, data):
         competence=required(
             r"Competência\s+([A-Za-zÀ-ÿ]+\s+de\s+\d{4})", text, "competência"
         ),
+        document_type=document_type,
         refundable_credit=money(refundable) if refundable else None,
         original_credit_at_delivery=money(original_match) if original_match else None,
-        original_credit_used=money(
-            required(
-                rf"Total do Crédito Original Utilizado neste Documento\s+({MONEY})",
-                text,
-                "crédito original utilizado",
-            )
-        ),
-        original_credit_balance=money(
-            required(rf"Saldo do Crédito Original\s+({MONEY})", text, "saldo do crédito")
-        ),
+        original_credit_used=money(used_match) if used_match else Decimal("0"),
+        original_credit_balance=money(balance_match or initial_balance),
         is_amending=first(r"PER/DCOMP Retificador\s+(Sim|Não)", text) == "Sim",
         amended_number=first(rf"N[°º]\s*PER/DCOMP Retificado\s+({NUMBER})", text),
         previous_number=first(rf"Nº do PER/DCOMP Inicial\s+({NUMBER})", text),
+        values_inferred=is_refund_request and (used_match is None or balance_match is None),
     )

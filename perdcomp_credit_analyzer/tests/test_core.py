@@ -1,17 +1,18 @@
 import unittest
 import io
 import zipfile
+from unittest.mock import patch
 from datetime import date
 from decimal import Decimal
 
 from src.analyzer import competence_summary, deduplicate_records, organize_records
 from src.models import PerdcompRecord
-from src.parsers import iter_pdf_files, money
+from src.parsers import iter_pdf_files, money, parse_individual_pdf
 
 
 def sample(number, competence, transmitted, used, balance, **kwargs):
     return PerdcompRecord(
-        "teste.pdf", number, transmitted, competence,
+        "teste.pdf", number, transmitted, competence, "Declaração de Compensação",
         Decimal("100"), Decimal("100"), Decimal(used), Decimal(balance), **kwargs
     )
 
@@ -52,6 +53,23 @@ class PerdcompTests(unittest.TestCase):
         pdfs, warnings = iter_pdf_files([("suspeito.zip", buffer.getvalue())])
         self.assertEqual(pdfs, [])
         self.assertTrue(any("compressão suspeita" in warning for warning in warnings))
+
+    def test_refund_request_uses_initial_credit_as_balance(self):
+        text = """
+        DADOS INICIAIS
+        CNPJ 08.744.139/0001-51 31677.26450.200722.1.2.15-1480
+        Data de Transmissão 20/07/2022
+        Tipo de Documento Pedido de Restituição
+        PER/DCOMP Retificador Não
+        Crédito Passível de Restituição 26.739,36
+        26.739,36Crédito Original na Data da Entrega
+        Competência Janeiro de 2022
+        """
+        with patch("src.parsers.pdf_text", return_value=text):
+            record = parse_individual_pdf("pedido.pdf", b"pdf")
+        self.assertEqual(record.original_credit_used, Decimal("0"))
+        self.assertEqual(record.original_credit_balance, Decimal("26739.36"))
+        self.assertTrue(record.values_inferred)
 
 
 if __name__ == "__main__":

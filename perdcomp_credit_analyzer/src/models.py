@@ -9,6 +9,7 @@ class PerdcompRecord:
     number: str
     transmission_date: date
     competence: str
+    document_type: str
     refundable_credit: Decimal | None
     original_credit_at_delivery: Decimal | None
     original_credit_used: Decimal
@@ -16,6 +17,6 @@ class PerdcompRecord:
     is_amending: bool = False
     amended_number: str | None = None
     previous_number: str | None = None
+    values_inferred: bool = False
     effective: bool = True
     note: str = ""
-

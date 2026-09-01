@@ -17,7 +17,11 @@ def organize_records(records):
     lookup = {record.number: record for record in records}
     for record in records:
         record.effective = True
-        record.note = ""
+        record.note = (
+            "Saldo inicial derivado do Pedido de Restituição"
+            if record.values_inferred
+            else ""
+        )
     for record in records:
         if record.is_amending and record.amended_number in lookup:
             replaced = lookup[record.amended_number]

@@ -27,7 +27,7 @@ Community Cloud.
 ## Limites de segurança
 
 - 25 MB por PDF ou ZIP enviado e 50 MB no total;
-- até 50 PDFs por processamento;
+- até 250 PDFs por processamento;
 - até 10 MB e 100 páginas por PDF;
 - até 100 MB descompactados por ZIP;
 - rejeição de arquivos criptografados e taxas de compressão suspeitas;

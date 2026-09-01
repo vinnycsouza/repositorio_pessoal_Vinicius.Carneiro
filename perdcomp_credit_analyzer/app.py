@@ -53,13 +53,13 @@ with st.container(border=True):
         accept_multiple_files=True,
         disabled=not privacy_acknowledged,
         help=(
-            "Até 25 MB por envio, 50 MB no total, 50 PDFs por processamento, "
+            "Até 25 MB por envio, 50 MB no total, 250 PDFs por processamento, "
             "10 MB e 100 páginas por PDF."
         ),
         **uploader_options,
     )
     st.caption(
-        "Limites: 25 MB por arquivo enviado, 50 MB no total e até 50 PDFs. "
+        "Limites: 25 MB por arquivo enviado, 50 MB no total e até 250 PDFs. "
         "Os documentos são processados em memória e não ficam armazenados."
     )
 
@@ -73,8 +73,8 @@ if total_upload_bytes > MAX_TOTAL_UPLOAD_BYTES:
     st.stop()
 
 pdfs, errors = iter_pdf_files([(item.name, item.getvalue()) for item in uploads])
-if len(pdfs) > 50:
-    st.error(f"Foram encontrados {len(pdfs)} PDFs; o limite por processamento é 50.")
+if len(pdfs) > 250:
+    st.error(f"Foram encontrados {len(pdfs)} PDFs; o limite por processamento é 250.")
     st.stop()
 records = []
 for file_name, content in pdfs:
@@ -87,9 +87,9 @@ records, duplicate_warnings = deduplicate_records(records)
 errors.extend(duplicate_warnings)
 
 if not records:
-    st.error("Nenhum demonstrativo PER/DCOMP válido foi encontrado nos arquivos enviados.")
+    st.error("Nenhum PDF pôde ser processado. Consulte os detalhes abaixo.")
     if errors:
-        with st.expander("Ver detalhes do processamento"):
+        with st.expander("Ver detalhes do processamento", expanded=True):
             for error in errors:
                 st.warning(error)
     st.stop()
@@ -136,6 +136,7 @@ details_df = pd.DataFrame(
         {
             "Transmissão": record.transmission_date.strftime("%d/%m/%Y"),
             "PER/DCOMP": record.number,
+            "Tipo de documento": record.document_type,
             "Crédito passível de restituição": brl(record.refundable_credit),
             "Crédito original na entrega": brl(record.original_credit_at_delivery),
             "Crédito original utilizado": brl(record.original_credit_used),
@@ -154,6 +155,7 @@ all_details_df = pd.DataFrame(
             "Competência": record.competence,
             "Transmissão": record.transmission_date.strftime("%d/%m/%Y"),
             "PER/DCOMP": record.number,
+            "Tipo de documento": record.document_type,
             "Crédito passível de restituição": brl(record.refundable_credit),
             "Crédito original na entrega": brl(record.original_credit_at_delivery),
             "Crédito original utilizado": brl(record.original_credit_used),
