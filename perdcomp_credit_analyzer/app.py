@@ -1,10 +1,14 @@
 import io
+import inspect
 
 import pandas as pd
 import streamlit as st
 
-from src.analyzer import competence_summary, organize_records
+from src.analyzer import competence_summary, deduplicate_records, organize_records
 from src.parsers import ExtractionError, iter_pdf_files, parse_individual_pdf
+
+MAX_FILE_UPLOAD_MB = 25
+MAX_TOTAL_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
 def brl(value):
@@ -32,25 +36,55 @@ st.write(
 
 with st.container(border=True):
     st.subheader("1. Selecione os documentos")
+    st.warning(
+        "Os arquivos podem conter dados fiscais e pessoais. Envie somente documentos "
+        "que você está autorizado a analisar. O conteúdo não é salvo pela aplicação."
+    )
+    privacy_acknowledged = st.checkbox(
+        "Confirmo que estou autorizado a processar estes documentos.",
+        key="privacy_acknowledged",
+    )
+    uploader_options = {}
+    if "max_upload_size" in inspect.signature(st.file_uploader).parameters:
+        uploader_options["max_upload_size"] = MAX_FILE_UPLOAD_MB
     uploads = st.file_uploader(
         "PDFs individuais ou arquivos ZIP",
         type=["pdf", "zip"],
         accept_multiple_files=True,
-        help="Você pode combinar vários PDFs e arquivos ZIP no mesmo processamento.",
+        disabled=not privacy_acknowledged,
+        help=(
+            "Até 25 MB por envio, 50 MB no total, 50 PDFs por processamento, "
+            "10 MB e 100 páginas por PDF."
+        ),
+        **uploader_options,
     )
-    st.caption("Os documentos são processados em memória e não ficam armazenados.")
+    st.caption(
+        "Limites: 25 MB por arquivo enviado, 50 MB no total e até 50 PDFs. "
+        "Os documentos são processados em memória e não ficam armazenados."
+    )
 
 if not uploads:
     st.info("Envie ao menos um PDF ou ZIP para iniciar a análise.")
     st.stop()
 
+total_upload_bytes = sum(len(item.getvalue()) for item in uploads)
+if total_upload_bytes > MAX_TOTAL_UPLOAD_BYTES:
+    st.error("O conjunto enviado excede o limite total de 50 MB.")
+    st.stop()
+
 pdfs, errors = iter_pdf_files([(item.name, item.getvalue()) for item in uploads])
+if len(pdfs) > 50:
+    st.error(f"Foram encontrados {len(pdfs)} PDFs; o limite por processamento é 50.")
+    st.stop()
 records = []
 for file_name, content in pdfs:
     try:
         records.append(parse_individual_pdf(file_name, content))
     except ExtractionError as exc:
         errors.append(f"{file_name}: {exc}")
+
+records, duplicate_warnings = deduplicate_records(records)
+errors.extend(duplicate_warnings)
 
 if not records:
     st.error("Nenhum demonstrativo PER/DCOMP válido foi encontrado nos arquivos enviados.")

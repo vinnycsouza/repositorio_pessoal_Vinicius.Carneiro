@@ -1,10 +1,12 @@
 import unittest
+import io
+import zipfile
 from datetime import date
 from decimal import Decimal
 
-from src.analyzer import competence_summary, organize_records
+from src.analyzer import competence_summary, deduplicate_records, organize_records
 from src.models import PerdcompRecord
-from src.parsers import money
+from src.parsers import iter_pdf_files, money
 
 
 def sample(number, competence, transmitted, used, balance, **kwargs):
@@ -34,6 +36,22 @@ class PerdcompTests(unittest.TestCase):
         organize_records([old, replacement])
         self.assertFalse(old.effective)
         self.assertEqual(competence_summary([old, replacement])[0]["current_balance"], Decimal("60"))
+
+    def test_duplicate_perdcomp_is_ignored(self):
+        number = "00001.00000.000000.0.0.00-0001"
+        first_record = sample(number, "Maio de 2025", date(2026, 1, 1), "10", "90")
+        duplicate = sample(number, "Maio de 2025", date(2026, 1, 1), "10", "90")
+        unique, warnings = deduplicate_records([first_record, duplicate])
+        self.assertEqual(len(unique), 1)
+        self.assertEqual(len(warnings), 1)
+
+    def test_suspicious_zip_compression_is_rejected(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("suspeito.pdf", b"0" * (1024 * 1024))
+        pdfs, warnings = iter_pdf_files([("suspeito.zip", buffer.getvalue())])
+        self.assertEqual(pdfs, [])
+        self.assertTrue(any("compressão suspeita" in warning for warning in warnings))
 
 
 if __name__ == "__main__":

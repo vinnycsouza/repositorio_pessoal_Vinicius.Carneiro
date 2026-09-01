@@ -33,6 +33,22 @@ def organize_records(records):
     )
 
 
+def deduplicate_records(records):
+    """Mantém uma ocorrência por número e informa arquivos repetidos."""
+    unique = {}
+    warnings = []
+    for record in records:
+        existing = unique.get(record.number)
+        if existing is None:
+            unique[record.number] = record
+            continue
+        warnings.append(
+            f"PER/DCOMP {record.number} repetido em {record.source_file}; "
+            f"mantido o arquivo {existing.source_file}"
+        )
+    return list(unique.values()), warnings
+
+
 def competence_summary(records):
     groups = defaultdict(list)
     for record in organize_records(records):
@@ -63,4 +79,3 @@ def competence_summary(records):
             }
         )
     return sorted(output, key=lambda row: competence_key(row["competence"]))
-

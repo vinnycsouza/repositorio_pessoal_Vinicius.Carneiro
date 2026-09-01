@@ -11,6 +11,13 @@ from .models import PerdcompRecord
 
 NUMBER = r"\d{5}\.\d{5}\.\d{6}\.\d\.\d\.\d{2}-\d{4}"
 MONEY = r"\d{1,3}(?:\.\d{3})*,\d{2}"
+MEBIBYTE = 1024 * 1024
+MAX_UPLOAD_BYTES = 25 * MEBIBYTE
+MAX_DIRECT_PDF_BYTES = 10 * MEBIBYTE
+MAX_ZIP_UNCOMPRESSED_BYTES = 100 * MEBIBYTE
+MAX_PDF_FILES = 50
+MAX_PDF_PAGES = 100
+MAX_COMPRESSION_RATIO = 100
 
 
 class ExtractionError(ValueError):
@@ -19,9 +26,16 @@ class ExtractionError(ValueError):
 
 def pdf_text(data):
     try:
-        return "\n".join(
-            page.extract_text() or "" for page in PdfReader(io.BytesIO(data)).pages
-        )
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            raise ExtractionError("PDF protegido por senha")
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise ExtractionError(
+                f"PDF com {len(reader.pages)} páginas; limite de {MAX_PDF_PAGES}"
+            )
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    except ExtractionError:
+        raise
     except Exception as exc:
         raise ExtractionError(f"PDF ilegível: {exc}") from exc
 
@@ -30,7 +44,13 @@ def iter_pdf_files(files):
     """Retorna PDFs enviados diretamente ou contidos em ZIPs, sempre em memória."""
     pdfs, warnings = [], []
     for name, data in files:
+        if len(data) > MAX_UPLOAD_BYTES:
+            warnings.append(f"{name}: excede o limite de 25 MB por envio")
+            continue
         if name.lower().endswith(".pdf"):
+            if len(data) > MAX_DIRECT_PDF_BYTES:
+                warnings.append(f"{name}: PDF excede o limite de 10 MB")
+                continue
             pdfs.append((name, data))
             continue
         if not name.lower().endswith(".zip"):
@@ -38,13 +58,43 @@ def iter_pdf_files(files):
             continue
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                for item in archive.infolist():
+                candidates = [
+                    item
+                    for item in archive.infolist()
+                    if not item.is_dir()
+                    and PurePosixPath(item.filename).name.lower().endswith(".pdf")
+                ]
+                if len(candidates) > MAX_PDF_FILES:
+                    warnings.append(
+                        f"{name}: contém {len(candidates)} PDFs; limite de {MAX_PDF_FILES}"
+                    )
+                    continue
+                total_uncompressed = sum(item.file_size for item in candidates)
+                if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES:
+                    warnings.append(f"{name}: conteúdo descompactado excede 100 MB")
+                    continue
+                unsafe = False
+                for item in candidates:
                     short_name = PurePosixPath(item.filename).name
-                    if item.is_dir() or not short_name.lower().endswith(".pdf"):
-                        continue
                     if item.flag_bits & 1:
                         warnings.append(f"{name} / {short_name}: arquivo protegido por senha")
-                        continue
+                        unsafe = True
+                        break
+                    if item.file_size > MAX_DIRECT_PDF_BYTES:
+                        warnings.append(f"{name} / {short_name}: PDF excede 10 MB")
+                        unsafe = True
+                        break
+                    ratio = item.file_size / max(item.compress_size, 1)
+                    if ratio > MAX_COMPRESSION_RATIO:
+                        warnings.append(
+                            f"{name} / {short_name}: taxa de compressão suspeita"
+                        )
+                        unsafe = True
+                        break
+                if unsafe:
+                    continue
+                for item in candidates:
+                    short_name = PurePosixPath(item.filename).name
                     pdfs.append((f"{name} :: {short_name}", archive.read(item)))
         except (zipfile.BadZipFile, RuntimeError):
             warnings.append(f"{name}: ZIP inválido ou protegido por senha")
@@ -103,4 +153,3 @@ def parse_individual_pdf(name, data):
         amended_number=first(rf"N[°º]\s*PER/DCOMP Retificado\s+({NUMBER})", text),
         previous_number=first(rf"Nº do PER/DCOMP Inicial\s+({NUMBER})", text),
     )
-

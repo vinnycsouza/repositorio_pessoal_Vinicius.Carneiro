@@ -23,3 +23,15 @@ Os documentos enviados são processados em memória e não devem ser versionados
 O relatório consolidado é produzido pela própria aplicação. Não é necessário
 enviar outro modelo de documento. O projeto é compatível com o Streamlit
 Community Cloud.
+
+## Limites de segurança
+
+- 25 MB por PDF ou ZIP enviado e 50 MB no total;
+- até 50 PDFs por processamento;
+- até 10 MB e 100 páginas por PDF;
+- até 100 MB descompactados por ZIP;
+- rejeição de arquivos criptografados e taxas de compressão suspeitas;
+- deduplicação pelo número do PER/DCOMP.
+
+O usuário deve confirmar que está autorizado a processar os documentos. O app
+não grava PDFs nem inclui conteúdo fiscal nos logs.
