@@ -27,14 +27,33 @@ def organize_records(records):
             replaced = lookup[record.amended_number]
             replaced.effective = False
             replaced.note = f"Substituído por {record.number}"
-    return sorted(
+    ordered = sorted(
         records,
         key=lambda record: (
             competence_key(record.competence),
             record.transmission_date,
+            -(
+                record.original_credit_at_delivery
+                or record.refundable_credit
+                or Decimal("0")
+            ),
             record.number,
         ),
     )
+    day_groups = defaultdict(list)
+    for record in ordered:
+        if record.effective:
+            day_groups[(record.competence, record.transmission_date)].append(record)
+    for day_records in day_groups.values():
+        for previous, current in zip(day_records, day_records[1:]):
+            if current.original_credit_at_delivery is None:
+                continue
+            difference = previous.original_credit_balance - current.original_credit_at_delivery
+            if difference > Decimal("0.02"):
+                formatted = f"{difference:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                warning = f"Possível elo não localizado: diferença de R$ {formatted}"
+                current.note = f"{current.note}; {warning}" if current.note else warning
+    return ordered
 
 
 def deduplicate_records(records):
