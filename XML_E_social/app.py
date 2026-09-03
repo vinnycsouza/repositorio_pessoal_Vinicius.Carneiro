@@ -1925,8 +1925,10 @@ if modulo_ativo == "Relatório de Incidência CP":
         ),
     )
     chaves_rubricas_relatorio: list[str] | None = None
+    catalogo_rel = df_rubricas_cp.copy()
+    termos_rel: list[str] = []
+    modo_busca_rel = "codigo_exato"
     if escopo_relatorio_cp == "Rubricas específicas":
-        catalogo_rel = df_rubricas_cp.copy()
         colunas_catalogo = {"cod_rubr", "ide_tab_rubr", "dsc_rubr"}
         if catalogo_rel.empty or not colunas_catalogo.issubset(catalogo_rel.columns):
             st.warning("O catálogo de rubricas não está disponível para esta origem.")
@@ -2217,8 +2219,8 @@ if modulo_ativo == "Relatório de Incidência CP":
             escopo_export = montar_manifesto_escopo_rubricas(
                 catalogo_rel,
                 chaves_rubricas_relatorio,
-                termos_rel if chaves_rubricas_relatorio is not None else [],
-                modo_busca_rel if chaves_rubricas_relatorio is not None else "codigo_exato",
+                termos_rel,
+                modo_busca_rel,
             )
             caminho_relatorio = gerar_excel_saida_sqlite(
                 db_path=db_path_sqlite,
