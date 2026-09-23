@@ -1,5 +1,6 @@
 import io
 import os
+import sqlite3
 import tempfile
 import zipfile
 from datetime import datetime
