@@ -64,6 +64,29 @@ MAX_NIVEL_ZIP = 8
 VERSAO_CONSISTENCIA_RECIBO_S1200 = 4
 MAX_XML_INDIVIDUAL = 256 * 1024 * 1024
 ARQUIVO_BLOQUEIO_WORKSPACE = ".processamento.lock"
+ARQUIVO_SOLICITACAO_PAUSA = ".pausar_processamento"
+
+
+class ProcessamentoPausado(RuntimeError):
+    """Interrupcao cooperativa concluida depois de salvar o checkpoint."""
+
+
+def solicitar_pausa_workspace(workspace_ou_db: str | os.PathLike) -> Path:
+    """Sinaliza uma pausa segura para a instancia que escreve no Workspace."""
+    informado = Path(workspace_ou_db).expanduser().resolve()
+    workspace = informado.parent if informado.is_file() else informado
+    if not (workspace / "processamento.db").is_file():
+        raise FileNotFoundError(f"Workspace inválido: {workspace}")
+    marcador = workspace / ARQUIVO_SOLICITACAO_PAUSA
+    marcador.write_text(str(time.time()), encoding="ascii")
+    return marcador
+
+
+def _limpar_solicitacao_pausa(workspace: Path) -> None:
+    try:
+        (workspace / ARQUIVO_SOLICITACAO_PAUSA).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def organizar_fontes_carga_inicial(
@@ -694,41 +717,51 @@ def _processar_xml_ingestao(
     # Carga inicial e dominada por XMLs novos: a restricao UNIQUE resolve a rara
     # colisao no INSERT. Cargas incrementais preservam a consulta antecipada,
     # pois nelas duplicatas sao frequentes e S-1010 pode exigir reprocessamento.
-    evento_existente = None
+    evento_existente_id = None
     if id_carga is not None:
         inicio = time.perf_counter()
+        # A consulta fica inteiramente coberta pelo indice de hash. Buscar aqui
+        # arquivo/tipo obrigava o SQLite a visitar a linha da tabela, que pode
+        # compartilhar pagina com um XML compactado e causar PageIn aleatorio
+        # em Workspaces com dezenas de GB.
         evento_existente = conn.execute(
-            "SELECT id,arquivo,tipo,envelope_recibo FROM eventos "
+            "SELECT id FROM eventos "
             "WHERE hash_conteudo=? LIMIT 1", (hash_conteudo,)
         ).fetchone()
+        evento_existente_id = int(evento_existente[0]) if evento_existente else None
         if telemetria:
             telemetria.tempo("consulta_duplicidade", time.perf_counter() - inicio)
-    if evento_existente:
+    if evento_existente_id is not None:
         if id_carga is not None:
             conn.execute(
                 "UPDATE historico_cargas SET quantidade_duplicados=quantidade_duplicados+1,"
                 "quantidade_xml_localizados=quantidade_xml_localizados+1 WHERE id_carga=?",
                 (id_carga,),
             )
-            if evento_existente[2] == "S-1010":
+            tipo_entrada = identificar_evento_rapido(xml_bytes).tipo
+            if tipo_entrada == "S-1010":
                 # Permite aplicar correções de parser em Workspace existente ao
                 # reenviar o mesmo recibo, sem duplicar fisicamente o evento.
                 try:
+                    dados_existentes = conn.execute(
+                        "SELECT arquivo,envelope_recibo FROM eventos WHERE id=?",
+                        (evento_existente_id,),
+                    ).fetchone()
                     root_existente = ET.fromstring(xml_bytes)
                     itens = parse_s1010(
                         root_existente,
-                        arquivo=str(evento_existente[1]),
+                        arquivo=str(dados_existentes[0]),
                         fonte_dados=(
-                            "Recibo S-1010" if evento_existente[3]
+                            "Recibo S-1010" if dados_existentes[1]
                             else "Download principal"
                         ),
                     )
                     conn.execute(
                         "DELETE FROM objetos WHERE categoria='rubricas' AND evento_id=?",
-                        (int(evento_existente[0]),),
+                        (evento_existente_id,),
                     )
                     _salvar_objetos(
-                        conn, "rubricas", int(evento_existente[0]), itens
+                        conn, "rubricas", evento_existente_id, itens
                     )
                     _meta_set(conn, f"carga_{id_carga}_reprocessou_s1010", 1)
                     root_existente.clear()
@@ -1231,6 +1264,17 @@ def _ingerir_fontes(
                             except Exception as exc:
                                 conn.execute("INSERT INTO erros(arquivo, erro) VALUES (?, ?)", (caminho_logico, str(exc)))
                     bytes_concluidos += max(0, int(info.file_size))
+                    if (workspace / ARQUIVO_SOLICITACAO_PAUSA).exists():
+                        conn.execute(
+                            "UPDATE fontes SET ultimo_indice=? WHERE id=?",
+                            (indice, fonte_id),
+                        )
+                        _meta_set(conn, "atualizado_em", time.time())
+                        conn.commit()
+                        _limpar_solicitacao_pausa(workspace)
+                        raise ProcessamentoPausado(
+                            "Pausa solicitada pelo usuário; checkpoint salvo com segurança."
+                        )
                     agora_visual = time.perf_counter()
                     checkpoint = indice % CHECKPOINT_INTERVALO == 0 or indice == total - 1
                     if checkpoint:
@@ -1789,6 +1833,7 @@ def atualizar_workspace_incremental(
     """Adiciona XMLs ao mesmo Workspace, com SHA-256, histórico e retomada."""
     workspace, db_path = _resolver_workspace_existente(workspace_ou_db)
     bloqueio = _adquirir_bloqueio_workspace(workspace)
+    _limpar_solicitacao_pausa(workspace)
     migracao_id: int | None = None
     try:
         conn = _conectar(db_path)
@@ -1979,6 +2024,7 @@ def processar_fontes_esocial(
 
     db_path = workspace / "processamento.db"
     bloqueio = _adquirir_bloqueio_workspace(workspace)
+    _limpar_solicitacao_pausa(workspace)
     migracao_id: int | None = None
     try:
         conn = _conectar(db_path)

@@ -17,12 +17,14 @@ from modules.levantamento_sqlite import (
     gerar_excel_levantamento_sqlite,
 )
 from modules.processador_zip import (
+    ProcessamentoPausado,
     atualizar_workspace_incremental,
     carregar_resultado_sqlite_existente,
     corrigir_duplicados_s1200_por_recibo,
     obter_resumo_carga_incremental,
     organizar_fontes_carga_inicial,
     processar_fontes_esocial,
+    solicitar_pausa_workspace,
 )
 from modules.sqlite_relatorio import (
     _SQL_MOVIMENTOS_CP_EFETIVOS,
@@ -459,6 +461,48 @@ class CargaIncrementalTest(unittest.TestCase):
         self.assertEqual(atualizado["carga_incremental"]["id_carga"], id_carga)
         self.assertEqual(atualizado["carga_incremental"]["status"], "concluida")
         self.assertEqual(atualizado["carga_incremental"]["quantidade_xml_novos"], 1)
+
+    def test_pausa_segura_salva_checkpoint_e_libera_retomada(self):
+        pausa_solicitada = False
+
+        def solicitar_ao_iniciar_ingestao(_valor, mensagem):
+            nonlocal pausa_solicitada
+            if pausa_solicitada or "Preparando a ingestão" not in mensagem:
+                return
+            workspace = next(Path(self.temp.name).iterdir())
+            solicitar_pausa_workspace(workspace)
+            pausa_solicitada = True
+
+        with self.assertRaises(ProcessamentoPausado):
+            processar_fontes_esocial(
+                [
+                    (
+                        "pausa.zip",
+                        zip_xmls(
+                            **{
+                                "primeiro.xml": S1200,
+                                "segundo.xml": S1200.replace("ID1200", "ID1200-2"),
+                            }
+                        ),
+                    )
+                ],
+                progress_callback=solicitar_ao_iniciar_ingestao,
+            )
+
+        workspace = next(Path(self.temp.name).iterdir())
+        conn = sqlite3.connect(workspace / "processamento.db")
+        try:
+            self.assertEqual(
+                conn.execute("SELECT valor FROM meta WHERE chave='status'").fetchone()[0],
+                "interrompido",
+            )
+            self.assertEqual(
+                conn.execute("SELECT ultimo_indice FROM fontes LIMIT 1").fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+        self.assertFalse((workspace / ".pausar_processamento").exists())
 
 
 if __name__ == "__main__":

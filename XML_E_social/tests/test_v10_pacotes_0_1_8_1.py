@@ -38,6 +38,25 @@ class PacotesV10Test(unittest.TestCase):
         self.assertEqual(_processar_xml_ingestao(self.conn, "b.xml", XML, len(XML)), "duplicado")
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM eventos").fetchone()[0], 1)
 
+    def test_duplicata_incremental_comum_usa_consulta_coberta_pelo_hash(self):
+        self.assertEqual(_processar_xml_ingestao(self.conn, "a.xml", XML, len(XML)), "S-1200")
+        comandos = []
+        self.conn.set_trace_callback(comandos.append)
+        self.assertEqual(
+            _processar_xml_ingestao(
+                self.conn, "b.xml", XML, len(XML), id_carga=999
+            ),
+            "duplicado",
+        )
+        consultas = [
+            comando for comando in comandos
+            if comando.lstrip().upper().startswith("SELECT")
+            and "FROM EVENTOS" in comando.upper()
+        ]
+        self.assertEqual(len(consultas), 1)
+        self.assertIn("SELECT id FROM eventos", consultas[0])
+        self.assertNotIn("arquivo", consultas[0].lower())
+
     def test_schema_e_telemetria_local(self):
         telemetria = TelemetriaCarga()
         _processar_xml_ingestao(self.conn, "a.xml", XML, len(XML), telemetria=telemetria)

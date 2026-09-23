@@ -46,6 +46,7 @@ from modules.processador_zip import (
     carregar_resultado_sqlite_existente,
     organizar_fontes_carga_inicial,
     processar_fontes_esocial,
+    solicitar_pausa_workspace,
 )
 from modules.sqlite_relatorio import (
     contar_movimentos_exportacao_sqlite,
@@ -330,6 +331,25 @@ with st.sidebar:
                             "Este Workspace está interrompido ou em processamento e não pode "
                             "ser aberto como base concluída."
                         )
+                    if workspace_selecionado.status == "Em processamento":
+                        st.info(
+                            "Este Workspace possui uma execução ativa. Você pode solicitar "
+                            "uma pausa segura sem encerrar o servidor Streamlit."
+                        )
+                        if st.button(
+                            "⏸ Solicitar pausa segura",
+                            use_container_width=True,
+                            key="pausar_workspace_catalogo",
+                        ):
+                            try:
+                                solicitar_pausa_workspace(workspace_selecionado.caminho)
+                            except OSError as exc:
+                                st.error(f"Não foi possível solicitar a pausa: {exc}")
+                            else:
+                                st.warning(
+                                    "Pausa solicitada. O lote atual será finalizado, o checkpoint "
+                                    "será salvo e a trava será liberada. Depois clique em ↻."
+                                )
                     if workspace_selecionado.retomavel:
                         st.info(
                             "Há uma carga interrompida neste Workspace. A retomada usa os "
