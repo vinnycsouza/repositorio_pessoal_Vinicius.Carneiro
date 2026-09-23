@@ -56,6 +56,14 @@ class PacotesV10Test(unittest.TestCase):
         self.assertEqual(len(consultas), 1)
         self.assertIn("SELECT id FROM eventos", consultas[0])
         self.assertNotIn("arquivo", consultas[0].lower())
+        plano = self.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM eventos "
+            "WHERE hash_conteudo=? AND hash_conteudo<>'' LIMIT 1",
+            ("0" * 64,),
+        ).fetchall()
+        descricao = " ".join(str(item[3]) for item in plano).upper()
+        self.assertIn("UX_EVENTOS_HASH_CONTEUDO", descricao)
+        self.assertNotIn("SCAN EVENTOS", descricao)
 
     def test_schema_e_telemetria_local(self):
         telemetria = TelemetriaCarga()

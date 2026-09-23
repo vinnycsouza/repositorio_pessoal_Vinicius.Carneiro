@@ -726,7 +726,7 @@ def _processar_xml_ingestao(
         # em Workspaces com dezenas de GB.
         evento_existente = conn.execute(
             "SELECT id FROM eventos "
-            "WHERE hash_conteudo=? LIMIT 1", (hash_conteudo,)
+            "WHERE hash_conteudo=? AND hash_conteudo<>'' LIMIT 1", (hash_conteudo,)
         ).fetchone()
         evento_existente_id = int(evento_existente[0]) if evento_existente else None
         if telemetria:
