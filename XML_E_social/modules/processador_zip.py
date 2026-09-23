@@ -43,7 +43,9 @@ from modules.telemetria import TelemetriaCarga
 from modules.sqlite_writer import BatchPolicy
 from modules.xsd_validator import validar_xml_xsd
 from modules.v10_core import (
+    ENGINE_VERSION,
     PARSER_VERSION,
+    SCHEMA_SQLITE_VERSION,
     flag_ativa,
     modo_parser,
     registrar_versoes_workspace,
@@ -387,6 +389,16 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
         PRIMARY KEY(migracao_id,categoria,chave)
     );
     """)
+    # Preserve o estado anterior ao registro da versao atual. Workspaces que
+    # ja foram abertos por esta mesma estrutura tiveram o retropreenchimento
+    # legado concluido na abertura anterior e nao devem varrer novamente a
+    # tabela eventos (que pode conter dezenas de GB de XML compactado).
+    schema_anterior = _meta_get(conn, "versao_schema_sqlite", "")
+    engine_anterior = _meta_get(conn, "versao_engine", "")
+    estrutura_atual_anterior = (
+        schema_anterior == str(SCHEMA_SQLITE_VERSION)
+        and engine_anterior == ENGINE_VERSION
+    )
     col_eventos = {r[1] for r in conn.execute("PRAGMA table_info(eventos)")}
     if "hash_conteudo" not in col_eventos:
         conn.execute("ALTER TABLE eventos ADD COLUMN hash_conteudo TEXT")
@@ -423,31 +435,35 @@ def _criar_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eventos_tipo_ativo_recibo ON eventos(tipo,ativo,recibo_evento,id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_eventos_duplicado_logico ON eventos(duplicado_logico_de)")
     registrar_versoes_workspace(conn)
-    # Workspaces anteriores só permitem retropreencher eventos cujo XML foi
-    # preservado para a segunda passagem. O filtro e essencial: depois da
-    # migracao, reabrir um Workspace nao pode descompactar novamente seu acervo.
-    for evento_id, xml_zlib, hash_atual, recibo_atual in conn.execute(
-        "SELECT id,xml_zlib,hash_conteudo,recibo_evento FROM eventos "
-        "WHERE xml_zlib IS NOT NULL AND COALESCE(hash_conteudo,'')=''"
-    ):
-        try:
-            xml_bruto = zlib.decompress(xml_zlib)
-            if not hash_atual:
-                digest = hashlib.sha256(xml_bruto).hexdigest()
-                conn.execute(
-                    "UPDATE OR IGNORE eventos SET hash_conteudo=? WHERE id=?",
-                    (digest, evento_id),
-                )
-            if not recibo_atual:
-                root = ET.fromstring(xml_bruto)
-                id_evt, ind_retif, recibo_evt, recibo_ref = _metadados_retificacao(root)
-                conn.execute(
-                    "UPDATE eventos SET id_evento_esocial=?,ind_retif=?,recibo_evento=?,"
-                    "recibo_referencia=? WHERE id=?",
-                    (id_evt, ind_retif, recibo_evt, recibo_ref, evento_id),
-                )
-        except Exception:
-            pass
+    versao_backfill = int(_meta_get(conn, "versao_backfill_metadados_eventos", "0") or 0)
+    if versao_backfill < 1:
+        # Compatibilidade com Workspaces V10 criados antes da existencia do
+        # marcador: a propria versao persistida comprova que esta rotina ja foi
+        # concluida. Bancos realmente legados ainda passam pelo backfill.
+        if not estrutura_atual_anterior:
+            for evento_id, xml_zlib, hash_atual, recibo_atual in conn.execute(
+                "SELECT id,xml_zlib,hash_conteudo,recibo_evento FROM eventos "
+                "WHERE xml_zlib IS NOT NULL AND COALESCE(hash_conteudo,'')=''"
+            ):
+                try:
+                    xml_bruto = zlib.decompress(xml_zlib)
+                    if not hash_atual:
+                        digest = hashlib.sha256(xml_bruto).hexdigest()
+                        conn.execute(
+                            "UPDATE OR IGNORE eventos SET hash_conteudo=? WHERE id=?",
+                            (digest, evento_id),
+                        )
+                    if not recibo_atual:
+                        root = ET.fromstring(xml_bruto)
+                        id_evt, ind_retif, recibo_evt, recibo_ref = _metadados_retificacao(root)
+                        conn.execute(
+                            "UPDATE eventos SET id_evento_esocial=?,ind_retif=?,recibo_evento=?,"
+                            "recibo_referencia=? WHERE id=?",
+                            (id_evt, ind_retif, recibo_evt, recibo_ref, evento_id),
+                        )
+                except Exception:
+                    pass
+        _meta_set(conn, "versao_backfill_metadados_eventos", 1)
     conn.commit()
 
 

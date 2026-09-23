@@ -455,7 +455,7 @@ class CargaIncrementalTest(unittest.TestCase):
         interrompida = obter_resumo_carga_incremental(workspace)
         self.assertEqual(interrompida["status"], "interrompida")
         id_carga = interrompida["id_carga"]
-        atualizado = atualizar_workspace_incremental(workspace, fonte)
+        atualizado = atualizar_workspace_incremental(workspace, None)
         self.assertEqual(atualizado["carga_incremental"]["id_carga"], id_carga)
         self.assertEqual(atualizado["carga_incremental"]["status"], "concluida")
         self.assertEqual(atualizado["carga_incremental"]["quantidade_xml_novos"], 1)

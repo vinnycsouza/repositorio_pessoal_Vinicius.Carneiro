@@ -11,6 +11,9 @@ from typing import Mapping
 from send2trash import send2trash
 
 
+ARQUIVO_BLOQUEIO_WORKSPACE = ".processamento.lock"
+
+
 @dataclass(frozen=True)
 class WorkspaceInfo:
     nome_empresa: str
@@ -45,6 +48,10 @@ class WorkspaceCatalogItem:
     @property
     def carregavel(self) -> bool:
         return self.status == "Concluído"
+
+    @property
+    def retomavel(self) -> bool:
+        return self.status == "Interrompido"
 
     @property
     def rotulo(self) -> str:
@@ -106,6 +113,31 @@ def pasta_padrao_workspaces() -> Path:
     return (Path.home() / ".xml_esocial" / "workspaces").resolve()
 
 
+def _workspace_esta_bloqueado(caminho: Path) -> bool:
+    """Consulta a trava real sem confiar apenas no status persistido no SQLite."""
+    arquivo_lock = caminho / ARQUIVO_BLOQUEIO_WORKSPACE
+    if not arquivo_lock.is_file():
+        return False
+    arquivo = None
+    try:
+        arquivo = arquivo_lock.open("r+b")
+        arquivo.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(arquivo.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(arquivo.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(arquivo.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(arquivo.fileno(), fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+    finally:
+        if arquivo is not None:
+            arquivo.close()
+
+
 def _catalogar_workspace(caminho: Path) -> WorkspaceCatalogItem | None:
     db_path = caminho / "processamento.db"
     if not caminho.is_dir() or not db_path.is_file():
@@ -132,6 +164,8 @@ def _catalogar_workspace(caminho: Path) -> WorkspaceCatalogItem | None:
             for chave, valor in conn.execute("SELECT chave,valor FROM meta")
         }
         status_bruto = metadados.get("status", "interrompido").strip().lower()
+        if status_bruto == "processando" and not _workspace_esta_bloqueado(caminho):
+            status_bruto = "interrompido"
         status = {
             "concluido": "Concluído",
             "processando": "Em processamento",
@@ -245,6 +279,8 @@ def _ler_status_sqlite(db_path: Path) -> str:
     finally:
         if conn is not None:
             conn.close()
+    if valor == "processando" and not _workspace_esta_bloqueado(db_path.parent):
+        valor = "interrompido"
     return {
         "concluido": "Concluído",
         "processando": "Em processamento",

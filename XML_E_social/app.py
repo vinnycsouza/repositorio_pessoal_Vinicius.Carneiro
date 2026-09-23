@@ -329,6 +329,65 @@ with st.sidebar:
                             "Este Workspace está interrompido ou em processamento e não pode "
                             "ser aberto como base concluída."
                         )
+                    if workspace_selecionado.retomavel:
+                        st.info(
+                            "Há uma carga interrompida neste Workspace. A retomada usa os "
+                            "checkpoints e as fontes internas já preservadas, sem criar outro Workspace."
+                        )
+                        if st.button(
+                            "▶ Retomar carga interrompida",
+                            type="primary",
+                            use_container_width=True,
+                            key="retomar_workspace_catalogo",
+                        ):
+                            st.markdown("### Retomada do Workspace")
+                            barra_etapa_ret = st.progress(
+                                0, text="Etapa atual — preparando checkpoints..."
+                            )
+                            barra_geral_ret = st.progress(
+                                0, text="Progresso geral — 0%"
+                            )
+                            status_ret = st.empty()
+                            estado_ret = {"maior_geral": 0.0}
+
+                            def atualizar_retomada(valor: float, mensagem: str, info=None):
+                                estado_ret["maior_geral"] = max(
+                                    estado_ret["maior_geral"], float(valor)
+                                )
+                                geral = max(0, min(100, int(round(
+                                    estado_ret["maior_geral"] * 100
+                                ))))
+                                etapa = (
+                                    geral if info is None
+                                    else max(0, min(100, int(round(info.percentual_etapa * 100))))
+                                )
+                                titulo = "Etapa atual" if info is None else info.titulo_etapa
+                                detalhes = mensagem if info is None else (info.detalhes or mensagem)
+                                barra_etapa_ret.progress(etapa, text=f"{titulo} — {etapa}%")
+                                barra_geral_ret.progress(geral, text=f"Progresso geral — {geral}%")
+                                status_ret.caption(detalhes)
+
+                            atualizar_retomada._suporta_progresso_detalhado = True
+                            try:
+                                resultado_retomado = atualizar_workspace_incremental(
+                                    workspace_selecionado.caminho,
+                                    None,
+                                    progress_callback=atualizar_retomada,
+                                    origem="Retomada pelo catálogo de Workspaces",
+                                )
+                            except Exception as exc:
+                                status_ret.error(
+                                    f"Retomada interrompida com segurança: {exc}"
+                                )
+                                st.exception(exc)
+                                st.stop()
+                            st.session_state["resultado_v82"] = resultado_retomado
+                            st.session_state["mensagem_workspace_v952"] = (
+                                "Carga interrompida retomada e concluída no mesmo Workspace."
+                            )
+                            _catalogo_workspaces_disponiveis.clear()
+                            st.cache_data.clear()
+                            st.rerun()
                     if st.button(
                         "Carregar Workspace selecionado",
                         type="primary",
@@ -1248,9 +1307,18 @@ if modulo_ativo == "Levantamento de Verbas":
     opcoes_sqlite = None
     assinatura_sqlite = None
     if levantamento_sqlite:
-        contexto_levantamento = WorkspaceContext.from_path(
-            db_path_sqlite, origem="sessao"
-        )
+        try:
+            contexto_levantamento = WorkspaceContext.from_path(
+                db_path_sqlite, origem="sessao"
+            )
+        except (FileNotFoundError, ValueError, sqlite3.Error) as exc:
+            st.warning(
+                "O Workspace selecionado ainda não pode ser usado no Levantamento. "
+                "Conclua primeiro a carga interrompida pelo botão "
+                "‘Retomar carga interrompida’ na seleção de Workspace."
+            )
+            st.caption(str(exc))
+            st.stop()
         fonte_levantamento_sqlite = SQLiteDataSource(contexto_levantamento)
         assinatura_sqlite = _assinatura_banco_sqlite(db_path_sqlite)
         opcoes_sqlite = _opcoes_levantamento_sqlite(

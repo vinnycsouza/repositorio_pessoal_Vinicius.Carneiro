@@ -49,11 +49,11 @@ class WorkspaceManagerTest(unittest.TestCase):
             self.assertGreater(info.tamanho_total, 0)
             self.assertGreater(info.tamanho_sqlite, 0)
 
-    def test_identifica_workspace_em_processamento(self):
+    def test_status_processando_sem_trava_real_e_interrompido(self):
         with tempfile.TemporaryDirectory() as pasta:
             workspace = self._criar_workspace(pasta, status="processando")
             info = obter_info_workspace({"workspace_temporario": str(workspace)})
-            self.assertEqual(info.status, "Em processamento")
+            self.assertEqual(info.status, "Interrompido")
 
     def test_envia_para_lixeira_sem_exclusao_definitiva(self):
         with tempfile.TemporaryDirectory() as pasta:
@@ -116,6 +116,7 @@ class WorkspaceManagerTest(unittest.TestCase):
             item = listar_workspaces_disponiveis(pasta)[0]
             self.assertEqual(item.status, "Interrompido")
             self.assertFalse(item.carregavel)
+            self.assertTrue(item.retomavel)
 
     def test_ignora_pasta_sem_processamento_db(self):
         with tempfile.TemporaryDirectory() as pasta:

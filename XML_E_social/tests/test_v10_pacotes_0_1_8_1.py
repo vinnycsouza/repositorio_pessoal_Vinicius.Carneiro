@@ -50,6 +50,22 @@ class PacotesV10Test(unittest.TestCase):
         self.assertGreater(self.conn.execute("SELECT COUNT(*) FROM telemetria").fetchone()[0], 5)
         self.assertEqual(self.conn.execute("SELECT quantidade FROM telemetria_eventos WHERE tipo='S-1200'").fetchone()[0], 1)
 
+    def test_reabertura_do_schema_nao_varre_xmls_novamente(self):
+        comandos = []
+        self.conn.set_trace_callback(comandos.append)
+        _criar_schema(self.conn)
+        varreduras = [
+            comando for comando in comandos
+            if comando.lstrip().upper().startswith("SELECT ID,XML_ZLIB")
+        ]
+        self.assertEqual(varreduras, [])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT valor FROM meta WHERE chave='versao_backfill_metadados_eventos'"
+            ).fetchone()[0],
+            "1",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
