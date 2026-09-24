@@ -10,7 +10,13 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'dados'
-VERSION = '0.1.0'
+VERSION = '0.3.0'
+PREVIDENCIA = {
+    'base_empresa_total': 'Total da base empresa',
+    'previdencia_empresa_total': 'Total de previdência empresa',
+    'rat_total': 'RAT — valor total',
+    'segurados_total': 'Contribuições descontadas dos segurados',
+}
 MONEY = re.compile(r'^-?\d[\d.]*,\d{2}$')
 INTEREST = {'8015','8007','0265','0260','0276','0871','8008','0175','0177','0116','0504','0810','PRNO','7945','0222','0543','0600','0811'}
 
@@ -103,7 +109,7 @@ def extract(name, content):
     digest=hashlib.sha256(content).hexdigest()
     (DATA/'pdfs').mkdir(parents=True,exist_ok=True)
     path=DATA/'pdfs'/f'{digest}.pdf'; path.write_bytes(content)
-    doc={'hash':digest,'arquivo':name,'path':str(path),'rubricas':[],'totais':{},'bases':{},'alertas':[],'versao':VERSION}
+    doc={'hash':digest,'arquivo':name,'path':str(path),'rubricas':[],'totais':{},'bases':{},'previdencia':{},'alertas':[],'versao':VERSION}
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         doc['paginas']=len(pdf.pages)
         first=pdf.pages[0].extract_text() or ''
@@ -144,6 +150,9 @@ def extract(name, content):
                     for label,key in [('TOTAL DE PROVENTOS','proventos'),('TOTAL DE DESCONTOS','descontos'),('TOTAL LIQUIDO','liquido'),('ARREDONDAMENTO','arredondamento')]:
                         if label in n and monetary: doc['totais'][key]=cents(monetary[-1]['text'])
                     if '(+) SALARIO FAMILIA' in n and monetary: doc['totais']['familia']=cents(monetary[-1]['text'])
+                    for label,key in [('TOTAL DA BASE EMPRESA','base_empresa_total'),('TOTAL DE PREVIDENCIA EMPRESA','previdencia_empresa_total'),('VALOR TOTAL DO RAT','rat_total'),('TOTAL DAS CONTRIBUICOES DESCONTADAS','segurados_total')]:
+                        if n.startswith(label) and monetary:
+                            doc['previdencia'][key]={'valor_centavos':cents(monetary[-1]['text']),'pagina':pn,'rotulo_original':text}
                     if n.startswith('BASE EMPRESA') and monetary:
                         label=' '.join(w['text'] for w in ws if w['x0']<monetary[-1]['x0'])
                         key='13' if 'SOBRE 13' in norm(label) else 'mensal'
@@ -179,32 +188,85 @@ def import_catalog(path_or_bytes):
 def key_for(d,r):
     return '|'.join([d['cnpj'],d['competencia'],d['tipo'],r['codigo'],r['descricao'],r['lado']])
 
+def brl(value):
+    """Format cents for display only; calculations and XLSX retain numeric values."""
+    if value is None: return 'Não informado'
+    amount=Decimal(int(value))/100
+    return 'R$ '+format(amount,',.2f').replace(',','X').replace('.',',').replace('X','.')
+
+
 def classify(d,r,catalog,decisions):
     key=key_for(d,r)
-    base={'chave':key,'selecionada':r['codigo'] in INTEREST,'rating':'Sem classificação','efeito':'Pendente','base':'Mensal','justificativa':'','origem':'Sem cadastro válido','codIncCP':''}
-    if catalog and re.sub(r'\D','',d['cnpj'])[:8]==catalog['empresa_raiz']:
-        matches=[x for x in catalog['rubricas'] if x['cod_rubr']==r['codigo'] and x['ini_valid'] and x['ini_valid']<=d['competencia'] and (not x['fim_valid'] or x['fim_valid']>=d['competencia'])]
-        signatures={(x['ide_tab_rubr'],x['dsc_rubr'],x['cod_inc_cp'],x['tp_rubr']) for x in matches}
-        if len(signatures)==1:
-            x=matches[0]; code=x['cod_inc_cp']; base['codIncCP']=code; base['origem']='S-1010: '+x['dsc_rubr']
-            base['base']='13º' if code in ('12','14','16','22','26') else 'Mensal'
-            # Conservative prototype: only exact semantic matches and ordinary provento/desconto suggest a base effect.
-            same=norm(x['dsc_rubr'])==norm(r['descricao'])
-            if same and code=='00': base['efeito']='Não integra (sugestão)'
-            elif same and code in ('11','12') and x['tp_rubr'] in ('1','2'):
-                expected='Provento' if x['tp_rubr']=='1' else 'Desconto'
-                if expected==r['lado']: base['efeito']='Acrescenta (sugestão)' if expected=='Provento' else 'Reduz (sugestão)'
-            elif code in ('21','22','25','26'): base['origem']+=' — maternidade: validar tratamento patronal e período'
-        elif len(signatures)>1: base['origem']='Cadastro ambíguo: versões/tabelas divergentes'
+    base={'chave':key,'selecionada':False,'rating':'Sem classificação','efeito':'Pendente',
+          'base':'Mensal','justificativa':'','origem':'Sem relatório de incidência', 'codIncCP':'',
+          'descricao_relatorio':'','vigencia_relatorio':'','correspondencia':'Sem relatório',
+          'motivo':'Importe o relatório de incidência da empresa.', 'efeito_relatorio':'Pendente'}
+    employer=re.sub(r'\D','',d['cnpj'])[:8]
+    if catalog:
+        if employer!=catalog['empresa_raiz']:
+            base.update(correspondencia='Empresa diferente',origem='Relatório pertence a outro CNPJ',motivo='Importe o relatório da empresa desta folha.')
+        else:
+            code_rows=[x for x in catalog['rubricas'] if x['cod_rubr']==r['codigo']]
+            matches=[x for x in code_rows if x['ini_valid'] and x['ini_valid']<=d['competencia'] and (not x['fim_valid'] or x['fim_valid']>=d['competencia'])]
+            reference=matches or code_rows
+            if reference:
+                base['codIncCP']=' / '.join(sorted({x['cod_inc_cp'] for x in reference}))
+                base['descricao_relatorio']=' | '.join(sorted({x['dsc_rubr'] for x in reference}))
+                base['vigencia_relatorio']=' | '.join(sorted({x['ini_valid']+' a '+(x['fim_valid'] or 'sem fim informado') for x in reference}))
+            if not code_rows:
+                base.update(correspondencia='Não localizada',origem='Código não localizado no relatório',motivo='Não há correspondência para este código.')
+            elif not matches:
+                base.update(correspondencia='Sem vigência compatível',origem='Referência fora do período da folha',motivo='O cadastro foi encontrado, mas não comprova o tratamento desta competência.')
+            else:
+                signatures={(x['ide_tab_rubr'],norm(x['dsc_rubr']),x['cod_inc_cp'],x['tp_rubr']) for x in matches}
+                if len(signatures)!=1:
+                    base.update(correspondencia='Cadastro ambíguo',origem='Versões/tabelas divergentes',motivo='Mais de uma descrição, tabela ou incidência válida; verificar cadastro.')
+                else:
+                    x=matches[0];code=x['cod_inc_cp']
+                    base.update(origem='S-1010: '+x['dsc_rubr'],correspondencia='Código e vigência compatíveis')
+                    base['base']='13º' if code in ('12','14','16','22','26') else 'Mensal'
+                    same=norm(x['dsc_rubr'])==norm(r['descricao'])
+                    if not same:
+                        base.update(correspondencia='Descrição diferente',motivo='Mesmo código no período, mas descrições diferentes; correspondência não confirmada.')
+                    elif code=='00':
+                        base.update(efeito='Não integra (sugestão)',motivo='Código 00 no cadastro de incidência compatível.')
+                    elif code in ('11','12') and x['tp_rubr'] in ('1','2'):
+                        expected='Provento' if x['tp_rubr']=='1' else 'Desconto'
+                        if expected==r['lado']:
+                            base.update(efeito='Acrescenta (sugestão)' if expected=='Provento' else 'Reduz (sugestão)',motivo='Código '+code+' e tipo '+x['tp_rubr']+' compatíveis com a rubrica da folha.')
+                        else: base['motivo']='O tipo de rubrica no relatório diverge do lado provento/desconto no PDF.'
+                    elif code in ('21','22','25','26'):
+                        base['motivo']='Maternidade: incidência CP não equivale à participação na base do INSS empresa. Validar período e tratamento patronal.'
+                    else:
+                        base['motivo']='Rubrica técnica ou código de incidência com tratamento específico; não incluído automaticamente na base patronal.'
+    base['efeito_relatorio']=base['efeito']
     base.update(decisions.get(key,{}))
     return base
+
+
+def participation_group(row):
+    effect=row['efeito']
+    if effect.startswith('Acrescenta'): return 'Possíveis acréscimos'
+    if effect.startswith('Reduz'): return 'Reduções da base'
+    if effect.startswith('Não integra'): return 'Fora da base segundo cadastro'
+    return 'Não determinado'
+
+
+def selection_key(row):
+    # Selection is per document, independent of a shared rule for the competence.
+    return row['documento']+'|'+row['chave']
+
 
 def details(a):
     out=[]
     for d in a['docs']:
         for r in d['rubricas']:
             cl=classify(d,r,a.get('catalog'),a.get('decisions',{}))
-            out.append({'cnpj':d['cnpj'],'empresa':d['empresa'],'competencia':d['competencia'],'tipo':d['tipo'],**r,**cl,'arquivo':d['arquivo'],'documento':d['hash']})
+            row={'cnpj':d['cnpj'],'empresa':d['empresa'],'competencia':d['competencia'],'tipo':d['tipo'],**r,**cl,'arquivo':d['arquivo'],'documento':d['hash']}
+            row['grupo']=participation_group(row)
+            row['selecionada']=a.get('selections',{}).get(selection_key(row),row['selecionada'])
+            row['situacao_patronal']=a.get('regimes',{}).get(d['cnpj']+'|'+d['competencia'],'Não verificada')
+            out.append(row)
     return out
 
 def reconciliation(a):
@@ -221,6 +283,16 @@ def reconciliation(a):
             status='Pendente' if pending else 'Hipótese com sugestões' if unconfirmed else 'Sem base informada' if expected is None else 'Confere aritmeticamente' if abs(difference)<=1 else 'Divergente'
             out.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],'base':target,'informada_centavos':expected,'reconstruida_centavos':value,'diferenca_centavos':difference,'rubricas_pendentes':pending,'sugestoes':unconfirmed,'estado':status,'arquivo':d['arquivo']})
     return out
+
+def previdencia_rows(d):
+    result=[]
+    for key,label in PREVIDENCIA.items():
+        item=d.get('previdencia',{}).get(key,{})
+        result.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],
+                       'indicador':label,'valor_centavos':item.get('valor_centavos'),
+                       'situacao':'Informado no PDF' if item else 'Não localizado no PDF',
+                       'pagina':item.get('pagina'),'arquivo':d['arquivo']})
+    return result
 
 def export_excel(a):
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -244,7 +316,7 @@ def export_excel(a):
             s.column_dimensions[openpyxl.utils.get_column_letter(i)].width=min(60,max(16,len(h)+3))
             if h.endswith('_centavos'):
                 for col in s.iter_cols(min_col=i,max_col=i,min_row=2):
-                    for c in col: c.number_format='#,##0.00'
+                    for c in col: c.number_format='[$R$-416] #,##0.00'
         if 'rating' in headers:
             col=headers.index('rating')+1
             for row in s.iter_rows(min_row=2):
@@ -259,11 +331,18 @@ def export_excel(a):
     sheet('Resumo',[{'indicador':'Análise','valor':a['name']},{'indicador':'Situação','valor':'Preliminar: valores encontrados não equivalem a exclusão confirmada ou crédito.'},{'indicador':'Gerado em','valor':datetime.now().isoformat(timespec='seconds')},{'indicador':'PDFs processados','valor':len(a['docs'])},{'indicador':'Documentos com erro','valor':len(a.get('errors',[]))}])
     sheet('Consolidado',[dict(zip(['cnpj','codigo','descricao','rating','efeito'],k),valor_centavos=v) for k,v in sorted(grouped.items())])
     sheet('Por competencia',[{k:r[k] for k in ['cnpj','competencia','tipo','codigo','descricao','valor_centavos','efeito','rating','arquivo','pagina']} for r in selected])
+    view_fields=['cnpj','competencia','tipo','codigo','descricao','valor_centavos','grupo','base','codIncCP','descricao_relatorio','vigencia_relatorio','correspondencia','motivo','efeito_relatorio','efeito','selecionada','rating','situacao_patronal','arquivo','pagina']
+    sheet('Cruzamento por folha',[{k:r[k] for k in view_fields} for r in rows])
+    sheet('Possiveis acrescimos',[{k:r[k] for k in view_fields} for r in rows if r['grupo']=='Possíveis acréscimos'])
+    sheet('Reducoes da base',[{k:r[k] for k in view_fields} for r in rows if r['grupo']=='Reduções da base'])
+    sheet('Pendencias',[{k:r[k] for k in view_fields} for r in rows if r['grupo']=='Não determinado'])
     sheet('Rubricas detalhadas',rows)
+    sheet('Resumo previdenciario',[r for d in a['docs'] for r in previdencia_rows(d)])
     sheet('Conferencia bases',reconciliation(a))
     sheet('Conferencia extracao',[{'arquivo':d['arquivo'],**c} for d in a['docs'] for c in d['checagens']])
     sheet('Documentos',[{k:d.get(k) for k in ['arquivo','cnpj','competencia','tipo','paginas','hash','alertas']} for d in a['docs']])
     sheet('Erros',a.get('errors',[]))
     sheet('Criterios',[{'criterio':'Versão','valor':VERSION},{'criterio':'Incidências','valor':'Sugestões por S-1010, com vigência e empresa. Tratamentos específicos permanecem pendentes.'},{'criterio':'Rating','valor':'Classificação atribuída pela equipe; não representa validação jurídica automática.'},{'criterio':'Revisão','valor':'Decisões manuais registradas por empresa, competência, tipo, código, descrição e lado.'}])
+    sheet('Situacao patronal',[{'empresa_competencia':k,'situacao':v,'suporte':a.get('regime_evidence',{}).get(k,'')} for k,v in a.get('regimes',{}).items()])
     sheet('Decisoes',[{'chave':k,**v} for k,v in a.get('decisions',{}).items()])
     b=io.BytesIO(); w.save(b); return b.getvalue()

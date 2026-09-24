@@ -44,3 +44,14 @@ Banco SQLite e PDFs preservados em `dados/`. Faça backup dessa pasta. Análises
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+
+## Fluxo simplificado — versão 0.3
+
+- **Documentos e incidência:** importar folhas e cadastro S-1010.
+- **Base do INSS empresa:** selecionar empresa, competência e folha. Ver base mensal/13º e os quatro totais previdenciários. A triagem separa possíveis acréscimos, reduções, fora da base segundo cadastro e não determinado.
+- **Relatórios Excel:** cruzamento completo por folha, grupos separados, valores selecionados, resumos previdenciários e conferências.
+
+Nenhuma rubrica é selecionada automaticamente pela lista de interesse. Selecionar uma linha não muda sua incidência nem seu grupo. Revisões manuais anteriores são preservadas. Novas seleções são salvas por documento. A reconstrução da base, o ajuste de correspondência/rating e a informação de desoneração são opcionais. Não há cálculo da alíquota de 20%.
+
+Campos fora da vigência mostram a descrição e o código encontrados apenas como referência e permanecem não determinados. Descrições divergentes e versões ambíguas não são aceitas automaticamente. A apresentação dos valores na tela usa R$ 2.530.716,30; o Excel guarda números com formato monetário e separadores conforme a configuração regional do Excel.
