@@ -7,10 +7,11 @@ import pdfplumber
 import openpyxl
 from contextlib import contextmanager
 import uuid
+from catalog_xlsx import load_workbook as load_catalog_workbook, family as catalog_sheet_family
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'dados'
-VERSION = '0.6.0'
+VERSION = '0.11.0'
 PREVIDENCIA = {
     'base_empresa_total': 'Total da base empresa',
     'previdencia_empresa_total': 'Total de previdência empresa',
@@ -170,21 +171,56 @@ def extract(name, content):
         doc['checagens'].append({'teste':'liquido','informado_centavos':t['liquido'],'extraido_centavos':calc,'diferenca_centavos':calc-t['liquido']})
     return doc
 
-def import_catalog(path_or_bytes):
-    w=openpyxl.load_workbook(path_or_bytes,read_only=True,data_only=True)
+def import_catalog(path_or_bytes, employer_override=''):
+    """Use explicit employer identity; never infer it from a filename or payroll selection."""
+    def root(value):
+        if value is None or value=='': return ''
+        if isinstance(value,float) and value.is_integer():value=int(value)
+        digits=re.sub(r'\D','',str(value))
+        if len(digits) not in (8,14):
+            raise ValueError('Identificação da empresa inválida: informe CNPJ com 14 dígitos ou raiz com 8 dígitos, incluindo zeros iniciais.')
+        return digits[:8]
+    manual=root(employer_override.strip()) if employer_override.strip() else ''
+    w=load_catalog_workbook(path_or_bytes)
     try:
-        if '00_empresa' not in w: raise ValueError('Relatório sem identificação 00_empresa.')
-        it=w['00_empresa'].iter_rows(values_only=True); headers=next(it); ident=dict(zip(headers,next(it)))
-        employer=re.sub(r'\D','',str(ident.get('cnpj_empregador','')))
-        if len(employer) not in (8,14): raise ValueError('CNPJ do relatório não identificado.')
-        sheet='apoio_s1010' if 'apoio_s1010' in w else '02_rubricas_cp'
-        it=w[sheet].iter_rows(values_only=True); hdr=next(it); result=[]
-        for row in it:
-            r=dict(zip(hdr,row))
-            if not r.get('cod_rubr'): continue
-            result.append({k:str(r.get(k) or '') for k in ['cod_rubr','ide_tab_rubr','dsc_rubr','cod_inc_cp','tp_rubr','ini_valid','fim_valid','arquivo_origem']})
-        return {'empresa_raiz':employer[:8],'rubricas':result,'fonte':sheet}
-    finally: w.close()
+        identity=set();sources=[]
+        for identity_sheet in catalog_sheet_family(w,'00_empresa'):
+            it=w[identity_sheet].iter_rows(values_only=True)
+            headers=next(it,())
+            for row in it:
+                value=dict(zip(headers,row)).get('cnpj_empregador')
+                if value not in (None,''):identity.add(root(value))
+            if identity:sources.append(identity_sheet)
+        sheets=catalog_sheet_family(w,'apoio_s1010') or catalog_sheet_family(w,'02_rubricas_cp')
+        if not sheets:
+            raise ValueError('Não foi localizada a aba de rubricas apoio_s1010 ou 02_rubricas_cp.')
+        result=[]
+        for sheet in sheets:
+            it=w[sheet].iter_rows(values_only=True);hdr=next(it,())
+            required={'cod_rubr','ide_tab_rubr','dsc_rubr','cod_inc_cp','tp_rubr','ini_valid'}
+            missing=required-set(hdr)
+            if missing:raise ValueError('Colunas obrigatórias ausentes em '+sheet+': '+', '.join(sorted(missing))+'.')
+            for row in it:
+                r=dict(zip(hdr,row))
+                if r.get('cod_rubr') in (None,''):continue
+                value=r.get('cnpj_empregador')
+                if value not in (None,''):
+                    identity.add(root(value))
+                    if sheet not in sources:sources.append(sheet)
+                result.append({k:str(r.get(k) if r.get(k) is not None else '') for k in ['cod_rubr','ide_tab_rubr','dsc_rubr','cod_inc_cp','tp_rubr','ini_valid','fim_valid','arquivo_origem']})
+        if not result:raise ValueError('O relatório não contém registros de rubricas utilizáveis.')
+        if len(identity)>1:
+            raise ValueError('O relatório contém CNPJs de empresas diferentes ou identificações conflitantes. Separe o cadastro por empresa antes de importar.')
+        identified=next(iter(identity),'')
+        if identified and manual and manual!=identified:
+            raise ValueError('O CNPJ informado manualmente diverge da empresa identificada no relatório.')
+        if not identified and not manual:
+            raise ValueError('Rubricas localizadas, mas a empresa não está identificada no relatório. Preencha o campo CNPJ da empresa do relatório e clique novamente em Ler cadastro S-1010.')
+        return {'empresa_raiz':identified or manual,'rubricas':result,'fonte':', '.join(sheets),
+                'identificacao_empresa':'Identificada no arquivo: '+', '.join(sources) if identified else 'Informada manualmente pelo usuário; identificação ausente no arquivo',
+                'identificacao_manual':not bool(identified)}
+    finally:w.close()
+
 
 def key_for(d,r):
     return '|'.join([d['cnpj'],d['competencia'],d['tipo'],r['codigo'],r['descricao'],r['lado']])
@@ -345,36 +381,87 @@ def previdencia_rows(d):
                        'pagina':item.get('pagina'),'arquivo':d['arquivo']})
     return result
 
-def export_excel(a):
+def export_audit_excel(a, include_technical=False):
     from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+    import report_layout as layout
+    # Sorted copy only: reporting cannot alter the saved document order or decisions.
+    a={**a,'docs':sorted(a['docs'],key=lambda d:(d['cnpj'],d['competencia'],d['tipo'],d['hash']))}
     w=openpyxl.Workbook(); w.remove(w.active)
     def sheet(name,rows):
+        if name not in layout.MAIN_SHEETS and not include_technical and not (name=='Erros' and rows):
+            return
         s=w.create_sheet(name)
-        if not rows: s.append(['Sem registros']); return
-        headers=list(rows[0]); s.append([h.replace('_centavos',' (R$)') for h in headers])
-        for row in rows:
+        s.sheet_view.showGridLines=False
+        s.sheet_view.zoomScale=85
+        if not rows:
+            s.append(['Sem registros neste recorte'])
+            s.column_dimensions['A'].width=44
+            return
+        headers=list(dict.fromkeys(k for row in rows for k in row))
+        labels=[layout.label(h) for h in headers]
+        if name in ('Resumo','Criterios') and 'valor' in headers:
+            labels[headers.index('valor')]='Informação'
+        if name=='Resumo previdenciario':
+            labels[headers.index('valor_centavos')]='Valor informado no PDF (R$)'
+        s.append(labels)
+        for row_index,row in enumerate(rows,2):
             vals=[]
             for h in headers:
                 value=row.get(h)
                 if h.endswith('_centavos') and value is not None: value=value/100
                 if isinstance(value,(dict,list)): value=json.dumps(value,ensure_ascii=False)
-                if isinstance(value,str) and value.startswith(('=','+','-','@')): value="'"+value
+                if isinstance(value,bool): value='Sim' if value else 'Não'
                 vals.append(value)
             s.append(vals)
-        s.freeze_panes='A2'; s.auto_filter.ref=s.dimensions
-        for cell in s[1]: cell.font=Font(bold=True,color='FFFFFF'); cell.fill=PatternFill('solid',fgColor='17324D')
+            for cell,value in zip(next(s.iter_rows(min_row=row_index,max_row=row_index,max_col=len(headers))),vals):
+                # Preserve source strings literally, including formula-looking descriptions.
+                if isinstance(value,str): cell.data_type='s'
+        s.freeze_panes='D2' if headers[:3]==['cnpj','competencia','tipo'] else 'A2'
+        s.auto_filter.ref=s.dimensions
+        s.print_title_rows='1:1'
+        s.sheet_properties.pageSetUpPr.fitToPage=True
+        s.page_setup.orientation='landscape'
+        s.page_setup.paperSize=s.PAPERSIZE_A3
+        s.page_setup.fitToWidth=0
+        s.page_setup.fitToHeight=0
+        s.row_dimensions[1].height=48
+        for cell in s[1]:
+            cell.font=Font(name='Arial',size=10,bold=True,color='FFFFFF')
+            cell.fill=PatternFill('solid',fgColor='17324D')
+            cell.alignment=Alignment(wrap_text=True,vertical='center')
         for i,h in enumerate(headers,1):
-            s.column_dimensions[openpyxl.utils.get_column_letter(i)].width=min(60,max(16,len(h)+3))
-            if h.endswith('_centavos'):
-                for col in s.iter_cols(min_col=i,max_col=i,min_row=2):
-                    for c in col: c.number_format='[$R$-416] #,##0.00'
-        if 'rating' in headers:
-            col=headers.index('rating')+1
-            for row in s.iter_rows(min_row=2):
-                c=row[col-1]
-                color={'Verde':'D9EAD3','Amarelo':'FFF2CC'}.get(c.value)
-                if color: c.fill=PatternFill('solid',fgColor=color)
+            col=openpyxl.utils.get_column_letter(i)
+            width=min(52,max(18,len(labels[i-1])*.65+3))
+            if h in ('descricao','descricao_relatorio','arquivo'): width=42
+            if h in ('criterio','premissa','motivo','pontos_de_atencao','observacao_analista','evidencia_20','criterio_cadastro','linha_base','linha_contribuicao','nota_previdencia'): width=58
+            s.column_dimensions[col].width=width
+            for cells in s.iter_cols(min_col=i,max_col=i,min_row=2):
+                for c in cells:
+                    c.font=Font(name='Arial',size=10)
+                    c.alignment=Alignment(vertical='top',wrap_text=True)
+                    if h.endswith('_centavos'): c.number_format='[$R$-416] #,##0.00;[Red]-[$R$-416] #,##0.00'
+                    elif h.endswith('_proporcao'): c.number_format='0.00%'
+                    elif isinstance(c.value,str): c.number_format='@'
+                    if h=='rating':
+                        color={'Verde':'D9EAD3','Amarelo':'FFF2CC'}.get(c.value)
+                        if color: c.fill=PatternFill('solid',fgColor=color)
+                    if h=='observacao_analista': c.fill=PatternFill('solid',fgColor='FFF2CC')
+        import math
+        for record in s.iter_rows(min_row=2):
+            height=30
+            for cell in record:
+                if isinstance(cell.value,str):
+                    width=s.column_dimensions[cell.column_letter].width
+                    lines=sum(max(1,math.ceil(len(part)/(width*.95))) for part in cell.value.split('\n'))
+                    height=max(height,lines*13+5)
+            s.row_dimensions[record[0].row].height=min(409,height)
+        # Excel tables keep filters and structured references available for deeper analysis.
+        table=Table(displayName='Dados_'+str(len(w.worksheets)),ref=s.dimensions)
+        table.tableStyleInfo=TableStyleInfo(name='TableStyleMedium2',showRowStripes=True)
+        s.add_table(table)
     rows=details(a); selected=[r for r in rows if r['selecionada']]
+    sheet('Base INSS empresa',layout.overview(a,rows))
     grouped={}
     for r in selected:
         k=(r['cnpj'],r['codigo'],r['descricao'],r['rating'],r['efeito'])
@@ -382,25 +469,66 @@ def export_excel(a):
     sheet('Resumo',[{'indicador':'Análise','valor':a['name']},{'indicador':'Filtro total previdência empresa','valor':a.get('filtro_previdencia','Todas')},{'indicador':'Situação','valor':'Preliminar: valores encontrados não equivalem a exclusão confirmada ou crédito.'},{'indicador':'Gerado em','valor':datetime.now().isoformat(timespec='seconds')},{'indicador':'PDFs processados','valor':len(a['docs'])},{'indicador':'Documentos com erro','valor':len(a.get('errors',[]))}])
     sheet('Consolidado',[dict(zip(['cnpj','codigo','descricao','rating','efeito'],k),valor_centavos=v) for k,v in sorted(grouped.items())])
     sheet('Por competencia',[{k:r[k] for k in ['cnpj','competencia','tipo','codigo','descricao','valor_centavos','efeito','rating','arquivo','pagina']} for r in selected])
-    view_fields=['cnpj','competencia','tipo','codigo','descricao','valor_centavos','grupo','base','codIncCP','descricao_relatorio','vigencia_relatorio','referencia','fonte_referencia','correspondencia','motivo','natureza','base_candidata','criterio_candidato','efeito_relatorio','efeito','selecionada','rating','situacao_patronal','arquivo','pagina']
-    sheet('Cruzamento por folha',[{k:r[k] for k in view_fields} for r in rows])
-    sheet('Possiveis acrescimos',[{k:r[k] for k in view_fields} for r in rows if r['grupo']=='Possíveis acréscimos'])
-    sheet('Reducoes da base',[{k:r[k] for k in view_fields} for r in rows if r['grupo']=='Reduções da base'])
-    sheet('Pendencias',[{k:r[k] for k in view_fields} for r in rows if r['grupo']=='Não determinado'])
+    view_fields=['cnpj','competencia','tipo','codigo','descricao','valor_centavos','grupo','base','codIncCP','descricao_relatorio','vigencia_relatorio','referencia','fonte_referencia','correspondencia','motivo','natureza','base_candidata','criterio_candidato','efeito_relatorio','efeito','selecionada','rating','situacao_patronal','justificativa','responsavel','quantidade','arquivo','pagina','documento']
+    sheet('Selecionadas',[{**{k:r.get(k) for k in view_fields},'observacao_analista':''} for r in selected])
+    sheet('Cruzamento por folha',[{k:r.get(k) for k in view_fields} for r in rows])
+    sheet('Possiveis acrescimos',[{k:r.get(k) for k in view_fields} for r in rows if r['grupo']=='Possíveis acréscimos'])
+    sheet('Reducoes da base',[{k:r.get(k) for k in view_fields} for r in rows if r['grupo']=='Reduções da base'])
+    sheet('Pendencias',[{k:r.get(k) for k in view_fields} for r in sorted(rows,key=lambda r:(r['cnpj'],r['competencia'],r['tipo'],r['documento'],-abs(r['valor_centavos']))) if r['grupo']=='Não determinado'])
     sheet('Rubricas detalhadas',rows)
-    sheet('Resumo previdenciario',[r for d in a['docs'] for r in previdencia_rows(d)])
-    sheet('Grupos base empresa',[r for d in a['docs'] for r in company_group_rows(d)])
+    sheet('Resumo previdenciario',[{**r,'documento':d['hash']} for d in a['docs'] for r in previdencia_rows(d)])
+    sheet('Grupos base empresa',[{**r,'documento':d['hash']} for d in a['docs'] for r in company_group_rows(d)])
     sheet('Referencias base empresa',[{'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],**r,'arquivo':d['arquivo']} for d in a['docs'] for r in company_summary(d)])
+    twenty_summary,twenty_evidence=twenty_composition(a,rows)
+    proportional_summary,proportional_rows=proportional_twenty(a,rows)
+    sheet('Simulacao proporcional',proportional_summary)
+    sheet('Rubricas estimadas',proportional_rows)
+    sheet('Composicao dos 20',twenty_summary)
+    sheet('Rubricas dos 20',twenty_evidence)
     sheet('Conferencia bases',reconciliation(a))
     sheet('Memoria composicao',composition_trace(a,rows))
     sheet('Indicios por quantidade',[r for d in a['docs'] for r in relationship_hints(d,rows)])
     sheet('Panorama das bases',global_overview(a['docs']))
-    sheet('Conferencia extracao',[{'arquivo':d['arquivo'],**c} for d in a['docs'] for c in d['checagens']])
+    sheet('Conferencia extracao',[{'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],**c,'arquivo':d['arquivo'],'documento':d['hash']} for d in a['docs'] for c in d['checagens']])
     sheet('Documentos',[{k:d.get(k) for k in ['arquivo','cnpj','competencia','tipo','paginas','hash','alertas']} for d in a['docs']])
     sheet('Erros',a.get('errors',[]))
     sheet('Criterios',[{'criterio':'Versão','valor':VERSION},{'criterio':'Incidências','valor':'Sugestões por S-1010, com vigência e empresa. Tratamentos específicos permanecem pendentes.'},{'criterio':'Rating','valor':'Classificação atribuída pela equipe; não representa validação jurídica automática.'},{'criterio':'Revisão','valor':'Decisões manuais registradas por empresa, competência, tipo, código, descrição e lado.'}])
-    sheet('Situacao patronal',[{'empresa_competencia':k,'situacao':v,'suporte':a.get('regime_evidence',{}).get(k,'')} for k,v in a.get('regimes',{}).items()])
-    sheet('Decisoes',[{'chave':k,**v} for k,v in a.get('decisions',{}).items()])
+    sheet('Situacao patronal',[{'empresa_competencia':k,'situacao':v,'suporte':a.get('regime_evidence',{}).get(k,'')} for k,v in a.get('regimes',{}).items() if k in {d['cnpj']+'|'+d['competencia'] for d in a['docs']}])
+    sheet('Decisoes',[{'chave':k,**v} for k,v in a.get('decisions',{}).items() if k in {r['chave'] for r in rows}])
+    # Reading order follows Base INSS empresa, with optional technical appendices last.
+    for index,name in enumerate(layout.MAIN_SHEETS):
+        w.move_sheet(name,offset=index-w.sheetnames.index(name))
+    guide=w['Criterios']
+    for key,value in [('Análise',a['name']),('Gerado em',datetime.now().isoformat(timespec='seconds')),
+                      ('Filtro total previdência empresa',a.get('filtro_previdencia','Todas')),
+                      ('PDFs no recorte',len(a['docs'])),
+                      ('Empresas no recorte',', '.join(sorted({d['cnpj'] for d in a['docs']}))),
+                      ('Competências no recorte',', '.join(sorted({d['competencia'] for d in a['docs']}))),
+                      ('Tipos no recorte',', '.join(sorted({d['tipo'] for d in a['docs']}))),
+                      ('Totais', 'Não somar base total com suas parcelas de 20% e contribuição zerada. Não somar hipóteses com estimativas.'),
+                      ('Ausência e zero','Célula monetária vazia não equivale a zero. Consulte situação e motivo.'),
+                      ('Incidência histórica','Cadastro de outra época gera projeção identificada; não confirma incidência na competência.'),
+                      ('Rating','Verde: pacificado pela avaliação da equipe. Amarelo: sob discussão. A cor não comprova participação na base.')]:
+        guide.append([key,value])
+        if isinstance(value,str):guide.cell(guide.max_row,2).data_type='s'
+    for name,note in layout.GUIDE.items():
+        guide.append([name,note])
+        guide.cell(guide.max_row,1).hyperlink='#'+"'"+name+"'!A1"
+        guide.cell(guide.max_row,1).style='Hyperlink'
+    guide.column_dimensions['A'].width=40;guide.column_dimensions['B'].width=110
+    for row in guide.iter_rows(min_row=2):
+        for cell in row: cell.alignment=Alignment(wrap_text=True,vertical='top')
+        guide.row_dimensions[row[0].row].height=44
+    guide.auto_filter.ref=guide.dimensions
+    for table in guide.tables.values():
+        table.ref=guide.dimensions
+        if table.autoFilter:table.autoFilter.ref=guide.dimensions
+    for name in ('Base INSS empresa','Composicao dos 20','Rubricas dos 20'):
+        w[name].sheet_properties.tabColor='17324D'
+    for name in ('Simulacao proporcional','Rubricas estimadas'):
+        w[name].sheet_properties.tabColor='B07928'
+    w['Criterios'].sheet_properties.tabColor='808080'
+    w.active=0
     b=io.BytesIO(); w.save(b); return b.getvalue()
 
 
@@ -572,3 +700,111 @@ def global_overview(docs):
                            'mudanca_no_recorte':bool(old and old!=s['situacao_grupos']),'arquivo':d['arquivo']})
             previous[key]=s['situacao_grupos']
     return result
+
+
+def twenty_composition(a,rows=None):
+    """Project only when the PDF scope supports it; never prorate mixed groups."""
+    rows=details(a) if rows is None else rows
+    trace=composition_trace(a,rows); summaries=[]; evidence=[]
+    for d in a['docs']:
+        parts=[r for r in trace if r['documento']==d['hash']]
+        hints=relationship_hints(d,rows)
+        for ref in company_summary(d):
+            target=ref['base'];amount=ref['base_20_centavos']
+            selected=[];projection=None;residual=None
+            candidate_total=None;candidate_residual=None;candidate_count=0
+            status='Referência indisponível'
+            reason=ref['observacao']
+            if amount is None:
+                if ref['situacao_grupos']=='Vínculo entre base e contribuição a conferir':
+                    status='Referência suspensa por inconsistência do PDF'
+                    reason='Quantidades ou valores não sustentam a associação entre base e contribuição. Confira as linhas originais; nenhuma foi reordenada.'
+                else:
+                    status='Base não localizada neste bloco'
+                    reason='O documento não apresenta uma base utilizável dos 20% para '+target+'. Não confundir ausência com valor zero.'
+            elif amount==0:
+                status='Sem base positiva dos 20% nas linhas do PDF'
+                reason='Não há composição dos 20% a projetar neste bloco. Isso não comprova desoneração.'
+            elif ref['situacao_grupos']=='Somente linhas com 20%' and ref['total_informado_centavos']==amount:
+                status='Projeção do cadastro para o grupo de 20%'
+                reason='Toda a base deste bloco aparece nas linhas de 20%. Projeção parcial pelo cadastro; pendências e candidatas conflitantes não entram. Não confirma incidência histórica.'
+                selected=[{**r,'evidencia_20':'Base total do bloco coincide com a base das linhas de 20%.','quantidade':None} for r in parts if r['base']==target and r['papel'] in ('Acréscimo indicado','Redução indicada')]
+                projection=sum(r['parcela_centavos'] for r in selected);residual=amount-projection
+                candidates=[r for r in parts if r['base']==target and r['papel']=='Candidata condicionada']
+                if candidates:
+                    candidate_count=len(candidates)
+                    candidate_total=sum(r['parcela_centavos'] for r in candidates)
+                    candidate_residual=residual-candidate_total
+                    selected.extend({**r,'papel':'Candidata conflitante — fora da projeção','parcela_candidata_centavos':r['parcela_centavos'],
+                                     'parcela_centavos':None,'evidencia_20':'Base total coincide com as linhas de 20%; rubrica tem identidade compatível, mas incidências conflitantes. Valor somente no cenário condicionado.','quantidade':None} for r in candidates)
+                    status='Composição provável com conflito cadastral' if candidate_residual==0 else 'Projeção parcial com candidatas conflitantes'
+                    reason='As candidatas não entram na parcela projetada. O cenário separado inclui todas as candidatas compatíveis deste bloco, sem escolher combinações para fechar a conta. Mesmo com saldo zero, a incidência permanece pendente.'
+
+            else:
+                status='Grupos mistos — distribuição não identificada'
+                reason='Os valores integrais das rubricas não são atribuídos aos 20%. Sem rateio proporcional ou uso das seleções como prova.'
+                relevant=[h for h in hints if h['base']==target]
+                groups=[g for g in validated_company_groups(d) if g['base']==target and g['grupo']=='Alíquota de 20%' and g['base_centavos']>0]
+                unique=len(relevant)==1 and len(groups)==1 and relevant[0]['valor_centavos']==amount
+                projection=amount if unique else 0;residual=amount-projection
+                if unique:
+                    status='Hipótese por valor e quantidade'
+                    reason='Uma rubrica coincide com o valor e a quantidade do único grupo de 20%. Saldo zero condicionado a essa hipótese; vínculo individual não comprovado.'
+                for h in relevant:
+                    selected.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],'documento':d['hash'],
+                                     'base':target,'codigo':h['codigo'],'descricao':h['descricao'],'papel':'Indício em grupo misto',
+                                     'valor_centavos':h['valor_centavos'],'parcela_centavos':h['valor_centavos'] if unique else None,
+                                     'referencia':'Coincidência no PDF','criterio':h['indicio'],'pagina':h['pagina_rubrica'],
+                                     'arquivo':d['arquivo'],'evidencia_20':reason,'quantidade':h['quantidade']})
+            summaries.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],'documento':d['hash'],
+                              'base':target,'base_20_centavos':amount,'parcela_projetada_centavos':projection,
+                              'saldo_nao_identificado_centavos':residual,'quantidade_candidatas':candidate_count,
+                              'candidatas_conflitantes_centavos':candidate_total,'saldo_condicionado_centavos':candidate_residual,'situacao':status,'criterio':reason,'arquivo':d['arquivo']})
+            for r in selected:
+                evidence.append({k:r.get(k) for k in ['cnpj','competencia','tipo','documento','base','codigo','descricao','papel','valor_centavos','parcela_centavos','parcela_candidata_centavos','quantidade','referencia','criterio','evidencia_20','pagina','arquivo']})
+    return summaries,evidence
+
+
+def proportional_twenty(a,rows=None):
+    """Independent screening scenario, never an allocation or an adopted decision."""
+    from decimal import ROUND_HALF_UP
+    rows=details(a) if rows is None else rows
+    trace=composition_trace(a,rows); summaries=[]; estimates=[]
+    premise='Estimativa a confirmar na folha: supõe distribuição proporcional das rubricas entre os grupos. Percentual é proporção monetária, não confiança. Não somar à projeção ou aos indícios do bloco principal.'
+    for d in a['docs']:
+        for ref in company_summary(d):
+            total=ref['total_informado_centavos'];target=ref['base_20_centavos'];base=ref['base']
+            eligible=ref['situacao_grupos']=='Grupos mistos' and total is not None and target is not None and 0<target<total
+            if not eligible:continue
+            factor=Decimal(target)/Decimal(total)
+            items=[r for r in trace if r['documento']==d['hash'] and r['base']==base and r['papel'] in ('Acréscimo indicado','Redução indicada','Candidata condicionada')]
+            additions=reductions=candidates=0;candidate_count=0
+            for r in items:
+                value=int((Decimal(r['parcela_centavos'])*factor).quantize(Decimal(1),rounding=ROUND_HALF_UP))
+                conditional=r['papel']=='Candidata condicionada'
+                if conditional:candidates+=value;candidate_count+=1
+                elif r['papel']=='Acréscimo indicado':additions+=value
+                else:reductions-=value
+                estimates.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],'documento':d['hash'],
+                                  'base':base,'codigo':r['codigo'],'descricao':r['descricao'],'papel':r['papel'],
+                                  'cenario':'Adicional condicionado a conflito' if conditional else 'Estimativa pelo cadastro',
+                                  'valor_integral_centavos':r['valor_centavos'],'parcela_integral_centavos':r['parcela_centavos'],
+                                  'fator_proporcao':float(factor),'estimativa_centavos':value,
+                                  'base_total_pdf_centavos':total,'base_20_pdf_centavos':target,
+                                  'referencia':r['referencia'],'criterio_cadastro':r['criterio'],'premissa':premise,
+                                  'pagina':r['pagina'],'arquivo':d['arquivo']})
+            projected=additions-reductions
+            summaries.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],'documento':d['hash'],'base':base,
+                              'base_total_pdf_centavos':total,'base_20_pdf_centavos':target,'fator_proporcao':float(factor),
+                              'acrescimos_estimados_centavos':additions,'reducoes_estimadas_centavos':reductions,
+                              'saldo_estimado_centavos':projected,'diferenca_para_base_20_centavos':target-projected,
+                              'quantidade_parcelas':len(items)-candidate_count,'quantidade_candidatas':candidate_count,
+                              'candidatas_estimadas_centavos':candidates if candidate_count else None,
+                              'diferenca_com_candidatas_centavos':target-projected-candidates if candidate_count else None,
+                              'premissa':premise,'arquivo':d['arquivo']})
+    return summaries,estimates
+
+
+def export_excel(a):
+    from simple_report import export_excel as export_simple
+    return export_simple(a)

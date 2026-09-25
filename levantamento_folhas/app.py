@@ -103,14 +103,17 @@ with tabs[0]:
     st.subheader('Relatório de incidência')
     catalog_path=st.text_input('Caminho do relatório de incidência XLSX')
     catalog_file=st.file_uploader('Ou envie o relatório de incidência',type=['xlsx'])
+    catalog_employer=st.text_input('CNPJ da empresa do relatório — se não identificado no arquivo',help='Informe o CNPJ completo ou a raiz de 8 dígitos. Use apenas quando souber a qual empresa pertence este cadastro. O vínculo manual fica registrado.')
     if st.button('Ler cadastro S-1010'):
         try:
             with st.spinner('Lendo o cadastro de incidência…'):
-                a['catalog']=core.import_catalog(io.BytesIO(catalog_file.getvalue()) if catalog_file else catalog_path.strip().strip('"'))
+                a['catalog']=core.import_catalog(io.BytesIO(catalog_file.getvalue()) if catalog_file else catalog_path.strip().strip('"'),employer_override=catalog_employer)
             core.save(a,'Importação do relatório de incidência')
             st.success(f"{len(a['catalog']['rubricas'])} registros históricos importados.")
         except Exception as e: st.error(str(e))
-    if a.get('catalog'): st.caption('CNPJ raiz do relatório: '+a['catalog']['empresa_raiz'])
+    if a.get('catalog'):
+        st.caption('CNPJ raiz do relatório: '+a['catalog']['empresa_raiz'])
+        st.caption(a['catalog'].get('identificacao_empresa','Identificação importada do relatório.'))
 
 with st.sidebar:
     st.divider()
@@ -162,6 +165,53 @@ with tabs[1]:
         if d['alertas']: st.warning(' | '.join(d['alertas']))
         st.subheader('Participação indicada pelo relatório de incidência')
         st.caption('Triagem automática: indicações do período e projeções por cadastro de outra época aparecem nos mesmos grupos, identificadas na coluna Referência. Não comprovam inclusão na base. A seleção serve apenas para destacar valores no Excel.')
+        with st.container(border=True):
+            st.markdown('**Composição provável da base vinculada aos 20%**')
+            twenty_summary,twenty_evidence=core.twenty_composition({**a,'docs':[d]},current)
+            twenty_scope=st.radio('Base dos 20% a analisar',['Mensal','13º'],index=1 if d['tipo']=='13º final' else 0,horizontal=True,key=f'twenty_scope_{doc_id}')
+            t=next(r for r in twenty_summary if r['base']==twenty_scope)
+            m1,m2,m3=st.columns(3)
+            m1.metric('Base vinculada aos 20%',core.brl(t['base_20_centavos']))
+            m2.metric('Parcela projetada / hipótese',core.brl(t['parcela_projetada_centavos']))
+            m3.metric('Saldo não identificado',core.brl(t['saldo_nao_identificado_centavos']))
+            st.write(t['situacao'])
+            st.caption(t['criterio'])
+            if t['quantidade_candidatas']:
+                st.warning('Há evidência de composição, mas a incidência das candidatas permanece conflitante. Elas estão fora da parcela projetada acima.')
+                c1,c2=st.columns(2)
+                c1.metric('Candidatas com conflito',core.brl(t['candidatas_conflitantes_centavos']))
+                c2.metric('Saldo se todas forem validadas',core.brl(t['saldo_condicionado_centavos']))
+            if t['saldo_nao_identificado_centavos'] is not None and t['saldo_nao_identificado_centavos']<0:
+                st.warning('A projeção excede a base dos 20%. O saldo negativo indica divergência, não crédito ou exclusão.')
+            shown=[r for r in twenty_evidence if r['base']==twenty_scope]
+            if shown:
+                st.dataframe(display([{'Código':r['codigo'],'Rubrica':r['descricao'],'Papel':r['papel'],
+                                      'Valor da rubrica_centavos':r['valor_centavos'],'Parcela na hipótese_centavos':r['parcela_centavos'],
+                                      'Candidata fora da projeção_centavos':r['parcela_candidata_centavos'],'Referência':r['referencia'],'Evidência':r['evidencia_20'],'Página':r['pagina']} for r in shown]),hide_index=True,width='stretch')
+            else:
+                st.info(t['criterio'] if t['base_20_centavos'] in (None,0) or t['situacao'].startswith('Grupos mistos') else 'Existe base dos 20%, mas o cadastro ainda não sustenta parcelas neste bloco. Consulte as correspondências pendentes abaixo.')
+            st.caption('Mensal e 13º são analisados separadamente. Fechamento aritmético ou coincidência de quantidade não confirma a participação individual.')
+            simulation,estimated_rows=core.proportional_twenty({**a,'docs':[d]},current)
+            sim=next((r for r in simulation if r['base']==twenty_scope),None)
+            if sim:
+                with st.expander('Estimativa proporcional dos 20% — a confirmar na folha',expanded=True):
+                    st.warning(sim['premissa'])
+                    percentage=f"{sim['fator_proporcao']*100:.2f}".replace('.',',')+'%'
+                    st.caption(f"Proporção: {core.brl(sim['base_20_pdf_centavos'])} ÷ {core.brl(sim['base_total_pdf_centavos'])} = {percentage}. O cálculo usa a proporção completa, sem arredondar o fator. Cada parcela é arredondada a centavos.")
+                    p1,p2,p3=st.columns(3)
+                    p1.metric('Acréscimos estimados',core.brl(sim['acrescimos_estimados_centavos']))
+                    p2.metric('Reduções estimadas',core.brl(sim['reducoes_estimadas_centavos']))
+                    p3.metric('Saldo estimado',core.brl(sim['saldo_estimado_centavos']))
+                    st.metric('Base dos 20% menos saldo estimado',core.brl(sim['diferenca_para_base_20_centavos']))
+                    st.caption('A diferença permanece visível: não ajustamos as rubricas para fechar o total. Valor negativo indica que a estimativa excede a base. Rubricas sem correspondência suficiente não recebem valor estimado.')
+                    estimated=[r for r in estimated_rows if r['base']==twenty_scope]
+                    fields={'codigo':'Código','descricao':'Rubrica','papel':'Papel','valor_integral_centavos':'Valor integral_centavos','estimativa_centavos':'Valor estimado com sinal_centavos','referencia':'Referência'}
+                    st.dataframe(display([{v:r[k] for k,v in fields.items()} for r in estimated if r['cenario']=='Estimativa pelo cadastro']),hide_index=True,width='stretch')
+                    if sim['quantidade_candidatas']:
+                        st.caption('Cenário adicional: candidatas com incidência conflitante, fora do saldo estimado acima.')
+                        st.dataframe(display([{v:r[k] for k,v in fields.items()} for r in estimated if r['cenario']=='Adicional condicionado a conflito']),hide_index=True,width='stretch')
+                        st.metric('Diferença se todas as candidatas forem validadas',core.brl(sim['diferenca_com_candidatas_centavos']))
+
         groups=['Possíveis acréscimos','Reduções da base','Fora da base segundo cadastro','Não determinado']
         default=0 if any(r['grupo']==groups[0] for r in current) else 3
         group=st.radio('Mostrar',groups,index=default,horizontal=True,key=f'group_{doc_id}')
@@ -248,21 +298,34 @@ with tabs[1]:
             st.download_button('Baixar PDF original',Path(d['path']).read_bytes(),file_name=d['arquivo'].split(' :: ')[-1],mime='application/pdf')
 
 with tabs[2]:
-    st.subheader('Relatório de composição e rubricas selecionadas')
-    st.caption('Todos os relatórios são Excel. Os valores permanecem numéricos. Sem cálculo de contribuição, crédito ou Selic.')
+    st.subheader('Relatório por competência')
+    st.caption('Três abas: Composição dos 20%, Composição da base total e Simulação proporcional. O consolidado e o relatório de um mês usam o mesmo padrão, com hipóteses e estimativas separadas.')
     if filtered_docs:
-        companies=st.multiselect('Empresas do relatório',sorted({d['cnpj'] for d in filtered_docs}),default=sorted({d['cnpj'] for d in filtered_docs}))
-        periods=st.multiselect('Competências do relatório',sorted({d['competencia'] for d in filtered_docs}),default=sorted({d['competencia'] for d in filtered_docs}))
-        kinds=st.multiselect('Tipos de folha',sorted({d['tipo'] for d in filtered_docs}),default=sorted({d['tipo'] for d in filtered_docs}))
-        export_a={**a,'versao_relatorio':core.VERSION,'filtro_previdencia':previdencia_filter,'docs':[d for d in filtered_docs if d['cnpj'] in companies and d['competencia'] in periods and d['tipo'] in kinds]}
-        selected_rows=[r for r in core.details(export_a) if r['selecionada']]
-        st.dataframe(display([{k:r[k] for k in ['cnpj','competencia','tipo','codigo','descricao','valor_centavos','grupo','efeito','rating','arquivo','pagina']} for r in selected_rows]),hide_index=True)
-        if not selected_rows: st.info('Nenhuma seleção manual neste recorte. O Excel ainda pode ser gerado com o cruzamento completo e seus grupos.')
-        if st.button('Preparar relatório Excel',type='primary',disabled=not export_a['docs']):
-            st.session_state.excel=core.export_excel(export_a)
-            st.session_state.excel_signature=json.dumps(export_a,sort_keys=True)
-        if st.session_state.get('excel_signature')==json.dumps(export_a,sort_keys=True):
-            st.download_button('Baixar levantamento.xlsx',st.session_state.excel,'levantamento.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
+        import simple_report
+        mode=st.radio('Modelo do relatório',['Consolidado','Por competência'],horizontal=True,key='report_mode')
+        companies=st.multiselect('Empresas do relatório',sorted({d['cnpj'] for d in filtered_docs}),default=sorted({d['cnpj'] for d in filtered_docs}),key='report_companies')
+        available=sorted({d['competencia'] for d in filtered_docs if d['cnpj'] in companies})
+        if mode=='Consolidado':
+            periods=st.multiselect('Competências do relatório',available,default=available,key='report_periods')
+        else:
+            period=st.selectbox('Competência do relatório',available,index=len(available)-1 if available else None,key='report_single_period')
+            periods=[period] if period else []
+        kinds=st.multiselect('Tipos de folha',sorted({d['tipo'] for d in filtered_docs}),default=sorted({d['tipo'] for d in filtered_docs}),key='report_kinds')
+        docs=simple_report.select_documents(filtered_docs,companies,periods,kinds)
+        export_a={**a,'versao_relatorio':core.VERSION,'modelo_relatorio':mode,'filtro_previdencia':previdencia_filter,'docs':docs}
+        st.caption(f"Recorte: {len(docs)} folha(s), {len({d['competencia'] for d in docs})} competência(s). Filtro de previdência empresa: {previdencia_filter}. Os filtros do relatório são independentes do mês aberto na aba Base INSS empresa.")
+        st.dataframe(display([{'Competência':d['competencia'],'CNPJ':d['cnpj'],'Tipo de folha':d['tipo'],
+            'Base mensal_centavos':d.get('bases',{}).get('mensal'),'Base de 13º_centavos':d.get('bases',{}).get('13'),
+            'Arquivo':d['arquivo'].split(' :: ')[-1]} for d in docs]),hide_index=True,width='stretch')
+        with st.expander('Como ler o relatório'):
+            st.write('Cada competência é apresentada em blocos por folha, com mensal e 13º separados. A primeira aba reúne a base dos 20%, as rubricas da hipótese e a diferença. Reduções e candidatas têm seções próprias. A segunda mostra a composição da base total. A terceira reúne exclusivamente as simulações proporcionais para grupos mistos, com acréscimos, reduções e candidatas separados.')
+            st.caption('Não some hipóteses com estimativas. O Excel é um retrato da análise: alterações não recalculam as classificações nem retornam ao aplicativo.')
+        if st.button('Preparar relatório Excel',type='primary',disabled=not docs):
+            with st.spinner('Organizando competências e rubricas no Excel…'):
+                st.session_state.excel=core.export_excel(export_a)
+                st.session_state.excel_signature=json.dumps(export_a,sort_keys=True)
+        if docs and st.session_state.get('excel_signature')==json.dumps(export_a,sort_keys=True):
+            filename='composicao_inss_'+('consolidado' if mode=='Consolidado' else periods[0])+'.xlsx'
+            st.download_button('Baixar '+filename,st.session_state.excel,filename,'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     else:
         st.info('Nenhuma folha no filtro atual. Altere o filtro para gerar o Excel.')

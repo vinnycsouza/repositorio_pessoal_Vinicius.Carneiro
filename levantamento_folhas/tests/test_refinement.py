@@ -124,12 +124,12 @@ class RefinementTests(unittest.TestCase):
 
     def test_excel_preserves_raw_values_and_withholds_unreliable_reference(self):
         self.bad_groups();self.add('0290','13 SALARIO',97074)
-        w=openpyxl.load_workbook(io.BytesIO(core.export_excel(self.a)))
-        s=w['Referencias base empresa'];heads=[x.value for x in s[1]]
-        self.assertIsNone(s.cell(3,heads.index('base_20 (R$)')+1).value)
+        w=openpyxl.load_workbook(io.BytesIO(core.export_audit_excel(self.a)))
+        s=w['Composicao dos 20'];heads=[x.value for x in s[1]]
+        self.assertIsNone(s.cell(3,heads.index('Base vinculada aos 20% (R$)')+1).value)
         self.assertIn('Memoria composicao',w.sheetnames)
         s=w['Grupos base empresa'];heads=[x.value for x in s[1]]
-        self.assertEqual(s.cell(2,heads.index('base (R$)')+1).value,47)
+        self.assertEqual(s.cell(2,heads.index('Base do grupo (R$)')+1).value,47)
 
 
 if __name__=='__main__':unittest.main()

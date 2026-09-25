@@ -29,10 +29,10 @@ class CoreTests(unittest.TestCase):
         self.cat['rubricas'].append({**self.cat['rubricas'][0],'cod_inc_cp':'00'})
         self.assertEqual(core.details(self.a)[0]['efeito'],'Pendente')
     def test_excel_numeric_and_identifiers(self):
-        b=core.export_excel(self.a); w=openpyxl.load_workbook(io.BytesIO(b),data_only=False)
-        s=w['Rubricas detalhadas']; heads=[c.value for c in s[1]]
-        self.assertEqual(s.cell(2,heads.index('codigo')+1).value,'0001')
-        self.assertEqual(s.cell(2,heads.index('valor (R$)')+1).value,1000)
+        b=core.export_audit_excel(self.a); w=openpyxl.load_workbook(io.BytesIO(b),data_only=False)
+        s=w['Cruzamento por folha']; heads=[c.value for c in s[1]]
+        self.assertEqual(s.cell(2,heads.index('Código')+1).value,'0001')
+        self.assertEqual(s.cell(2,heads.index('Valor integral da rubrica (R$)')+1).value,1000)
         self.assertIn('Conferencia bases',w.sheetnames)
     def test_zip_paths_are_not_written(self):
         b=io.BytesIO()
@@ -46,7 +46,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(rows),4)
         self.assertIsNone(rows[0]['valor_centavos'])
         self.assertEqual(rows[1]['valor_centavos'],0)
-        w=openpyxl.load_workbook(io.BytesIO(core.export_excel(self.a)))
+        w=openpyxl.load_workbook(io.BytesIO(core.export_audit_excel(self.a)))
         s=w['Resumo previdenciario']
         self.assertIsNone(s['E2'].value)
         self.assertEqual(s['E3'].value,0)
@@ -77,13 +77,14 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(core.brl(-30000),'R$ -300,00')
         self.assertEqual(core.brl(0),'R$ 0,00')
         self.assertEqual(core.brl(None),'Não informado')
-        w=openpyxl.load_workbook(io.BytesIO(core.export_excel(self.a)))
+        w=openpyxl.load_workbook(io.BytesIO(core.export_audit_excel(self.a)))
         s=w['Cruzamento por folha']; headings=[c.value for c in s[1]]
-        cell=s.cell(2,headings.index('valor (R$)')+1)
+        cell=s.cell(2,headings.index('Valor integral da rubrica (R$)')+1)
         self.assertEqual(cell.data_type,'n')
         self.assertIn('R$',cell.number_format)
-        self.assertEqual(w['Possiveis acrescimos'].max_row,2)
-        self.assertEqual(w['Reducoes da base'].max_row,2)
+        self.assertEqual(s.max_row,3)
+        groups=[s.cell(i,headings.index('Grupo')+1).value for i in (2,3)]
+        self.assertEqual(groups,['Possíveis acréscimos','Reduções da base'])
 
     def test_previdencia_filter_distinguishes_missing_zero_positive(self):
         docs=[{'previdencia':{'previdencia_empresa_total':{'valor_centavos':v}}} for v in [None,0,123,-1]]+[{}]

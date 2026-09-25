@@ -79,3 +79,33 @@ A conferência da composição detalha acréscimos, reduções, parcela explicad
 Bases e contribuições são conferidas sem reordenar linhas: quantidades divergentes ou diferença acima de um centavo por quantidade suspendem os totais de distribuição daquele bloco mensal/13º. Esse limite é apenas triagem aritmética, não regra fiscal ou prova de arredondamento. Os valores originais permanecem no detalhamento; diferenças pequenas recebem ressalva. Validar a coerência da linha não identifica trabalhadores nem comprova recolhimento.
 
 Esses cálculos são derivados em consulta, inclusive para análises antigas, sem reimportar PDFs ou alterar seleções. Excel inclui Memoria composicao, Indicios por quantidade e Panorama das bases, além de validações dos grupos. Nenhum relatório adicional é gerado automaticamente.
+
+
+### Versão 0.7.0 — participação na base dos 20%
+Bloco independente dentro de Participação indicada pelo relatório de incidência, com mensal/13º, base de referência, parcela projetada ou hipótese e saldo não identificado. Quando todo o bloco coerente pertence às linhas de 20%, utiliza a projeção assinada do cadastro. Nos grupos mistos não distribui valores integrais nem faz rateio: apresenta indícios de igualdade de valor e quantidade. Somente um indício único para um único grupo de 20%, cobrindo exatamente sua base, entra em hipótese expressamente condicionada. Indícios concorrentes não são somados. Referências inconsistentes e ausentes ficam indisponíveis; linhas sem base positiva dos 20% não recebem projeção. O Excel inclui Composicao dos 20 e Rubricas dos 20. Seleções manuais não comprovam atribuição a grupos.
+
+
+### Versão 0.7.1 — candidatas com conflito no bloco dos 20%
+Quando toda a base coerente do bloco corresponde às linhas de 20%, a consulta mostra candidatas conflitantes em cenário separado: seu valor não entra na parcela projetada, e o saldo condicionado considera todas as candidatas. Fechamento não confirma incidência nem altera seleção. Em grupos mistos não se atribui a candidata integralmente aos 20%. Mensagens distinguem referência suspensa, base não localizada, contribuição zerada, distribuição não identificada e falta de correspondência. Campos também seguem para o Excel.
+
+
+### Versão 0.9.0 — Excel acompanha Base INSS empresa
+O relatório principal começa com uma linha por PDF e segue para composição dos 20%, rubricas de suporte e simulação proporcional independente. Cruzamento por folha contém os quatro grupos com filtros, sem depender de seleção. Selecionadas preserva grupo, rating, base e justificativa e oferece observação livre no Excel. Conferências e origem completam a análise. Os consolidados e abas técnicas anteriores são opcionais.
+
+Cabeçalhos legíveis, tabelas Excel, colunas identificadoras congeladas, valores numéricos e IDs de documento permitem aprofundar a análise sem perder a origem. A prévia da exportação mostra o recorte próprio do relatório. Critérios registra empresas, competências, tipos, filtro, versão e links internos. O arquivo é um retrato da análise, sem recálculo nem importação de revisões feitas no Excel. Nenhuma classificação, seleção ou análise salva é modificada pela exportação.
+
+
+### Versão 0.10.0 — relatório simples por competência
+O download passa a ter somente Composição dos 20% e Composição da base total. Consolidado e Por competência usam o mesmo layout em blocos cronológicos por empresa, documento, tipo de folha e mensal/13º. Bases, rubricas, critérios e diferenças ficam juntos. Hipóteses, candidatas e estimativas independentes têm seções separadas. Totais previdenciários aparecem uma vez por documento na aba de apoio; pendências sem atribuição ficam fora das somas. O relatório respeita o filtro previdenciário e os filtros próprios de exportação, sem alterar análises salvas.
+
+
+### Versão 0.10.1 — cadastro sem 00_empresa
+A identificação pode vir de 00_empresa ou da coluna cnpj_empregador das rubricas. Quando ausente, o usuário informa explicitamente o CNPJ ou raiz no formulário. O vínculo manual fica registrado e aparece no relatório simples. Não se deduz empresa pelo nome do arquivo ou pela folha aberta. Empresas conflitantes são rejeitadas e o bloqueio de cruzamento com outro CNPJ é preservado.
+
+
+### Versão 0.10.2 — abas divididas e arquivos grandes
+Reconhece todas as partes numeradas de 00_empresa, apoio_s1010 e 02_rubricas_cp. Valida a raiz de todos os registros de identificação, incluindo conflitos nas últimas partes. Prioriza o histórico apoio_s1010 sobre o resumo 02_rubricas_cp. A leitura seletiva do XLSX não carrega movimentos nem todos os textos compartilhados em memória. Mantém suporte a arquivos sem identificação mediante vínculo manual explícito.
+
+
+### Versão 0.11.0 — simulação independente
+Simulação proporcional passa a uma terceira aba. A composição dos 20% mantém apenas as hipóteses e evidências, com reduções e candidatas em seções próprias. A simulação continua disponível para grupos mistos válidos; quando existe indício específico por valor e quantidade, a aba explica que o rateio é uma alternativa. Não muda os cálculos nem as decisões. Cabeçalhos monetários identificam hipótese, estimativa ou candidata, e o período do recorte fica compacto. Consolidado e competência individual usam os mesmos blocos.
