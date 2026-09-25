@@ -16,9 +16,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(c['reconstruida_centavos'],90000)
         self.assertEqual(c['diferenca_centavos'],0)
         self.assertEqual(c['estado'],'Hipótese com sugestões')
-    def test_old_period_is_pending(self):
+    def test_old_period_is_projected(self):
         self.d['competencia']='2012-08'
-        self.assertEqual(core.details(self.a)[0]['efeito'],'Pendente')
+        self.assertEqual(core.details(self.a)[0]['efeito'],'Acrescenta (sugestão)')
     def test_other_company_is_pending(self):
         self.d['cnpj']='08.362.490/0001-88'
         self.assertEqual(core.details(self.a)[0]['efeito'],'Pendente')
@@ -56,13 +56,13 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(all(not r['selecionada'] for r in rows))
         self.assertEqual(rows[1]['grupo'],'Reduções da base')
 
-    def test_historical_reference_is_visible_but_not_applied(self):
+    def test_historical_reference_projects_with_explicit_label(self):
         self.d['competencia']='2012-08'
         row=core.details(self.a)[0]
         self.assertEqual(row['codIncCP'],'11')
         self.assertEqual(row['descricao_relatorio'],'SALARIO')
-        self.assertEqual(row['correspondencia'],'Sem vigência compatível')
-        self.assertEqual(row['grupo'],'Não determinado')
+        self.assertEqual(row['referencia'],'Projeção pelo cadastro disponível')
+        self.assertEqual(row['grupo'],'Possíveis acréscimos')
 
     def test_selection_does_not_change_effect(self):
         row=core.details(self.a)[1]
@@ -85,9 +85,63 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(w['Possiveis acrescimos'].max_row,2)
         self.assertEqual(w['Reducoes da base'].max_row,2)
 
+    def test_previdencia_filter_distinguishes_missing_zero_positive(self):
+        docs=[{'previdencia':{'previdencia_empresa_total':{'valor_centavos':v}}} for v in [None,0,123,-1]]+[{}]
+        self.assertEqual(len(core.filter_previdencia(docs,'Todas')),5)
+        self.assertEqual(len(core.filter_previdencia(docs,'Não localizado')),2)
+        self.assertEqual(len(core.filter_previdencia(docs,'Igual a zero')),1)
+        self.assertEqual(len(core.filter_previdencia(docs,'Maior que zero')),1)
+        self.assertEqual(len(core.filter_previdencia(docs,'Menor que zero')),1)
+        self.assertEqual(len(docs),5)
+
+    def test_historical_conflict_prevents_projection(self):
+        self.d['competencia']='2012-08'
+        self.cat['rubricas'].append({**self.cat['rubricas'][0],'ini_valid':'2024-01','cod_inc_cp':'00'})
+        row=core.details(self.a)[0]
+        self.assertEqual(row['grupo'],'Não determinado')
+        self.assertEqual(row['correspondencia'],'Conflito no histórico')
+
+    def test_nearest_historical_reference_is_selected(self):
+        self.d['competencia']='2012-08'
+        self.cat['rubricas'].append({**self.cat['rubricas'][0],'ini_valid':'2024-01'})
+        row=core.details(self.a)[0]
+        self.assertTrue(row['vigencia_relatorio'].startswith('2018-07'))
+        self.assertEqual(row['efeito'],'Acrescenta (sugestão)')
+
+    def test_description_mismatch_does_not_project(self):
+        self.d['competencia']='2012-08';self.d['rubricas'][0]['descricao']='BONUS'
+        self.assertEqual(core.details(self.a)[0]['grupo'],'Não determinado')
+
     def test_missing_base_is_not_zero(self):
         self.d['bases']={}
         c=core.reconciliation(self.a)[0]
         self.assertIsNone(c['informada_centavos']); self.assertIsNone(c['diferenca_centavos'])
+
+
+class GroupTests(unittest.TestCase):
+    def parse(self,right):
+        from unittest.mock import MagicMock,patch
+        words=[]
+        for offset,text in [(10,'Base empresa 32 6.557,74'),(310,right)]:
+            for i,part in enumerate(text.split()): words.append({'text':part,'x0':offset+i*20,'top':100})
+        page=MagicMock();page.width=600;page.extract_words.return_value=words
+        pdf=MagicMock();pdf.pages=[page]
+        with patch.object(core.pdfplumber,'open') as op:
+            op.return_value.__enter__.return_value=pdf
+            return core.extract_company_groups(b'')[0]
+    def test_zero_is_explicit(self):
+        r=self.parse('Valor da previdência empresa 0 0,00')
+        self.assertEqual(r['grupo'],'Contribuição zerada')
+        self.assertEqual(r['quantidade_base'],32)
+        self.assertEqual(r['contribuicao_centavos'],0)
+    def test_missing_is_not_zero(self):
+        r=self.parse('')
+        self.assertEqual(r['grupo'],'Não determinado')
+        self.assertIsNone(r['contribuicao_centavos'])
+    def test_twenty_and_other_rates(self):
+        self.assertEqual(self.parse('Valor da previdência empresa 32 20% 1.311,55')['grupo'],'Alíquota de 20%')
+        self.assertEqual(self.parse('Valor da previdência empresa 32 10% 655,77')['grupo'],'Outra alíquota')
+    def test_summary_missing_is_not_zero(self):
+        self.assertIsNone(core.company_summary({'bases':{}})[0]['base_20_centavos'])
 
 if __name__=='__main__': unittest.main()

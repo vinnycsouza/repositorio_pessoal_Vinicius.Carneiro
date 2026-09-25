@@ -27,21 +27,25 @@ with st.sidebar:
         st.session_state.pop('analysis',None); st.rerun()
     st.caption('Dados e revisões ficam salvos localmente na pasta dados do aplicativo.')
 
-# Refresh newly extracted fields in existing browser sessions without losing decisions.
+# Enrich saved documents without replacing selections, decisions or original PDFs.
 if 'analysis' in st.session_state:
     current=st.session_state.analysis
-    if any('previdencia' not in d for d in current['docs']):
-        stored=core.load(current['id']) if current.get('id') else None
-        indexed={d['hash']:d for d in stored['docs']} if stored else {}
-        with st.spinner('Atualizando os campos previdenciários da análise existente…'):
-            for document in current['docs']:
-                if 'previdencia' in document: continue
-                fresh=indexed.get(document['hash'],{})
-                if 'previdencia' not in fresh:
-                    fresh=core.extract(document['arquivo'],Path(document['path']).read_bytes())
-                document['previdencia']=fresh['previdencia']
-                document['versao']=core.VERSION
-            core.save(current,'Atualização de campos previdenciários em sessão anterior')
+    changed=False
+    pending_documents=[d for d in current['docs'] if 'grupos_empresa' not in d or 'previdencia' not in d]
+    if pending_documents:
+        with st.spinner('Conferindo os grupos de base nos PDFs preservados…'):
+            for document in pending_documents:
+                try:
+                    content=Path(document['path']).read_bytes()
+                    if 'previdencia' not in document:
+                        document['previdencia']=core.extract(document['arquivo'],content)['previdencia']
+                    document['grupos_empresa']=core.extract_company_groups(content)
+                    document['versao']=core.VERSION
+                    changed=True
+                except Exception as exc:
+                    st.warning(f"Não foi possível atualizar {document['arquivo']}: {exc}")
+    if changed:
+        core.save(current,'Atualização das bases, quantidades e contribuições por grupo do PDF')
         st.session_state.pop('excel_signature',None)
 
 tabs=st.tabs(['Documentos e incidência','Base do INSS empresa','Relatórios Excel'])
@@ -108,14 +112,29 @@ with tabs[0]:
         except Exception as e: st.error(str(e))
     if a.get('catalog'): st.caption('CNPJ raiz do relatório: '+a['catalog']['empresa_raiz'])
 
-rows=core.details(a)
+with st.sidebar:
+    st.divider()
+    previdencia_filter=st.selectbox('Total de previdência empresa',core.PREVIDENCIA_FILTERS,key='previdencia_filter')
+    st.caption('Filtro aplicado à consulta das folhas e aos relatórios Excel. Zero não comprova desoneração.')
+filtered_docs=core.filter_previdencia(a['docs'],previdencia_filter)
+rows=core.details({**a,'docs':filtered_docs})
 with tabs[1]:
-    if not a['docs']:
-        st.info('Importe uma folha para iniciar o cruzamento.')
+    if not filtered_docs:
+        st.info('Nenhuma folha corresponde ao filtro. Altere o filtro na barra lateral ou importe documentos.')
     else:
-        company=st.selectbox('Empresa',sorted({d['cnpj'] for d in a['docs']}),key='base_company')
-        period=st.selectbox('Competência',sorted({d['competencia'] for d in a['docs'] if d['cnpj']==company}),key='base_period')
-        documents=[d for d in a['docs'] if d['cnpj']==company and d['competencia']==period]
+        st.caption(f'{len(filtered_docs)} de {len(a["docs"])} folhas · Total de previdência empresa: {previdencia_filter}')
+        with st.expander('Folhas encontradas pelo filtro',expanded=previdencia_filter!='Todas'):
+            overview=[]
+            for document in filtered_docs:
+                values=document.get('previdencia',{})
+                overview.append({'empresa':document['empresa'],'cnpj':document['cnpj'],'competencia':document['competencia'],'tipo':document['tipo'],
+                                 'base_empresa_centavos':values.get('base_empresa_total',{}).get('valor_centavos'),
+                                 'previdencia_empresa_centavos':values.get('previdencia_empresa_total',{}).get('valor_centavos'),
+                                 'situacao':core.previdencia_status(document),'arquivo':document['arquivo']})
+            st.dataframe(display(overview),hide_index=True,width='stretch')
+        company=st.selectbox('Empresa',sorted({d['cnpj'] for d in filtered_docs}),key='base_company')
+        period=st.selectbox('Competência',sorted({d['competencia'] for d in filtered_docs if d['cnpj']==company}),key='base_period')
+        documents=[d for d in filtered_docs if d['cnpj']==company and d['competencia']==period]
         doc_id=st.selectbox('Folha', [d['hash'] for d in documents],format_func=lambda h:next(d['tipo']+' · '+d['arquivo'].split(' :: ')[-1] for d in documents if d['hash']==h),key='base_doc')
         d=next(d for d in documents if d['hash']==doc_id)
         current=[r for r in rows if r['documento']==doc_id]
@@ -124,9 +143,20 @@ with tabs[1]:
         c1.metric('Base INSS empresa — mensal',core.brl(d['bases'].get('mensal')))
         c2.metric('Base INSS empresa — 13º',core.brl(d['bases'].get('13')))
         st.dataframe(display([{k:r[k] for k in ['indicador','valor_centavos','situacao','pagina']} for r in core.previdencia_rows(d)]),hide_index=True,width='stretch')
+        st.caption('Os totais acima podem incluir bases com contribuição zerada. As referências abaixo vêm das linhas do PDF, separadas por mensal e 13º.')
+        summary=core.company_summary(d)
+        st.dataframe(display([{k:v for k,v in r.items() if k not in ('observacao','diferenca_extracao_centavos')} for r in summary]),hide_index=True,width='stretch')
+        with st.expander('Bases, quantidades e contribuições por grupo do PDF'):
+            groups=core.company_group_rows(d)
+            if groups:
+                st.dataframe(display([{k:r[k] for k in ['base','grupo','quantidade_base','aliquota_percentual','base_centavos','contribuicao_centavos','pagina']} for r in groups]),hide_index=True,width='stretch')
+            else: st.info('Grupos não localizados no PDF.')
+            st.caption('Quantidade transcrita da coluna Qtd. da base: não representa pessoas únicas. Mensal e 13º podem incluir os mesmos vínculos. Contribuição zerada não comprova desoneração; não há associação automática entre rubricas e grupos.')
+            if any(r['diferenca_extracao_centavos'] not in (None,0) for r in summary):
+                st.warning('A soma dos grupos difere da base extraída. Confira o documento original.')
         if d['alertas']: st.warning(' | '.join(d['alertas']))
         st.subheader('Participação indicada pelo relatório de incidência')
-        st.caption('Acréscimos são possibilidades indicadas pelo cadastro. Não representam inclusão comprovada nem exclusão aprovada. Selecione somente o que deseja levar ao levantamento.')
+        st.caption('Triagem automática: indicações do período e projeções por cadastro de outra época aparecem nos mesmos grupos, identificadas na coluna Referência. Não comprovam inclusão na base. A seleção serve apenas para destacar valores no Excel.')
         groups=['Possíveis acréscimos','Reduções da base','Fora da base segundo cadastro','Não determinado']
         default=0 if any(r['grupo']==groups[0] for r in current) else 3
         group=st.radio('Mostrar',groups,index=default,horizontal=True,key=f'group_{doc_id}')
@@ -137,12 +167,12 @@ with tabs[1]:
         else:
             table=[]
             for r in view:
-                table.append({'id':core.selection_key(r),'Selecionar':bool(r['selecionada']),'Código':r['codigo'],'Rubrica na folha':r['descricao'],'Valor':core.brl(r['valor_centavos']),'Base':r['base'] if r['grupo']!='Não determinado' else 'Não determinada','Código CP':r['codIncCP'],'Descrição no relatório':r['descricao_relatorio'],'Vigência do cadastro':r['vigencia_relatorio'],'Correspondência':r['correspondencia'],'Indicação':r['efeito'],'Observação':r['motivo'],'Página':r['pagina']})
+                table.append({'id':core.selection_key(r),'Selecionar':bool(r['selecionada']),'Código':r['codigo'],'Rubrica na folha':r['descricao'],'Valor':core.brl(r['valor_centavos']),'Base':r['base'] if r['grupo']!='Não determinado' else 'Não determinada','Código CP':r['codIncCP'],'Referência':r['referencia'],'Descrição no relatório':r['descricao_relatorio'],'Vigência do cadastro':r['vigencia_relatorio'],'Correspondência':r['correspondencia'],'Indicação':r['efeito'],'Observação':r['motivo'],'Página':r['pagina']})
             frame=pd.DataFrame(table)
             signature=core.hashlib.sha256(json.dumps(table,sort_keys=True).encode()).hexdigest()[:12]
             edited=st.data_editor(frame,hide_index=True,width='stretch',key=f'select_{doc_id}_{group}_{signature}',disabled=[c for c in frame.columns if c!='Selecionar'],column_config={'id':None,'Selecionar':st.column_config.CheckboxColumn('Selecionar'),'Descrição no relatório':None,'Vigência do cadastro':None,'Correspondência':None,'Observação':None,'Página':None})
             with st.expander('Ver correspondências, vigências e motivos deste grupo'):
-                st.dataframe(frame[['Código','Rubrica na folha','Descrição no relatório','Vigência do cadastro','Correspondência','Observação','Página']],hide_index=True,width='stretch')
+                st.dataframe(frame[['Código','Rubrica na folha','Referência','Descrição no relatório','Vigência do cadastro','Correspondência','Observação','Página']],hide_index=True,width='stretch')
             st.caption('Selecionar leva o valor ao relatório; não altera o efeito na base nem exige classificar as outras rubricas.')
             if st.button('Salvar seleção deste grupo',type='primary'):
                 a.setdefault('selections',{}).update({r['id']:bool(r['Selecionar']) for r in edited.to_dict('records')})
@@ -150,7 +180,7 @@ with tabs[1]:
         historical=[r for r in current if r['selecionada'] and r['grupo']!='Possíveis acréscimos']
         if historical: st.info(f'{len(historical)} rubrica(s) selecionada(s) estão em outros grupos. Permanecem identificadas no Excel; não são somadas como acréscimos.')
         with st.expander('Conferência da composição — opcional'):
-            st.caption('Comparação aritmética, sem cálculo da contribuição. Pendências não entram na parcela reconstruída; não ajustar regras para forçar fechamento.')
+            st.caption('Comparação aritmética, sem cálculo da contribuição. A diferença compara a projeção com a base total informada; as bases de 20% e zerada são referências auxiliares, sem atribuição de rubricas a esses grupos. Pendências não entram na parcela reconstruída; não ajustar regras para forçar fechamento.')
             st.dataframe(display([r for r in core.reconciliation(a) if r['arquivo']==d['arquivo']]),hide_index=True)
             st.dataframe(display(d['checagens']),hide_index=True)
         with st.expander('Ajustar uma correspondência ou rating — opcional'):
@@ -190,11 +220,11 @@ with tabs[1]:
 with tabs[2]:
     st.subheader('Relatório de composição e rubricas selecionadas')
     st.caption('Todos os relatórios são Excel. Os valores permanecem numéricos. Sem cálculo de contribuição, crédito ou Selic.')
-    if a['docs']:
-        companies=st.multiselect('Empresas do relatório',sorted({d['cnpj'] for d in a['docs']}),default=sorted({d['cnpj'] for d in a['docs']}))
-        periods=st.multiselect('Competências do relatório',sorted({d['competencia'] for d in a['docs']}),default=sorted({d['competencia'] for d in a['docs']}))
-        kinds=st.multiselect('Tipos de folha',sorted({d['tipo'] for d in a['docs']}),default=sorted({d['tipo'] for d in a['docs']}))
-        export_a={**a,'docs':[d for d in a['docs'] if d['cnpj'] in companies and d['competencia'] in periods and d['tipo'] in kinds]}
+    if filtered_docs:
+        companies=st.multiselect('Empresas do relatório',sorted({d['cnpj'] for d in filtered_docs}),default=sorted({d['cnpj'] for d in filtered_docs}))
+        periods=st.multiselect('Competências do relatório',sorted({d['competencia'] for d in filtered_docs}),default=sorted({d['competencia'] for d in filtered_docs}))
+        kinds=st.multiselect('Tipos de folha',sorted({d['tipo'] for d in filtered_docs}),default=sorted({d['tipo'] for d in filtered_docs}))
+        export_a={**a,'filtro_previdencia':previdencia_filter,'docs':[d for d in filtered_docs if d['cnpj'] in companies and d['competencia'] in periods and d['tipo'] in kinds]}
         selected_rows=[r for r in core.details(export_a) if r['selecionada']]
         st.dataframe(display([{k:r[k] for k in ['cnpj','competencia','tipo','codigo','descricao','valor_centavos','grupo','efeito','rating','arquivo','pagina']} for r in selected_rows]),hide_index=True)
         if not selected_rows: st.info('Nenhuma seleção manual neste recorte. O Excel ainda pode ser gerado com o cruzamento completo e seus grupos.')
@@ -203,3 +233,6 @@ with tabs[2]:
             st.session_state.excel_signature=json.dumps(export_a,sort_keys=True)
         if st.session_state.get('excel_signature')==json.dumps(export_a,sort_keys=True):
             st.download_button('Baixar levantamento.xlsx',st.session_state.excel,'levantamento.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+    else:
+        st.info('Nenhuma folha no filtro atual. Altere o filtro para gerar o Excel.')

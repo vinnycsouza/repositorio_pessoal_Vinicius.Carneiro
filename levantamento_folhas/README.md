@@ -55,3 +55,15 @@ Banco SQLite e PDFs preservados em `dados/`. Faça backup dessa pasta. Análises
 Nenhuma rubrica é selecionada automaticamente pela lista de interesse. Selecionar uma linha não muda sua incidência nem seu grupo. Revisões manuais anteriores são preservadas. Novas seleções são salvas por documento. A reconstrução da base, o ajuste de correspondência/rating e a informação de desoneração são opcionais. Não há cálculo da alíquota de 20%.
 
 Campos fora da vigência mostram a descrição e o código encontrados apenas como referência e permanecem não determinados. Descrições divergentes e versões ambíguas não são aceitas automaticamente. A apresentação dos valores na tela usa R$ 2.530.716,30; o Excel guarda números com formato monetário e separadores conforme a configuração regional do Excel.
+
+
+## Projeção histórica — versão 0.4
+
+A área Participação indicada pelo relatório de incidência agora projeta possíveis efeitos mesmo sem vigência contemporânea, quando empresa, código e descrição coincidem e o histórico disponível concorda quanto a tabela, tipo e incidência. Usa a referência temporal mais próxima e a identifica como Projeção pelo cadastro disponível. Não comprova o tratamento histórico.
+
+Cadastros conflitantes e descrições divergentes não recebem efeito automático. Descrições semelhantes com códigos diferentes geram apenas sugestões de correspondência. Maternidade e códigos técnicos continuam com tratamento específico. A seleção não é necessária para ver a triagem e não altera a projeção. Referência, vigência e fonte são exportadas no Excel. As indicações de fora do período desta versão substituem o comportamento anterior que deixava todo o histórico antigo como não determinado.
+
+### Versão 0.5.0 — grupos da base empresa
+A consulta preserva a navegação e apresenta, por mensal e 13º, as bases vinculadas à alíquota expressa de 20%, à contribuição zerada, a outra alíquota e a linhas sem correspondência suficiente. O vínculo entre base e contribuição usa a mesma linha física do PDF. Quantidade é transcrita da coluna Qtd. da base, sem somar como pessoas únicas nem vincular rubricas a trabalhadores. Não se infere desoneração ou pagamento.
+
+A conferência das rubricas continua comparando a projeção com a base total; as bases dos grupos são referências auxiliares. Os relatórios Excel incluem Grupos base empresa e Referencias base empresa, com origem, página, valores numéricos e quantidades. Documentos salvos são enriquecidos a partir dos PDFs preservados, sem alterar seleções ou decisões. Grupos não localizados permanecem sem valor, distintos de zero.
