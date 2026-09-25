@@ -109,3 +109,7 @@ Reconhece todas as partes numeradas de 00_empresa, apoio_s1010 e 02_rubricas_cp.
 
 ### Versão 0.11.0 — simulação independente
 Simulação proporcional passa a uma terceira aba. A composição dos 20% mantém apenas as hipóteses e evidências, com reduções e candidatas em seções próprias. A simulação continua disponível para grupos mistos válidos; quando existe indício específico por valor e quantidade, a aba explica que o rateio é uma alternativa. Não muda os cálculos nem as decisões. Cabeçalhos monetários identificam hipótese, estimativa ou candidata, e o período do recorte fica compacto. Consolidado e competência individual usam os mesmos blocos.
+
+
+### Versão 0.11.1 — filtros ao trocar de análise
+Na troca de análise, os filtros de exportação são reinicializados e o download anterior é descartado. Mudanças de opções conciliam competências e tipos disponíveis; escolhas válidas são preservadas, inclusive limpeza manual intencional. Recortes vazios mostram o filtro que precisa ser preenchido. Nenhum dado salvo é alterado.

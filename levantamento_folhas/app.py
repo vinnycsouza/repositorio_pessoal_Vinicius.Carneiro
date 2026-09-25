@@ -298,19 +298,27 @@ with tabs[1]:
             st.download_button('Baixar PDF original',Path(d['path']).read_bytes(),file_name=d['arquivo'].split(' :: ')[-1],mime='application/pdf')
 
 with tabs[2]:
+    import report_state
+    report_state.context(st.session_state,a)
     st.subheader('Relatório por competência')
     st.caption('Três abas: Composição dos 20%, Composição da base total e Simulação proporcional. O consolidado e o relatório de um mês usam o mesmo padrão, com hipóteses e estimativas separadas.')
     if filtered_docs:
         import simple_report
         mode=st.radio('Modelo do relatório',['Consolidado','Por competência'],horizontal=True,key='report_mode')
-        companies=st.multiselect('Empresas do relatório',sorted({d['cnpj'] for d in filtered_docs}),default=sorted({d['cnpj'] for d in filtered_docs}),key='report_companies')
+        company_options=sorted({d['cnpj'] for d in filtered_docs})
+        report_state.multiselect(st.session_state,'report_companies',company_options)
+        companies=st.multiselect('Empresas do relatório',company_options,key='report_companies')
         available=sorted({d['competencia'] for d in filtered_docs if d['cnpj'] in companies})
         if mode=='Consolidado':
-            periods=st.multiselect('Competências do relatório',available,default=available,key='report_periods')
+            report_state.multiselect(st.session_state,'report_periods',available)
+            periods=st.multiselect('Competências do relatório',available,key='report_periods')
         else:
-            period=st.selectbox('Competência do relatório',available,index=len(available)-1 if available else None,key='report_single_period')
+            report_state.single(st.session_state,'report_single_period',available)
+            period=st.selectbox('Competência do relatório',available,key='report_single_period')
             periods=[period] if period else []
-        kinds=st.multiselect('Tipos de folha',sorted({d['tipo'] for d in filtered_docs}),default=sorted({d['tipo'] for d in filtered_docs}),key='report_kinds')
+        kind_options=sorted({d['tipo'] for d in filtered_docs if d['cnpj'] in companies and d['competencia'] in periods})
+        report_state.multiselect(st.session_state,'report_kinds',kind_options)
+        kinds=st.multiselect('Tipos de folha',kind_options,key='report_kinds')
         docs=simple_report.select_documents(filtered_docs,companies,periods,kinds)
         export_a={**a,'versao_relatorio':core.VERSION,'modelo_relatorio':mode,'filtro_previdencia':previdencia_filter,'docs':docs}
         st.caption(f"Recorte: {len(docs)} folha(s), {len({d['competencia'] for d in docs})} competência(s). Filtro de previdência empresa: {previdencia_filter}. Os filtros do relatório são independentes do mês aberto na aba Base INSS empresa.")
@@ -320,6 +328,11 @@ with tabs[2]:
         with st.expander('Como ler o relatório'):
             st.write('Cada competência é apresentada em blocos por folha, com mensal e 13º separados. A primeira aba reúne a base dos 20%, as rubricas da hipótese e a diferença. Reduções e candidatas têm seções próprias. A segunda mostra a composição da base total. A terceira reúne exclusivamente as simulações proporcionais para grupos mistos, com acréscimos, reduções e candidatas separados.')
             st.caption('Não some hipóteses com estimativas. O Excel é um retrato da análise: alterações não recalculam as classificações nem retornam ao aplicativo.')
+        if not docs:
+            if not companies:st.info('Selecione uma empresa em Empresas do relatório.')
+            elif not periods:st.info('Selecione pelo menos uma competência para o relatório.')
+            elif not kinds:st.info('Selecione pelo menos um tipo de folha para o relatório.')
+            else:st.info('Nenhuma folha corresponde aos filtros do relatório. Revise empresa, competência, tipo de folha e o filtro previdenciário.')
         if st.button('Preparar relatório Excel',type='primary',disabled=not docs):
             with st.spinner('Organizando competências e rubricas no Excel…'):
                 st.session_state.excel=core.export_excel(export_a)
