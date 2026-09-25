@@ -10,7 +10,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'dados'
-VERSION = '0.5.0'
+VERSION = '0.6.0'
 PREVIDENCIA = {
     'base_empresa_total': 'Total da base empresa',
     'previdencia_empresa_total': 'Total de previdência empresa',
@@ -32,7 +32,7 @@ def archive_workspace():
         folder.rmdir()
 
 def norm(s):
-    return ''.join(c for c in unicodedata.normalize('NFKD', str(s or '')).upper() if not unicodedata.combining(c))
+    return ' '.join(''.join(c for c in unicodedata.normalize('NFKD', str(s or '')).upper() if not unicodedata.combining(c)).split())
 
 def cents(s):
     return int(Decimal(str(s).replace('.', '').replace(',', '.')) * 100)
@@ -208,71 +208,89 @@ def similar_descriptions(description, choices):
 def classify(d,r,catalog,decisions):
     key=key_for(d,r)
     base={'chave':key,'selecionada':False,'rating':'Sem classificação','efeito':'Pendente',
-          'base':'Mensal','justificativa':'','origem':'Sem relatório de incidência', 'codIncCP':'',
+          'base':'Não determinada','justificativa':'','origem':'Sem relatório de incidência','codIncCP':'',
           'descricao_relatorio':'','vigencia_relatorio':'','correspondencia':'Sem relatório',
-          'motivo':'Importe o relatório de incidência da empresa.', 'efeito_relatorio':'Pendente',
-          'referencia':'Não determinada','fonte_referencia':''}
+          'motivo':'Importe o relatório de incidência da empresa.','efeito_relatorio':'Pendente',
+          'referencia':'Não determinada','fonte_referencia':'','natureza':'A conferir',
+          'base_candidata':'','sinal_candidato':0,'criterio_candidato':''}
     employer=re.sub(r'\D','',d['cnpj'])[:8]
-    if catalog:
-        if employer!=catalog['empresa_raiz']:
-            base.update(correspondencia='Empresa diferente',origem='Relatório pertence a outro CNPJ',motivo='Importe o relatório da empresa desta folha.')
+    if catalog and employer!=catalog['empresa_raiz']:
+        base.update(correspondencia='Empresa diferente',origem='Relatório pertence a outro CNPJ',motivo='Importe o relatório da empresa desta folha.')
+    elif catalog:
+        code_rows=[x for x in catalog['rubricas'] if x['cod_rubr']==r['codigo']]
+        valid=[x for x in code_rows if x['ini_valid'] and x['ini_valid']<=d['competencia'] and (not x['fim_valid'] or x['fim_valid']>=d['competencia'])]
+        candidates=valid or code_rows
+        historical=not valid
+        if not candidates:
+            base.update(correspondencia='Não localizada',origem='Código não localizado no relatório',motivo='Não há correspondência para este código.')
+            labels=similar_descriptions(r['descricao'],tuple(sorted({(x['cod_rubr'],x['dsc_rubr']) for x in catalog['rubricas']})))
+            if labels: base.update(correspondencia='Descrição semelhante; código diferente',descricao_relatorio=' | '.join(labels),motivo='Sugestões por descrição, sem correspondência confirmada nem projeção numérica.')
         else:
-            code_rows=[x for x in catalog['rubricas'] if x['cod_rubr']==r['codigo']]
-            matches=[x for x in code_rows if x['ini_valid'] and x['ini_valid']<=d['competencia'] and (not x['fim_valid'] or x['fim_valid']>=d['competencia'])]
-            reference=matches or code_rows
-            if reference:
-                base['codIncCP']=' / '.join(sorted({x['cod_inc_cp'] for x in reference}))
-                base['descricao_relatorio']=' | '.join(sorted({x['dsc_rubr'] for x in reference}))
-                base['vigencia_relatorio']=' | '.join(sorted({x['ini_valid']+' a '+(x['fim_valid'] or 'sem fim informado') for x in reference}))
-            if not code_rows:
-                base.update(correspondencia='Não localizada',origem='Código não localizado no relatório',motivo='Não há correspondência para este código.')
-                labels=similar_descriptions(r['descricao'],tuple(sorted({(x['cod_rubr'],x['dsc_rubr']) for x in catalog['rubricas']})))
-                if labels:
-                    base.update(correspondencia='Descrição semelhante; código diferente',descricao_relatorio=' | '.join(labels),motivo='Possíveis correspondências por descrição. Confira antes de adotar a incidência; nenhuma projeção numérica aplicada.')
-            else:
-                historical=not matches
-                # A historical projection is allowed only when the entire available
-                # history for this code agrees. Never choose a version to close totals.
-                candidates=matches or code_rows
-                signatures={(x['ide_tab_rubr'],norm(x['dsc_rubr']),x['cod_inc_cp'],x['tp_rubr']) for x in candidates}
-                if len(signatures)!=1:
-                    base.update(correspondencia='Conflito no histórico' if historical else 'Cadastro ambíguo',origem='Versões/tabelas divergentes',motivo='O histórico disponível contém descrições, tabelas ou incidências diferentes; não foi escolhida uma regra automaticamente.' if historical else 'Mais de uma descrição, tabela ou incidência válida; verificar cadastro.')
+            codes={x['cod_inc_cp'] for x in candidates}; types={x['tp_rubr'] for x in candidates}
+            tables={x['ide_tab_rubr'] for x in candidates}
+            exact=[x for x in candidates if norm(x['dsc_rubr'])==norm(r['descricao'])]
+            base.update(codIncCP=' / '.join(sorted(codes)),descricao_relatorio=' | '.join(sorted({x['dsc_rubr'] for x in candidates})),
+                        vigencia_relatorio=' | '.join(sorted({x['ini_valid']+' a '+(x['fim_valid'] or 'sem fim informado') for x in candidates})),
+                        fonte_referencia=' | '.join(sorted({x.get('arquivo_origem','') for x in candidates})))
+            identity=bool(exact) and len(tables)==1
+            expected_type='1' if r['lado']=='Provento' else '2'
+            # Different descriptions do not override a fiscal disagreement. One exact
+            # identity and agreement across ALL candidate fiscal records are required.
+            concordant=len(codes)==1 and len(types)==1
+            insured=identity and types=={'2'} and r['lado']=='Desconto' and bool(codes & {'31','32'}) and codes <= {'00','31','32'}
+            if identity and (concordant or insured):
+                def distance(item):
+                    def month(value):
+                        try: return int(value[:4])*12+int(value[5:7])
+                        except (ValueError,TypeError): return None
+                    target=month(d['competencia']); start=month(item['ini_valid']); end=month(item['fim_valid'])
+                    if start is None: return 999999
+                    if target<start: return start-target
+                    if end is not None and target>end: return target-end
+                    return 0
+                chosen=min(exact,key=lambda x:(distance(x),x['ini_valid'],x.get('arquivo_origem','')))
+                code=chosen['cod_inc_cp']
+                variants=len({norm(x['dsc_rubr']) for x in candidates})>1
+                base.update(origem='S-1010: '+chosen['dsc_rubr'],
+                            correspondencia='Código e descrição: projeção histórica' if historical else 'Código e vigência compatíveis',
+                            referencia='Projeção pelo cadastro disponível' if historical else 'Cadastro compatível com o período',
+                            vigencia_relatorio=chosen['ini_valid']+' a '+(chosen['fim_valid'] or 'sem fim informado'))
+                if insured:
+                    base.update(efeito='Não integra (sugestão)',base='Não se aplica',natureza='Contribuição do segurado',
+                                motivo='Registros 31/32 e eventuais 00 representam desconto do segurado sem composição da base patronal. Divergência cadastral preservada em Código CP.')
+                elif types!={expected_type}:
+                    base['motivo']='Tipo do cadastro diverge do lado provento/desconto do PDF ou é informativo; conferir tratamento.'
+                elif code=='00':
+                    base.update(efeito='Não integra (sugestão)',base='Não se aplica',natureza='Sem incidência no cadastro',motivo='Código 00 no cadastro correspondente; não comprova tratamento histórico.')
+                elif code in ('11','12'):
+                    base.update(efeito='Acrescenta (sugestão)' if expected_type=='1' else 'Reduz (sugestão)',
+                                base='Mensal' if code=='11' else '13º',natureza='Provento' if expected_type=='1' else 'Redução indicada no cadastro',
+                                motivo='Código '+code+' e tipo '+expected_type+' concordantes em todos os registros candidatos.')
+                elif code in ('21','22','25','26'):
+                    base.update(base='13º' if code in ('22','26') else 'Mensal',natureza='Tratamento patronal específico',motivo='Maternidade: validar período e tratamento patronal; não somada automaticamente.')
                 else:
-                    def distance(item):
-                        def month(value):
-                            try: return int(value[:4])*12+int(value[5:7])
-                            except (ValueError,TypeError): return None
-                        target=month(d['competencia']);start=month(item['ini_valid']);end=month(item['fim_valid'])
-                        if start is None: return 999999
-                        if target<start: return start-target
-                        if end is not None and target>end: return target-end
-                        return 0
-                    x=min(candidates,key=lambda item:(distance(item),item['ini_valid'],item.get('arquivo_origem','')));code=x['cod_inc_cp']
-                    base.update(origem='S-1010: '+x['dsc_rubr'],correspondencia='Código e descrição: projeção histórica' if historical else 'Código e vigência compatíveis',
-                                referencia='Projeção pelo cadastro disponível' if historical else 'Cadastro compatível com o período',
-                                fonte_referencia=x.get('arquivo_origem',''),
-                                vigencia_relatorio=x['ini_valid']+' a '+(x['fim_valid'] or 'sem fim informado'))
-                    base['base']='13º' if code in ('12','14','16','22','26') else 'Mensal'
-                    same=norm(x['dsc_rubr'])==norm(r['descricao'])
-                    if not same:
-                        base.update(referencia='Não determinada',correspondencia='Descrição diferente',motivo='Mesmo código, mas descrições diferentes; correspondência não confirmada.')
-                    elif code=='00':
-                        base.update(efeito='Não integra (sugestão)',motivo='Código 00 no cadastro de incidência compatível.')
-                    elif code in ('11','12') and x['tp_rubr'] in ('1','2'):
-                        expected='Provento' if x['tp_rubr']=='1' else 'Desconto'
-                        if expected==r['lado']:
-                            base.update(efeito='Acrescenta (sugestão)' if expected=='Provento' else 'Reduz (sugestão)',motivo='Código '+code+' e tipo '+x['tp_rubr']+' compatíveis com a rubrica da folha.')
-                        else: base['motivo']='O tipo de rubrica no relatório diverge do lado provento/desconto no PDF.'
-                    elif code in ('21','22','25','26'):
-                        base['motivo']='Maternidade: incidência CP não equivale à participação na base do INSS empresa. Validar período e tratamento patronal.'
-                    else:
-                        base['motivo']='Rubrica técnica ou código de incidência com tratamento específico; não incluído automaticamente na base patronal.'
+                    base.update(natureza='Tratamento específico',motivo='Código técnico ou tratamento específico; não incluído automaticamente.')
+                if variants:
+                    base['motivo']+=' Há variações de descrição no cadastro, mas uma corresponde exatamente à folha após uniformizar espaços e acentos.'
+            else:
+                if len(tables)>1 or not concordant:
+                    base.update(correspondencia='Conflito no histórico' if historical else 'Cadastro ambíguo',origem='Versões/tabelas divergentes',motivo='Incidência, tipo ou tabela divergentes; nenhuma versão escolhida para fechar a base.')
+                else:
+                    base.update(correspondencia='Descrição diferente',motivo='Incidência e tipo concordantes, mas nenhuma descrição corresponde à folha; conferir identidade.')
+                # A conflict may support a separate what-if diagnostic, never an
+                # automatic adopted effect or a subset-sum search against a target.
+                positive=codes & {'11','12'}
+                if identity and types=={expected_type} and len(positive)==1 and codes <= positive | {'00'}:
+                    code=next(iter(positive))
+                    base.update(base_candidata='Mensal' if code=='11' else '13º',sinal_candidato=1 if expected_type=='1' else -1,
+                                criterio_candidato='Mesmo código, descrição e tipo; versões divergem entre incidência '+code+' e 00. Cenário condicionado à validação do cadastro.')
     if base['referencia']=='Projeção pelo cadastro disponível':
-        base['motivo']+=' Referência temporal mais próxima com histórico concordante; tratamento da competência não comprovado.'
+        base['motivo']+=' Referência de outra época; tratamento da competência não comprovado.'
     if base['efeito']=='Pendente' and base['referencia']!='Não determinada':
         base['referencia']='Tratamento específico — referência histórica' if base['referencia'].startswith('Projeção') else 'Tratamento específico — cadastro do período'
     base['efeito_relatorio']=base['efeito']
     base.update(decisions.get(key,{}))
+    if key in decisions: base['motivo']+=' Critério manual preservado: '+base.get('justificativa','')
     return base
 
 
@@ -299,22 +317,6 @@ def details(a):
             row['selecionada']=a.get('selections',{}).get(selection_key(row),row['selecionada'])
             row['situacao_patronal']=a.get('regimes',{}).get(d['cnpj']+'|'+d['competencia'],'Não verificada')
             out.append(row)
-    return out
-
-def reconciliation(a):
-    rows=details(a); out=[]
-    for d in a['docs']:
-        items=[r for r in rows if r['documento']==d['hash']]
-        pending=sum(r['efeito']=='Pendente' for r in items)
-        unconfirmed=sum('sugestão' in r['efeito'] for r in items)
-        for target,key in [('Mensal','mensal'),('13º','13')]:
-            selected=[r for r in items if r['base']==target]
-            value=sum(r['valor_centavos']*(1 if r['efeito'].startswith('Acrescenta') else -1 if r['efeito'].startswith('Reduz') else 0) for r in selected)
-            expected=d['bases'].get(key)
-            reference=next(r for r in company_summary(d) if r['base']==target)
-            difference=None if expected is None else value-expected
-            status='Pendente' if pending else 'Hipótese com sugestões' if unconfirmed else 'Sem base informada' if expected is None else 'Confere aritmeticamente' if abs(difference)<=1 else 'Divergente'
-            out.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],'base':target,'informada_centavos':expected,'referencia_20_centavos':reference['base_20_centavos'],'referencia_zerada_centavos':reference['base_zerada_centavos'],'reconstruida_centavos':value,'diferenca_centavos':difference,'rubricas_pendentes':pending,'sugestoes':unconfirmed,'estado':status,'completude':'Projeção parcial' if pending else 'Todas as rubricas com efeito indicado','projecoes_historicas':sum(r.get('referencia')=='Projeção pelo cadastro disponível' for r in items),'arquivo':d['arquivo']})
     return out
 
 PREVIDENCIA_FILTERS = ['Todas','Maior que zero','Igual a zero','Não localizado','Menor que zero']
@@ -380,7 +382,7 @@ def export_excel(a):
     sheet('Resumo',[{'indicador':'Análise','valor':a['name']},{'indicador':'Filtro total previdência empresa','valor':a.get('filtro_previdencia','Todas')},{'indicador':'Situação','valor':'Preliminar: valores encontrados não equivalem a exclusão confirmada ou crédito.'},{'indicador':'Gerado em','valor':datetime.now().isoformat(timespec='seconds')},{'indicador':'PDFs processados','valor':len(a['docs'])},{'indicador':'Documentos com erro','valor':len(a.get('errors',[]))}])
     sheet('Consolidado',[dict(zip(['cnpj','codigo','descricao','rating','efeito'],k),valor_centavos=v) for k,v in sorted(grouped.items())])
     sheet('Por competencia',[{k:r[k] for k in ['cnpj','competencia','tipo','codigo','descricao','valor_centavos','efeito','rating','arquivo','pagina']} for r in selected])
-    view_fields=['cnpj','competencia','tipo','codigo','descricao','valor_centavos','grupo','base','codIncCP','descricao_relatorio','vigencia_relatorio','referencia','fonte_referencia','correspondencia','motivo','efeito_relatorio','efeito','selecionada','rating','situacao_patronal','arquivo','pagina']
+    view_fields=['cnpj','competencia','tipo','codigo','descricao','valor_centavos','grupo','base','codIncCP','descricao_relatorio','vigencia_relatorio','referencia','fonte_referencia','correspondencia','motivo','natureza','base_candidata','criterio_candidato','efeito_relatorio','efeito','selecionada','rating','situacao_patronal','arquivo','pagina']
     sheet('Cruzamento por folha',[{k:r[k] for k in view_fields} for r in rows])
     sheet('Possiveis acrescimos',[{k:r[k] for k in view_fields} for r in rows if r['grupo']=='Possíveis acréscimos'])
     sheet('Reducoes da base',[{k:r[k] for k in view_fields} for r in rows if r['grupo']=='Reduções da base'])
@@ -390,6 +392,9 @@ def export_excel(a):
     sheet('Grupos base empresa',[r for d in a['docs'] for r in company_group_rows(d)])
     sheet('Referencias base empresa',[{'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],**r,'arquivo':d['arquivo']} for d in a['docs'] for r in company_summary(d)])
     sheet('Conferencia bases',reconciliation(a))
+    sheet('Memoria composicao',composition_trace(a,rows))
+    sheet('Indicios por quantidade',[r for d in a['docs'] for r in relationship_hints(d,rows)])
+    sheet('Panorama das bases',global_overview(a['docs']))
     sheet('Conferencia extracao',[{'arquivo':d['arquivo'],**c} for d in a['docs'] for c in d['checagens']])
     sheet('Documentos',[{k:d.get(k) for k in ['arquivo','cnpj','competencia','tipo','paginas','hash','alertas']} for d in a['docs']])
     sheet('Erros',a.get('errors',[]))
@@ -426,19 +431,144 @@ def extract_company_groups(content):
     return result
 
 
+def validated_company_groups(d):
+    """Assess saved raw lines on read; never reorder pairs or rewrite evidence."""
+    result=[]
+    from decimal import ROUND_HALF_UP
+    for raw in d.get('grupos_empresa',[]):
+        g=dict(raw)
+        match=re.search(r'(\d+)\s+(?:\d+(?:,\d+)?%\s+)?-?\d[\d.]*,\d{2}\s*$',g.get('linha_contribuicao',''))
+        qty=int(match[1]) if match else None
+        amount=g.get('contribuicao_centavos');rate=g.get('aliquota_percentual');base=g.get('base_centavos')
+        g.update(quantidade_contribuicao=qty,diferenca_aritmetica_centavos=None,limite_triagem_centavos=None,validacao='A conferir',motivo_validacao='Contribuição ou alíquota não identificada.')
+        if amount==0 and g.get('grupo')=='Contribuição zerada':
+            g.update(validacao='Zero informado',motivo_validacao='Zero transcrito do PDF; não comprova desoneração ou pagamento.')
+        elif amount is not None and rate is not None and base is not None:
+            expected=int((Decimal(base)*Decimal(str(rate))/100).quantize(Decimal(1),rounding=ROUND_HALF_UP))
+            delta=amount-expected
+            # Screening bound, not a claim about the payroll's rounding algorithm.
+            bound=max(1,g.get('quantidade_base') or 1)
+            g.update(diferenca_aritmetica_centavos=delta,limite_triagem_centavos=bound)
+            if qty is None or g.get('quantidade_base') is None:
+                g['motivo_validacao']='Quantidade de um dos lados não identificada; vínculo não validado.'
+            elif qty!=g['quantidade_base']:
+                g['motivo_validacao']='Quantidades diferentes entre base e contribuição; conferir vínculo das linhas.'
+            elif abs(delta)>bound:
+                g['motivo_validacao']='Diferença excede o limite de triagem de um centavo por quantidade; conferir memória do cálculo.'
+            else:
+                g.update(validacao='Coerência aritmética' if delta==0 else 'Pequena diferença aritmética',
+                         motivo_validacao='Quantidade e cálculo agregados compatíveis; não comprova composição por rubrica.' if delta==0 else 'Diferença dentro do limite de triagem de um centavo por quantidade. Arredondamento individual é hipótese, não confirmação.')
+        result.append(g)
+    return result
+
+
 def company_group_rows(d):
-    return [{'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],**g,'arquivo':d['arquivo']} for g in d.get('grupos_empresa',[])]
+    return [{'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],**g,'arquivo':d['arquivo']} for g in validated_company_groups(d)]
 
 
 def company_summary(d):
-    groups=d.get('grupos_empresa',[])
-    out=[]
+    groups=validated_company_groups(d);out=[]
     for target,key in [('Mensal','mensal'),('13º','13')]:
         items=[g for g in groups if g['base']==target]
-        row={'base':target,'total_informado_centavos':d.get('bases',{}).get(key)}
-        for label,field in [('Alíquota de 20%','base_20_centavos'),('Contribuição zerada','base_zerada_centavos'),('Outra alíquota','base_outra_aliquota_centavos'),('Não determinado','base_nao_determinada_centavos')]:
-            row[field]=sum(g['base_centavos'] for g in items if g['grupo']==label) if items else None
-        row['diferenca_extracao_centavos']=sum(g['base_centavos'] for g in items)-row['total_informado_centavos'] if items and row['total_informado_centavos'] is not None else None
-        row['observacao']='Grupos do PDF; quantidade não identifica pessoas nem vincula rubricas. Ausência de grupo não comprova regime tributário.' if items else 'Grupos não localizados no PDF.'
+        total=d.get('bases',{}).get(key)
+        difference=sum(g['base_centavos'] for g in items)-total if items and total is not None else None
+        unsafe=any(g['validacao']=='A conferir' for g in items) or difference not in (None,0)
+        row={'base':target,'total_informado_centavos':total}
+        for label,field in [('Alíquota de 20%','base_20_centavos'),('Contribuição zerada','base_zerada_centavos'),('Outra alíquota','base_outra_aliquota_centavos')]:
+            row[field]=sum(g['base_centavos'] for g in items if g['grupo']==label) if items and not unsafe else None
+        row['base_nao_determinada_centavos']=sum(g['base_centavos'] for g in items) if unsafe else 0 if items else None
+        row['diferenca_extracao_centavos']=difference
+        if not items:status='Grupos não localizados'
+        elif unsafe:status='Vínculo entre base e contribuição a conferir'
+        elif row['base_outra_aliquota_centavos']:status='Outra alíquota informada'
+        elif row['base_20_centavos'] and row['base_zerada_centavos']:status='Grupos mistos'
+        elif row['base_20_centavos']:status='Somente linhas com 20%'
+        elif row['base_zerada_centavos']:status='Somente contribuição zerada'
+        else:status='Valores zerados no PDF'
+        row['situacao_grupos']=status
+        row['observacao']='Distribuição entre grupos suspensa por inconsistência; valores originais preservados no detalhamento.' if unsafe else 'Referência documental, sem identificação individual ou comprovação do regime tributário.'
         out.append(row)
     return out
+
+
+def composition_trace(a,rows=None):
+    rows=details(a) if rows is None else rows
+    out=[]
+    for r in rows:
+        target=r['base'];role='Não entra na composição';signed=0;criterion=r['motivo']
+        if r['efeito'].startswith(('Acrescenta','Reduz')) and target in ('Mensal','13º'):
+            role='Acréscimo indicado' if r['efeito'].startswith('Acrescenta') else 'Redução indicada'
+            signed=r['valor_centavos']*(1 if role=='Acréscimo indicado' else -1)
+        elif r['efeito']=='Pendente':
+            role='Pendente sem valor atribuído';signed=None
+            if r.get('base_candidata'):
+                role='Candidata condicionada';target=r['base_candidata']
+                signed=r['valor_centavos']*r['sinal_candidato'];criterion=r['criterio_candidato']
+        out.append({'cnpj':r['cnpj'],'competencia':r['competencia'],'tipo':r['tipo'],'documento':r['documento'],
+                    'codigo':r['codigo'],'descricao':r['descricao'],'lado':r['lado'],'base':target,'papel':role,
+                    'valor_centavos':r['valor_centavos'],'parcela_centavos':signed,'codIncCP':r['codIncCP'],
+                    'referencia':r['referencia'],'criterio':criterion,'arquivo':r['arquivo'],'pagina':r['pagina']})
+    return out
+
+
+def relationship_hints(d,rows):
+    hints=[]
+    for g in validated_company_groups(d):
+        if g['validacao']=='A conferir' or g['grupo']!='Alíquota de 20%' or g['base_centavos']<=0:continue
+        for r in rows:
+            qty=str(r.get('quantidade','')).strip()
+            if (r['documento']==d['hash'] and r['base']==g['base'] and r['efeito'].startswith('Acrescenta')
+                and r['valor_centavos']==g['base_centavos'] and qty.isdigit() and int(qty)==g['quantidade_base']):
+                hints.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],'base':g['base'],
+                              'codigo':r['codigo'],'descricao':r['descricao'],'valor_centavos':r['valor_centavos'],
+                              'quantidade':int(qty),'pagina_rubrica':r['pagina'],'pagina_base':g['pagina'],
+                              'indicio':'Valor e quantidade coincidem com o grupo de 20%; correspondência individual não comprovada.',
+                              'arquivo':d['arquivo']})
+    return hints
+
+
+def reconciliation(a):
+    rows=details(a);trace=composition_trace(a,rows);out=[]
+    for d in a['docs']:
+        items=[r for r in rows if r['documento']==d['hash']]
+        parts=[r for r in trace if r['documento']==d['hash']]
+        for reference in company_summary(d):
+            target=reference['base'];expected=reference['total_informado_centavos']
+            picked=[r for r in parts if r['base']==target]
+            additions=sum(r['parcela_centavos'] for r in picked if r['papel']=='Acréscimo indicado')
+            reductions=-sum(r['parcela_centavos'] for r in picked if r['papel']=='Redução indicada')
+            value=additions-reductions
+            candidates=[r for r in picked if r['papel']=='Candidata condicionada']
+            candidate_value=sum(r['parcela_centavos'] for r in candidates)
+            pending=sum(r['efeito']=='Pendente' and (r['base']==target or r['base']=='Não determinada') for r in items)
+            unknown=sum(r['efeito']=='Pendente' and r['base']=='Não determinada' for r in items)
+            suggestions=sum('sugestão' in r['efeito'] for r in items if r['base']==target)
+            difference=None if expected is None else value-expected
+            residual=None if expected is None else expected-value
+            after=None if expected is None or not candidates else expected-value-candidate_value
+            status='Sem base informada' if expected is None else 'Pendente' if pending else 'Hipótese com sugestões' if suggestions else 'Confere aritmeticamente' if difference==0 else 'Divergente'
+            composition='Base não informada' if expected is None else 'Fechamento aritmético; não comprova participação' if residual==0 else 'Fechamento condicionado às candidatas' if after==0 and candidates else 'Diferença ainda não explicada'
+            out.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],'base':target,
+                        'informada_centavos':expected,'referencia_20_centavos':reference['base_20_centavos'],
+                        'referencia_zerada_centavos':reference['base_zerada_centavos'],'situacao_grupos':reference['situacao_grupos'],
+                        'acrescimos_centavos':additions,'reducoes_centavos':reductions,'reconstruida_centavos':value,
+                        'diferenca_centavos':difference,'saldo_sem_explicacao_centavos':residual,
+                        'candidatas':len(candidates),'candidatas_centavos':candidate_value if candidates else None,
+                        'saldo_apos_todas_candidatas_centavos':after,'conclusao_composicao':composition,
+                        'rubricas_pendentes':pending,'pendentes_sem_base_definida':unknown,'sugestoes':suggestions,'estado':status,
+                        'completude':'Projeção parcial' if pending else 'Rubricas com efeito indicado; validar tratamento',
+                        'projecoes_historicas':sum(r.get('referencia')=='Projeção pelo cadastro disponível' for r in items if r['base']==target),
+                        'arquivo':d['arquivo'],'documento':d['hash']})
+    return out
+
+
+def global_overview(docs):
+    result=[];previous={}
+    for d in sorted(docs,key=lambda x:(x['cnpj'],x['competencia'],x['tipo'],x['hash'])):
+        for s in company_summary(d):
+            if s['total_informado_centavos'] is None:continue
+            key=(d['cnpj'],d['tipo'],s['base']);old=previous.get(key)
+            result.append({'cnpj':d['cnpj'],'competencia':d['competencia'],'tipo':d['tipo'],**s,
+                           'mudanca_no_recorte':bool(old and old!=s['situacao_grupos']),'arquivo':d['arquivo']})
+            previous[key]=s['situacao_grupos']
+    return result

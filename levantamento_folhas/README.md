@@ -67,3 +67,15 @@ Cadastros conflitantes e descrições divergentes não recebem efeito automátic
 A consulta preserva a navegação e apresenta, por mensal e 13º, as bases vinculadas à alíquota expressa de 20%, à contribuição zerada, a outra alíquota e a linhas sem correspondência suficiente. O vínculo entre base e contribuição usa a mesma linha física do PDF. Quantidade é transcrita da coluna Qtd. da base, sem somar como pessoas únicas nem vincular rubricas a trabalhadores. Não se infere desoneração ou pagamento.
 
 A conferência das rubricas continua comparando a projeção com a base total; as bases dos grupos são referências auxiliares. Os relatórios Excel incluem Grupos base empresa e Referencias base empresa, com origem, página, valores numéricos e quantidades. Documentos salvos são enriquecidos a partir dos PDFs preservados, sem alterar seleções ou decisões. Grupos não localizados permanecem sem valor, distintos de zero.
+
+
+### Versão 0.6.0 — composição provável e validação dos grupos
+A atualização mantém as abas e os quatro grupos de participação. Uniformiza espaços na comparação, preservando códigos, descrições originais e chaves das revisões. Variações de descrição só permitem projeção quando uma descrição corresponde à folha, há uma única tabela e todos os registros candidatos concordam em incidência e tipo. Divergências reais continuam pendentes. Códigos 31/32 (e 00 concorrente), com identidade e tipo de desconto compatíveis, ficam identificados como contribuição do segurado, fora da composição patronal.
+
+Não há mais atribuição mensal automática quando a base é desconhecida. A consulta permite filtrar mensal, 13º, não determinada e não se aplica. O panorama compara a situação dos grupos entre competências do mesmo tipo no recorte consultado.
+
+A conferência da composição detalha acréscimos, reduções, parcela explicada e saldo em relação à base total do PDF. Candidatas conflitantes ficam fora da parcela explicada: somente códigos 11/12 versus 00 com identidade, tabela e tipo compatíveis geram cenário separado. O cenário soma todas as candidatas daquela base, sem buscar subconjuntos que fechem o total. Fechamento condicionado não confirma incidência nem exclusão. Coincidência de valor e quantidade entre rubrica com indicação de acréscimo e grupo de 20% aparece apenas como indício.
+
+Bases e contribuições são conferidas sem reordenar linhas: quantidades divergentes ou diferença acima de um centavo por quantidade suspendem os totais de distribuição daquele bloco mensal/13º. Esse limite é apenas triagem aritmética, não regra fiscal ou prova de arredondamento. Os valores originais permanecem no detalhamento; diferenças pequenas recebem ressalva. Validar a coerência da linha não identifica trabalhadores nem comprova recolhimento.
+
+Esses cálculos são derivados em consulta, inclusive para análises antigas, sem reimportar PDFs ou alterar seleções. Excel inclui Memoria composicao, Indicios por quantidade e Panorama das bases, além de validações dos grupos. Nenhum relatório adicional é gerado automaticamente.
