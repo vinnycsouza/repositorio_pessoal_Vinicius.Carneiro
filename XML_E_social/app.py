@@ -458,6 +458,7 @@ with st.sidebar:
         st.caption("Carregue ou processe um Workspace para habilitar o gerenciamento.")
         st.session_state.pop("exibir_workspace_v952", None)
         st.session_state.pop("confirmar_lixeira_workspace_v952", None)
+        st.session_state.pop("executar_lixeira_workspace_v952", None)
     elif st.session_state.get("exibir_workspace_v952"):
         try:
             info_workspace = obter_info_workspace(resultado_workspace)
@@ -720,13 +721,16 @@ with st.sidebar:
                             st.session_state.pop(
                                 "confirmar_lixeira_workspace_v952", None
                             )
+                            st.session_state.pop(
+                                "executar_lixeira_workspace_v952", None
+                            )
                             st.rerun()
                     with coluna_enviar:
                         if st.button(
                             "Enviar para Lixeira",
                             type="primary",
                             use_container_width=True,
-                            key="confirmar_lixeira_workspace_v952",
+                            key="executar_lixeira_workspace_v952",
                         ):
                             try:
                                 enviar_workspace_para_lixeira(info_workspace.caminho)
@@ -742,6 +746,7 @@ with st.sidebar:
                                     "fontes_recibos_v82",
                                     "exibir_workspace_v952",
                                     "confirmar_lixeira_workspace_v952",
+                                    "executar_lixeira_workspace_v952",
                                 ]:
                                     st.session_state.pop(chave, None)
                                 st.session_state["mensagem_workspace_v952"] = (
