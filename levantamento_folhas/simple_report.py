@@ -136,12 +136,13 @@ def export_excel(a):
                     text(s,'Conciliação: '+t['conciliacao']+' | Tolerância: '+core.brl(t['tolerancia_centavos'])+'. Fechamento aritmético não confirma crédito.')
                     if t['diferenca_percentual'] is not None:
                         text(s,f"Diferença absoluta: {core.brl(t['diferenca_absoluta_centavos'])} | Diferença relativa: {t['diferenca_percentual']:.4f}% da base dos 20%.")
-                    for scenario in t['cenarios_historicos']:
+                    for scenario in t['cenarios_historicos']+t['cenarios_identidade']:
                         text(s,scenario['cenario']+' — fora da projeção principal','header')
                         append(s,HEADERS,'header')
-                        for r in scenario['rubricas']:rubric(s,r,None,'Valor integral para diagnóstico; não adotado na projeção.')
-                        amount(s,'Base no cenário com maternidade',scenario['reconstruida_centavos'])
-                        amount(s,'Diferença no cenário com maternidade',scenario['diferenca_centavos'],scenario['conciliacao'])
+                        for r in scenario['rubricas']:rubric(s,r,None,'Valor integral para diagnóstico; não adotado na projeção.'+(' Cadastro: '+r['descricao_cadastro'] if r.get('descricao_cadastro') else ''))
+                        identity_scenario=scenario in t['cenarios_identidade']
+                        amount(s,'Base no cenário de identidade' if identity_scenario else 'Base no cenário com maternidade',scenario['reconstruida_centavos'])
+                        amount(s,'Diferença no cenário de identidade' if identity_scenario else 'Diferença no cenário com maternidade',scenario['diferenca_centavos'],scenario['conciliacao'])
                         text(s,scenario['observacao'])
                     if candidates:
                         text(s,'Candidatas conflitantes — fora da hipótese','header');append(s,headings('Candidata (R$)'),'header')

@@ -11,7 +11,7 @@ from catalog_xlsx import load_workbook as load_catalog_workbook, family as catal
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'dados'
-VERSION = '0.12.0'
+VERSION = '0.12.1'
 PREVIDENCIA = {
     'base_empresa_total': 'Total da base empresa',
     'previdencia_empresa_total': 'Total de previdência empresa',
@@ -325,6 +325,16 @@ def classify(d,r,catalog,decisions):
                     code=next(iter(positive))
                     base.update(base_candidata='Mensal' if code=='11' else '13º',sinal_candidato=1 if expected_type=='1' else -1,
                                 criterio_candidato='Mesmo código e tipo; versões divergem entre incidência '+code+' e 00. Cenário condicionado à validação do cadastro.')
+    # Reviewed identity conflict from AJ payroll and its imported S-1010.
+    # This is a narrow evidence-based exception, not a fuzzy description matcher.
+    if (employer=='02633573' and r['codigo']=='8003'
+            and norm(r['descricao'])==norm('RETENCAO JUDICIAL')
+            and norm(base['descricao_relatorio'])==norm('SUSPENSAO')
+            and base['efeito']=='Reduz (sugestão)'):
+        base.update(efeito='Pendente',correspondencia='Código correspondente — identidade em conflito',
+                    base_diagnostico_identidade=base['base'],sinal_diagnostico_identidade=-1,
+                    motivo='Conflito identificado na revisão: folha informa retenção judicial e cadastro informa suspensão para o mesmo código. Redução suspensa até confirmar identidade e tratamento na competência. Nenhuma troca por outro código.',
+                    natureza='Identidade a confirmar')
     if base['referencia']=='Projeção pelo cadastro disponível':
         base['motivo']+=' Referência de outra época; tratamento da competência não comprovado.'
     if base['efeito']=='Pendente' and base['referencia']!='Não determinada':
@@ -777,7 +787,19 @@ def twenty_composition(a,rows=None):
                        tolerancia_centavos=tolerance,
                        diferenca_absoluta_centavos=abs(delta) if usable else None,
                        diferenca_percentual=abs(delta)/abs(summary['base_20_centavos'])*100 if usable else None,
-                       cenarios_historicos=[])
+                       cenarios_historicos=[],cenarios_identidade=[])
+        conflicts=[r for r in rows if r['documento']==summary['documento'] and r.get('base_diagnostico_identidade')==summary['base'] and r['efeito']=='Pendente' and r['chave'] not in a.get('decisions',{})]
+        if conflicts:
+            value=sum(r['valor_centavos']*r['sinal_diagnostico_identidade'] for r in conflicts)
+            scenario_delta=delta-value if usable else None
+            summary['cenarios_identidade'].append({
+                'cenario':'Aplicação do cadastro às rubricas com identidade em conflito',
+                'rubricas':[{'codigo':r['codigo'],'descricao':r['descricao'],'descricao_cadastro':r['descricao_relatorio'],'valor_centavos':r['valor_centavos'],'pagina':r['pagina']} for r in conflicts],
+                'parcela_centavos':value,
+                'reconstruida_centavos':summary['parcela_projetada_centavos']+value if usable else None,
+                'diferenca_centavos':scenario_delta,
+                'conciliacao':conciliation_status(scenario_delta,tolerance) if usable else 'Inconclusiva',
+                'observacao':'Comparação independente: aplica o efeito do cadastro apenas neste cenário. Confirmar identidade e tratamento; saldo zero na projeção principal não resolve a pendência.' if usable else 'Sem atribuição aos 20%: referência indisponível ou grupos mistos.'})
         historical=[r for r in rows if r['documento']==summary['documento'] and r.get('base_diagnostico_maternidade')==summary['base'] and r['efeito']=='Pendente' and r['chave'] not in a.get('decisions',{})]
         if historical:
             value=sum(r['valor_centavos']*(1 if r['lado']=='Provento' else -1) for r in historical)

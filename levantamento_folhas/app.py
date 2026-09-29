@@ -183,7 +183,7 @@ with tabs[1]:
             st.caption('Tolerância: '+core.brl(t['tolerancia_centavos'])+'. Fechamento aritmético não confirma incidência ou crédito.')
             if t['diferenca_percentual'] is not None:
                 st.caption(f"Diferença absoluta: {core.brl(t['diferenca_absoluta_centavos'])} | Diferença relativa: {t['diferenca_percentual']:.4f}%")
-            for scenario in t['cenarios_historicos']:
+            for scenario in t['cenarios_historicos']+t['cenarios_identidade']:
                 with st.expander(scenario['cenario'],expanded=True):
                     st.dataframe(display(scenario['rubricas']),hide_index=True,width='stretch')
                     st.metric('Base no cenário',core.brl(scenario['reconstruida_centavos']))
