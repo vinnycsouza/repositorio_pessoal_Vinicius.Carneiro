@@ -167,6 +167,11 @@ with tabs[1]:
         st.caption('Triagem automática: indicações do período e projeções por cadastro de outra época aparecem nos mesmos grupos, identificadas na coluna Referência. Não comprovam inclusão na base. A seleção serve apenas para destacar valores no Excel.')
         with st.container(border=True):
             st.markdown('**Composição provável da base vinculada aos 20%**')
+            tolerance=st.number_input('Tolerância de conciliação (centavos)',min_value=0,value=core.conciliation_tolerance(a),step=1,key=f"conciliation_tolerance_{a.get('id',a['name'])}",help='Aplica-se somente à diferença entre rubricas e base. Zero exige fechamento exato; não altera a validação base × alíquota.')
+            if tolerance!=core.conciliation_tolerance(a):
+                a['tolerancia_conciliacao_centavos']=int(tolerance)
+                core.save(a,'Alteração da tolerância de conciliação')
+                st.session_state.pop('excel_signature',None)
             twenty_summary,twenty_evidence=core.twenty_composition({**a,'docs':[d]},current)
             twenty_scope=st.radio('Base dos 20% a analisar',['Mensal','13º'],index=1 if d['tipo']=='13º final' else 0,horizontal=True,key=f'twenty_scope_{doc_id}')
             t=next(r for r in twenty_summary if r['base']==twenty_scope)
@@ -174,6 +179,17 @@ with tabs[1]:
             m1.metric('Base vinculada aos 20%',core.brl(t['base_20_centavos']))
             m2.metric('Parcela projetada / hipótese',core.brl(t['parcela_projetada_centavos']))
             m3.metric('Saldo não identificado',core.brl(t['saldo_nao_identificado_centavos']))
+            st.write('Conciliação: '+t['conciliacao'])
+            st.caption('Tolerância: '+core.brl(t['tolerancia_centavos'])+'. Fechamento aritmético não confirma incidência ou crédito.')
+            if t['diferenca_percentual'] is not None:
+                st.caption(f"Diferença absoluta: {core.brl(t['diferenca_absoluta_centavos'])} | Diferença relativa: {t['diferenca_percentual']:.4f}%")
+            for scenario in t['cenarios_historicos']:
+                with st.expander(scenario['cenario'],expanded=True):
+                    st.dataframe(display(scenario['rubricas']),hide_index=True,width='stretch')
+                    st.metric('Base no cenário',core.brl(scenario['reconstruida_centavos']))
+                    st.metric('Diferença no cenário',core.brl(scenario['diferenca_centavos']))
+                    st.write(scenario['conciliacao'])
+                    st.caption(scenario['observacao'])
             st.write(t['situacao'])
             st.caption(t['criterio'])
             if t['quantidade_candidatas']:

@@ -109,9 +109,10 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(row['vigencia_relatorio'].startswith('2018-07'))
         self.assertEqual(row['efeito'],'Acrescenta (sugestão)')
 
-    def test_description_mismatch_does_not_project(self):
+    def test_code_has_priority_over_description(self):
         self.d['competencia']='2012-08';self.d['rubricas'][0]['descricao']='BONUS'
-        self.assertEqual(core.details(self.a)[0]['grupo'],'Não determinado')
+        self.assertEqual(core.details(self.a)[0]['grupo'],'Possíveis acréscimos')
+        self.assertIn('Descrição da folha diferente',core.details(self.a)[0]['motivo'])
 
     def test_missing_base_is_not_zero(self):
         self.d['bases']={}

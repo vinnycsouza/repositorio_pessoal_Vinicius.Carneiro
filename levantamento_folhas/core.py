@@ -11,7 +11,7 @@ from catalog_xlsx import load_workbook as load_catalog_workbook, family as catal
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'dados'
-VERSION = '0.11.1'
+VERSION = '0.12.0'
 PREVIDENCIA = {
     'base_empresa_total': 'Total da base empresa',
     'previdencia_empresa_total': 'Total de previdência empresa',
@@ -268,10 +268,13 @@ def classify(d,r,catalog,decisions):
             base.update(codIncCP=' / '.join(sorted(codes)),descricao_relatorio=' | '.join(sorted({x['dsc_rubr'] for x in candidates})),
                         vigencia_relatorio=' | '.join(sorted({x['ini_valid']+' a '+(x['fim_valid'] or 'sem fim informado') for x in candidates})),
                         fonte_referencia=' | '.join(sorted({x.get('arquivo_origem','') for x in candidates})))
-            identity=bool(exact) and len(tables)==1
+            maternity=codes & {'21','22','25','26'}
+            scopes={'13º' if cp in {'12','22','26'} else 'Mensal' for cp in codes if cp in {'11','12','21','22','25','26'}}
+            if maternity and len(tables)==1 and types=={'1' if r['lado']=='Provento' else '2'} and len(scopes)==1 and codes <= {'00','11','12','21','22','25','26'}:
+                base['base_diagnostico_maternidade']=next(iter(scopes))
+            identity=len(tables)==1
             expected_type='1' if r['lado']=='Provento' else '2'
-            # Different descriptions do not override a fiscal disagreement. One exact
-            # identity and agreement across ALL candidate fiscal records are required.
+            # Code is primary; descriptions never resolve conflicting fiscal records.
             concordant=len(codes)==1 and len(types)==1
             insured=identity and types=={'2'} and r['lado']=='Desconto' and bool(codes & {'31','32'}) and codes <= {'00','31','32'}
             if identity and (concordant or insured):
@@ -284,11 +287,11 @@ def classify(d,r,catalog,decisions):
                     if target<start: return start-target
                     if end is not None and target>end: return target-end
                     return 0
-                chosen=min(exact,key=lambda x:(distance(x),x['ini_valid'],x.get('arquivo_origem','')))
+                chosen=min(exact or candidates,key=lambda x:(distance(x),x['ini_valid'],x.get('arquivo_origem','')))
                 code=chosen['cod_inc_cp']
                 variants=len({norm(x['dsc_rubr']) for x in candidates})>1
                 base.update(origem='S-1010: '+chosen['dsc_rubr'],
-                            correspondencia='Código e descrição: projeção histórica' if historical else 'Código e vigência compatíveis',
+                            correspondencia='Código correspondente: projeção histórica' if historical else 'Código e vigência compatíveis',
                             referencia='Projeção pelo cadastro disponível' if historical else 'Cadastro compatível com o período',
                             vigencia_relatorio=chosen['ini_valid']+' a '+(chosen['fim_valid'] or 'sem fim informado'))
                 if insured:
@@ -306,8 +309,10 @@ def classify(d,r,catalog,decisions):
                     base.update(base='13º' if code in ('22','26') else 'Mensal',natureza='Tratamento patronal específico',motivo='Maternidade: validar período e tratamento patronal; não somada automaticamente.')
                 else:
                     base.update(natureza='Tratamento específico',motivo='Código técnico ou tratamento específico; não incluído automaticamente.')
+                if not exact:
+                    base['motivo']+=' Descrição da folha diferente do cadastro; correspondência pelo código, com divergência descritiva preservada.'
                 if variants:
-                    base['motivo']+=' Há variações de descrição no cadastro, mas uma corresponde exatamente à folha após uniformizar espaços e acentos.'
+                    base['motivo']+=' Há variações de descrição no cadastro; a correspondência prioriza o código.'
             else:
                 if len(tables)>1 or not concordant:
                     base.update(correspondencia='Conflito no histórico' if historical else 'Cadastro ambíguo',origem='Versões/tabelas divergentes',motivo='Incidência, tipo ou tabela divergentes; nenhuma versão escolhida para fechar a base.')
@@ -319,7 +324,7 @@ def classify(d,r,catalog,decisions):
                 if identity and types=={expected_type} and len(positive)==1 and codes <= positive | {'00'}:
                     code=next(iter(positive))
                     base.update(base_candidata='Mensal' if code=='11' else '13º',sinal_candidato=1 if expected_type=='1' else -1,
-                                criterio_candidato='Mesmo código, descrição e tipo; versões divergem entre incidência '+code+' e 00. Cenário condicionado à validação do cadastro.')
+                                criterio_candidato='Mesmo código e tipo; versões divergem entre incidência '+code+' e 00. Cenário condicionado à validação do cadastro.')
     if base['referencia']=='Projeção pelo cadastro disponível':
         base['motivo']+=' Referência de outra época; tratamento da competência não comprovado.'
     if base['efeito']=='Pendente' and base['referencia']!='Não determinada':
@@ -762,7 +767,44 @@ def twenty_composition(a,rows=None):
                               'candidatas_conflitantes_centavos':candidate_total,'saldo_condicionado_centavos':candidate_residual,'situacao':status,'criterio':reason,'arquivo':d['arquivo']})
             for r in selected:
                 evidence.append({k:r.get(k) for k in ['cnpj','competencia','tipo','documento','base','codigo','descricao','papel','valor_centavos','parcela_centavos','parcela_candidata_centavos','quantidade','referencia','criterio','evidencia_20','pagina','arquivo']})
+    tolerance=conciliation_tolerance(a)
+    references={(d['hash'],r['base']):r for d in a['docs'] for r in company_summary(d)}
+    for summary in summaries:
+        ref=references[(summary['documento'],summary['base'])]
+        usable=ref['situacao_grupos']=='Somente linhas com 20%' and ref['total_informado_centavos']==summary['base_20_centavos'] and summary['base_20_centavos'] not in (None,0)
+        delta=summary['saldo_nao_identificado_centavos']
+        summary.update(conciliacao=conciliation_status(delta,tolerance) if usable else 'Inconclusiva',
+                       tolerancia_centavos=tolerance,
+                       diferenca_absoluta_centavos=abs(delta) if usable else None,
+                       diferenca_percentual=abs(delta)/abs(summary['base_20_centavos'])*100 if usable else None,
+                       cenarios_historicos=[])
+        historical=[r for r in rows if r['documento']==summary['documento'] and r.get('base_diagnostico_maternidade')==summary['base'] and r['efeito']=='Pendente' and r['chave'] not in a.get('decisions',{})]
+        if historical:
+            value=sum(r['valor_centavos']*(1 if r['lado']=='Provento' else -1) for r in historical)
+            scenario_delta=delta-value if usable else None
+            summary['cenarios_historicos'].append({
+                'cenario':'Inclusão das rubricas de salário-maternidade pendentes',
+                'rubricas':[{'codigo':r['codigo'],'descricao':r['descricao'],'valor_centavos':r['valor_centavos'],'pagina':r['pagina']} for r in historical],
+                'parcela_centavos':value,
+                'reconstruida_centavos':summary['parcela_projetada_centavos']+value if usable else None,
+                'diferenca_centavos':scenario_delta,
+                'conciliacao':conciliation_status(scenario_delta,tolerance) if usable else 'Inconclusiva',
+                'observacao':'Cenário diagnóstico com todas as rubricas compatíveis, sem adoção automática. Fechamento não comprova incidência, recolhimento ou direito a crédito.' if usable else 'Sem atribuição aos 20%: referência indisponível ou distribuição entre grupos não comprovada.'})
     return summaries,evidence
+
+
+def conciliation_tolerance(a):
+    value=a.get('tolerancia_conciliacao_centavos',0)
+    if isinstance(value,bool) or not isinstance(value,int) or value<0:
+        raise ValueError('A tolerância de conciliação deve ser um inteiro não negativo em centavos.')
+    return value
+
+
+def conciliation_status(delta,tolerance):
+    if delta is None:return 'Inconclusiva'
+    if delta==0:return 'Fechamento exato'
+    if abs(delta)<=tolerance:return 'Dentro da tolerância'
+    return 'Divergente'
 
 
 def proportional_twenty(a,rows=None):
