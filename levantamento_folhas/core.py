@@ -11,7 +11,7 @@ from catalog_xlsx import load_workbook as load_catalog_workbook, family as catal
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'dados'
-VERSION = '0.12.1'
+VERSION = '0.12.2'
 PREVIDENCIA = {
     'base_empresa_total': 'Total da base empresa',
     'previdencia_empresa_total': 'Total de previdência empresa',

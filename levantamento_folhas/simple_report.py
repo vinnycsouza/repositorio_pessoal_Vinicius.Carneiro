@@ -2,7 +2,7 @@
 import io
 import math
 from datetime import datetime
-from collections import defaultdict
+from collections import defaultdict, Counter
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
@@ -31,6 +31,31 @@ def blocks(a):
         values=[i[d['hash']] for i in indexes]
         result.append(dict(zip(('document','rows','twenty','evidence','simulations','estimates','total','trace'),[d,*values])))
     return result
+
+
+def report_checks(grouped):
+    """Document checks and displayed block counts, without changing classification."""
+    counts=Counter();quality=Counter();duplicates=Counter();exact_pending=0
+    for item in grouped:
+        d=item['document']
+        duplicates[(d['cnpj'],d['competencia'],d['tipo'])]+=1
+        checks={r['teste']:r.get('diferenca_centavos') for r in d.get('checagens',[])}
+        required=('proventos','descontos','liquido')
+        if any(checks.get(k) not in (None,0) for k in required):quality['divergente']+=1
+        elif all(checks.get(k)==0 for k in required):quality['confere']+=1
+        else:quality['incompleta']+=1
+        for t in item['twenty']:
+            total=next(r for r in item['total'] if r['base']==t['base'])
+            if total['informada_centavos'] is None and not any(r['base']==t['base'] for r in item['trace']):continue
+            counts[t['conciliacao']]+=1
+            if t['conciliacao']=='Fechamento exato' and pending_for_base(item,t['base']):exact_pending+=1
+    return {'conciliacao':dict(counts),'extracao':dict(quality),'exatos_com_pendencias':exact_pending,
+            'possiveis_sobreposicoes':sum(v-1 for v in duplicates.values() if v>1)}
+
+
+def pending_for_base(item,base):
+    return [r for r in item['rows'] if r['efeito']=='Pendente' and
+            (r['base']==base or r['base']=='Não determinada' or r.get('base_candidata')==base)]
 
 def export_excel(a):
     import core
@@ -70,6 +95,8 @@ def export_excel(a):
         note=criterion if criterion is not None else r.get('criterio',r.get('motivo',''))
         append(s,[r['codigo'],r['descricao'],r.get('valor_centavos',r.get('valor_integral_centavos'))/100,
                   None if parcel is None else parcel/100,r.get('referencia',''),note,r.get('pagina')])
+        s.cell(cursor[s.title],1).number_format='@'
+        s.cell(cursor[s.title],1).alignment=Alignment(horizontal='left',vertical='top',wrap_text=True)
     def headings(amount_label):
         return (*HEADERS[:3],amount_label,*HEADERS[4:])
     def sections(s,records,field,add_title,reduce_title,amount_label):
@@ -96,6 +123,21 @@ def export_excel(a):
         span=(periods[0]+' a '+periods[-1]) if periods else 'Sem competências'
         text(s,f"Recorte: {len(grouped)} folha(s), {len(periods)} competência(s), de {span}. Filtro de previdência empresa: {a.get('filtro_previdencia','Todas')}.")
         text(s,'Valores em reais. Mensal e 13º permanecem separados. Hipótese e estimativa são cenários independentes: não somar. O Excel é um retrato da análise; alterações não recalculam as classificações.')
+        text(s,'Este relatório confere a composição da base previdenciária. Os valores de base e diferenças não representam crédito apurado nem comprovam recolhimento.')
+        if name==SHEETS[0] and grouped:
+            checks=report_checks(grouped)
+            text(s,'Resumo da conferência','section')
+            text(s,'Cada bloco corresponde à base mensal ou de 13º de uma folha. As contagens abaixo abrangem os blocos apresentados nesta aba.')
+            for status in ('Fechamento exato','Dentro da tolerância','Divergente','Inconclusiva'):
+                amount(s,status,checks['conciliacao'].get(status,0)*100,kind=None)
+                s.cell(cursor[s.title],4).number_format='0'
+            amount(s,'Fechamentos exatos com rubricas pendentes',checks['exatos_com_pendencias']*100,kind=None)
+            s.cell(cursor[s.title],4).number_format='0'
+            text(s,'Saldo zero comprova apenas igualdade aritmética. As rubricas e referências históricas ainda exigem validação. Pendências de base não determinada podem aparecer nos dois blocos; não somar suas contagens.')
+            quality=checks['extracao']
+            text(s,f"Conferência de proventos, descontos e líquido: {quality.get('confere',0)} folha(s) sem diferença; {quality.get('divergente',0)} com diferença; {quality.get('incompleta',0)} sem conferência completa.")
+            if checks['possiveis_sobreposicoes']:
+                text(s,f"Atenção: {checks['possiveis_sobreposicoes']} documento(s) adicional(is) para a mesma empresa, competência e tipo. Conferir eventual sobreposição antes de somar valores.")
         if a.get('catalog',{}).get('identificacao_manual'):
             text(s,'Cadastro de incidência: empresa vinculada manualmente pelo usuário à raiz CNPJ '+a['catalog']['empresa_raiz']+'. O arquivo de incidência não contém identificação da empresa.')
         if not grouped:text(s,'Nenhuma folha no recorte selecionado.')
@@ -108,6 +150,14 @@ def export_excel(a):
             text(s,f"{d['competencia']} · {d.get('empresa',d['cnpj'])} · CNPJ {d['cnpj']} · Folha: {d['tipo']}",'title')
             text(s,'Fonte: '+d['arquivo'])
             if d.get('alertas'):text(s,'Alertas do documento: '+'; '.join(d['alertas']))
+            doc_checks=d.get('checagens',[])
+            if any(r.get('diferenca_centavos') not in (None,0) for r in doc_checks):
+                text(s,'Atenção: soma das rubricas ou líquido difere dos totais da folha. Conferir extração antes de utilizar a composição.')
+            if name==SHEETS[1]:
+                text(s,'Conferência da extração — soma comparada ao total informado','header')
+                for check in doc_checks:
+                    amount(s,'Diferença de '+check['teste'],check.get('diferenca_centavos'),'Extraído menos informado. Zero indica igualdade aritmética.',kind=None)
+                if not doc_checks:text(s,'Conferência da extração não disponível neste documento.')
             # Document-level totals occur once, only on the supporting sheet.
             if name==SHEETS[1]:
                 text(s,'Totais do documento — não somar novamente às bases mensal e de 13º','section')
@@ -134,6 +184,9 @@ def export_excel(a):
                     amount(s,'Total projetado / hipótese',t['parcela_projetada_centavos'])
                     amount(s,'Diferença: base dos 20% menos hipótese',t['saldo_nao_identificado_centavos'])
                     text(s,'Conciliação: '+t['conciliacao']+' | Tolerância: '+core.brl(t['tolerancia_centavos'])+'. Fechamento aritmético não confirma crédito.')
+                    pending=pending_for_base(item,base)
+                    if pending:
+                        text(s,f"Permanecem {len(pending)} ocorrência(s) pendente(s) neste bloco ou sem base determinada. Mesmo com saldo zero, revisar os cenários e as pendências na aba Composição da base total.")
                     if t['diferenca_percentual'] is not None:
                         text(s,f"Diferença absoluta: {core.brl(t['diferenca_absoluta_centavos'])} | Diferença relativa: {t['diferenca_percentual']:.4f}% da base dos 20%.")
                     for scenario in t['cenarios_historicos']+t['cenarios_identidade']:
@@ -189,7 +242,10 @@ def export_excel(a):
                 pending=[r for r in item['trace'] if r['papel']=='Pendente sem valor atribuído']
                 if pending:
                     text(s,'Pendências sem parcela atribuída — não somadas às bases','section');append(s,HEADERS,'header')
-                    for r in sorted(pending,key=lambda r:-abs(r['valor_centavos'])):rubric(s,r,None)
+                    for r in sorted(pending,key=lambda r:-abs(r['valor_centavos'])):
+                        original=next((x for x in item['rows'] if x['codigo']==r['codigo'] and x['descricao']==r['descricao'] and x['pagina']==r['pagina'] and x['lado']==r['lado']),{})
+                        note=r['criterio']+' Cadastro: '+original.get('descricao_relatorio','não localizado')+'; incidência CP: '+original.get('codIncCP','não informada')+'.'
+                        rubric(s,r,None,note)
             text(s,'Diferença negativa indica que a composição excede a base de referência. Valores ausentes não equivalem a zero.')
         s.freeze_panes='C5'
         s.print_options.horizontalCentered=True
