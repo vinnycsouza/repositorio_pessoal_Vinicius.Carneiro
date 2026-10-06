@@ -1,0 +1,8 @@
+# Arquivos auxiliares e temporarios criados pelo Codex
+.codex_sheet_read/
+.codex_tmp/
+
+# Artefatos locais comuns do Python
+__pycache__/
+*.py[cod]
+
