@@ -32,6 +32,7 @@ class RegistroEcac:
     recibo_retificado: str
     hash_arquivo: str
     situacao: str = "Vigente"
+    salario_maternidade: float | None = None
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ def analisar_texto_dctfweb(
         raise ValueError("O documento não foi reconhecido como Declaração Completa da DCTFWeb.")
 
     cnpj = _primeiro(r"CNPJ\s+(\d{2}[.]\d{3}[.]\d{3}/\d{4}-\d{2})", texto)
-    competencia = _primeiro(r"PERIODO APURACAO\s+(\d{2}/\d{4})", texto)
+    competencia = _primeiro(r"PERIODO APURACAO\s+(\d{2}/\d{4}|\d{4})(?=\s)", texto)
     recibo = _primeiro(r"NUMERO DO RECIBO\s+(\d+)", texto)
     recibo_retificado = _primeiro(
         r"NUMERO DO RECIBO DA DECLARACAO RETIFICADA\s+(\d+)", texto
@@ -106,6 +107,9 @@ def analisar_texto_dctfweb(
         r"SALARIO\s+FAMILIA\s*:\s*([0-9.]+,[0-9]{2})", texto
     )
     valor = _moeda_brasileira(valor_txt) if valor_txt else None
+    # Os valores estão nos blocos de deduções vinculadas aos débitos.
+    valores_maternidade = re.findall(r"SALARIO[\s-]+MATERNIDADE\s*:\s*([0-9.]+,[0-9]{2})", texto)
+    maternidade = round(sum(_moeda_brasileira(v) for v in valores_maternidade), 2) if valores_maternidade else None
     if not cnpj or not competencia:
         raise ValueError("CNPJ ou competência não foram localizados no documento.")
 
@@ -115,11 +119,12 @@ def analisar_texto_dctfweb(
         cnpj=cnpj,
         competencia=competencia,
         salario_familia=valor,
+        salario_maternidade=maternidade,
         recibo=recibo,
         transmitido_em=transmitido_em,
         recibo_retificado=recibo_retificado,
         hash_arquivo=hash_arquivo,
-        situacao="Vigente" if valor is not None else "Salário-família não informado",
+        situacao="Vigente" if maternidade is not None else "Salário-maternidade não informado",
     )
 
 
@@ -194,12 +199,12 @@ def processar_arquivos(
     documentos["situacao"] = "Substituída por declaração posterior"
     indices_vigentes = documentos.groupby(["cnpj", "competencia"], sort=False).tail(1).index
     documentos.loc[indices_vigentes, "situacao"] = documentos.loc[
-        indices_vigentes, "salario_familia"
-    ].apply(lambda valor: "Vigente" if pd.notna(valor) else "Salário-família não informado")
+        indices_vigentes, "salario_maternidade"
+    ].apply(lambda valor: "Vigente" if pd.notna(valor) else "Salário-maternidade não informado")
 
     vigentes = documentos.loc[indices_vigentes].copy()
     resumo = vigentes[
-        ["empresa", "cnpj", "competencia", "salario_familia", "arquivo"]
+        ["empresa", "cnpj", "competencia", "salario_maternidade", "salario_familia", "arquivo", "recibo", "transmitido_em", "recibo_retificado"]
     ].sort_values(["cnpj", "competencia"])
     resumo = ordenar_competencias(resumo)
     documentos = ordenar_competencias(documentos.drop(columns=["_ordem_data"]))

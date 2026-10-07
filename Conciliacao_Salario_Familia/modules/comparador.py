@@ -25,7 +25,13 @@ def normalizar_competencia(valor: object) -> str:
 
 def ordenar_competencias(dados: pd.DataFrame) -> pd.DataFrame:
     base = dados.copy()
-    base["_periodo"] = pd.to_datetime(base["competencia"], format="%m/%Y", errors="coerce")
+    def chave(valor):
+        texto = normalizar_competencia(valor)
+        if re.fullmatch(r"\d{4}", texto):
+            return int(texto) * 100 + 13
+        match = re.fullmatch(r"(\d{2})/(\d{4})", texto)
+        return int(match[2]) * 100 + int(match[1]) if match else float("inf")
+    base["_periodo"] = base["competencia"].map(chave)
     return base.sort_values(["cnpj", "_periodo", "competencia"], kind="stable", na_position="last").drop(columns="_periodo")
 
 

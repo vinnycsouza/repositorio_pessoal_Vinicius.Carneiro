@@ -18,7 +18,8 @@ def _ajustar_planilha(ws) -> None:
     for celula in ws[1]:
         celula.fill = PatternFill("solid", fgColor=AZUL)
         celula.font = Font(color="FFFFFF", bold=True)
-        celula.alignment = Alignment(horizontal="center", vertical="center")
+        celula.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 36
     for coluna in ws.columns:
         valores = [str(c.value or "") for c in coluna[:200]]
         largura = min(max(max(map(len, valores), default=0) + 2, 12), 48)
@@ -32,15 +33,17 @@ def gerar_excel_ecac(
 ) -> bytes:
     memoria = io.BytesIO()
     with pd.ExcelWriter(memoria, engine="openpyxl") as writer:
-        resumo.to_excel(writer, sheet_name="Salário Família", index=False)
+        aba = "Salário Maternidade" if "salario_maternidade" in resumo else "Salário Família"
+        exibicao = resumo.drop(columns="salario_familia", errors="ignore") if "salario_maternidade" in resumo else resumo
+        exibicao.to_excel(writer, sheet_name=aba, index=False)
         documentos.to_excel(writer, sheet_name="Documentos", index=False)
         if not ocorrencias.empty:
             ocorrencias.to_excel(writer, sheet_name="Ocorrências", index=False)
         for ws in writer.book.worksheets:
             _ajustar_planilha(ws)
-        principal = writer.book["Salário Família"]
+        principal = writer.book[aba]
         cabecalhos = {celula.value: celula.column for celula in principal[1]}
-        coluna_valor = cabecalhos.get("salario_familia")
+        coluna_valor = cabecalhos.get("salario_maternidade", cabecalhos.get("salario_familia"))
         if coluna_valor:
             for celula in principal.iter_cols(
                 min_col=coluna_valor,
@@ -58,6 +61,8 @@ def gerar_excel_comparativo(
     ecac: pd.DataFrame,
     levantamento: pd.DataFrame,
     detalhe: pd.DataFrame | None = None,
+    classificacao: pd.DataFrame | None = None,
+    ocorrencias: pd.DataFrame | None = None,
 ) -> bytes:
     memoria = io.BytesIO()
     with pd.ExcelWriter(memoria, engine="openpyxl") as writer:
@@ -65,11 +70,23 @@ def gerar_excel_comparativo(
         ecac.to_excel(writer, sheet_name="Dados e-CAC", index=False)
         levantamento.to_excel(writer, sheet_name="Levantamento", index=False)
         if detalhe is not None:
-            detalhe.to_excel(writer, sheet_name="Detalhe levantamento", index=False)
+            detalhe.to_excel(writer, sheet_name="Composição das rubricas", index=False)
+        if classificacao is not None:
+            classificacao.to_excel(writer, sheet_name="Classificação", index=False)
+        if ocorrencias is not None and not ocorrencias.empty:
+            ocorrencias.to_excel(writer, sheet_name="Validação e ocorrências", index=False)
+        if "Potencial crédito com apoios" in comparativo:
+            pd.DataFrame([
+                {"Critério": "Potencial crédito sem apoios", "Descrição": "Máximo entre Principal menos Declarado no e-CAC e zero. Campo indisponível quando falta valor de origem."},
+                {"Critério": "Potencial crédito com apoios", "Descrição": "Máximo entre Total identificado menos Declarado no e-CAC e zero. Sujeito à validação jurídica dos apoios considerados."},
+                {"Critério": "Declarado superior", "Descrição": "Diferença positiva quando o declarado supera o levantamento, com e sem apoios. Não é crédito negativo."},
+                {"Critério": "Validador", "Descrição": "Confere origem e composição; lançamentos ausentes do levantamento não são incluídos automaticamente. Consulte as ocorrências."},
+                {"Critério": "Apurações anuais", "Descrição": "Competência AAAA representa apuração anual de 13º, separada das competências mensais MM/AAAA."},
+            ]).to_excel(writer, sheet_name="Critérios", index=False)
         for ws in writer.book.worksheets:
             _ajustar_planilha(ws)
             for celula in ws[1]:
-                if "valor" in str(celula.value).lower() or "diferença" in str(celula.value).lower():
+                if any(t in str(celula.value).lower() for t in ["valor", "diferença", "crédito", "declarado", "total identificado", "principal", "apoios considerados"]):
                     for item in ws.iter_cols(
                         min_col=celula.column,
                         max_col=celula.column,
