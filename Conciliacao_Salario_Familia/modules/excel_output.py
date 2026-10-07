@@ -57,12 +57,15 @@ def gerar_excel_comparativo(
     comparativo: pd.DataFrame,
     ecac: pd.DataFrame,
     levantamento: pd.DataFrame,
+    detalhe: pd.DataFrame | None = None,
 ) -> bytes:
     memoria = io.BytesIO()
     with pd.ExcelWriter(memoria, engine="openpyxl") as writer:
         comparativo.to_excel(writer, sheet_name="Comparativo", index=False)
         ecac.to_excel(writer, sheet_name="Dados e-CAC", index=False)
         levantamento.to_excel(writer, sheet_name="Levantamento", index=False)
+        if detalhe is not None:
+            detalhe.to_excel(writer, sheet_name="Detalhe levantamento", index=False)
         for ws in writer.book.worksheets:
             _ajustar_planilha(ws)
             for celula in ws[1]:

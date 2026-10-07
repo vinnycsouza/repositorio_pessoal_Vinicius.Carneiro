@@ -12,6 +12,8 @@ def normalizar_cnpj(valor: object) -> str:
 
 def normalizar_competencia(valor: object) -> str:
     texto = str(valor or "").strip()
+    if re.fullmatch(r"\d{6}", texto):
+        texto = f"{texto[:2]}/{texto[2:]}"
     encontrados = re.search(r"(\d{1,2})[/-](\d{4})", texto)
     if encontrados:
         return f"{int(encontrados.group(1)):02d}/{encontrados.group(2)}"
@@ -19,6 +21,20 @@ def normalizar_competencia(valor: object) -> str:
     if encontrados:
         return f"{int(encontrados.group(2)):02d}/{encontrados.group(1)}"
     return texto
+
+
+def ordenar_competencias(dados: pd.DataFrame) -> pd.DataFrame:
+    base = dados.copy()
+    base["_periodo"] = pd.to_datetime(base["competencia"], format="%m/%Y", errors="coerce")
+    return base.sort_values(["cnpj", "_periodo", "competencia"], kind="stable", na_position="last").drop(columns="_periodo")
+
+
+def normalizar_valor(valor: object) -> float:
+    if isinstance(valor, str):
+        valor = valor.strip().replace("R$", "").replace(" ", "")
+        if "," in valor:
+            valor = valor.replace(".", "").replace(",", ".")
+    return pd.to_numeric(valor, errors="coerce")
 
 
 def _sem_acentos(valor: object) -> str:
@@ -62,7 +78,7 @@ def preparar_levantamento(
         {
             "cnpj": base[coluna_cnpj].map(normalizar_cnpj),
             "competencia": base[coluna_competencia].map(normalizar_competencia),
-            "valor_levantamento": pd.to_numeric(base[coluna_valor], errors="coerce"),
+            "valor_levantamento": base[coluna_valor].map(normalizar_valor),
         }
     ).dropna(subset=["valor_levantamento"])
     preparado["origem"] = origem
@@ -103,5 +119,5 @@ def comparar(ecac: pd.DataFrame, levantamento: pd.DataFrame) -> pd.DataFrame:
         return "DCTFWeb superior ao levantamento"
 
     resultado["situação"] = resultado.apply(situacao, axis=1)
-    return resultado.drop(columns=["_merge"]).sort_values(["cnpj", "competencia"])
+    return ordenar_competencias(resultado.drop(columns=["_merge"]))
 

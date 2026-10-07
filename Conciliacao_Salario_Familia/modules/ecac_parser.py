@@ -12,6 +12,7 @@ from typing import Iterable
 
 import pandas as pd
 from pypdf import PdfReader
+from modules.comparador import ordenar_competencias
 
 
 MAX_PDF_BYTES = 30 * 1024 * 1024
@@ -200,7 +201,8 @@ def processar_arquivos(
     resumo = vigentes[
         ["empresa", "cnpj", "competencia", "salario_familia", "arquivo"]
     ].sort_values(["cnpj", "competencia"])
-    documentos = documentos.drop(columns=["_ordem_data"])
+    resumo = ordenar_competencias(resumo)
+    documentos = ordenar_competencias(documentos.drop(columns=["_ordem_data"]))
     return resumo.reset_index(drop=True), documentos.reset_index(drop=True), pd.DataFrame(
         [asdict(item) for item in ocorrencias]
     )

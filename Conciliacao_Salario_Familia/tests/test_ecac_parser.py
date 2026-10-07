@@ -15,6 +15,16 @@ Deduções Salário Família: 1.512,02
 
 
 class EcacParserTest(unittest.TestCase):
+    def test_excel_ecac_ordenado_por_ano_e_mes(self):
+        from unittest.mock import patch
+        periodos = ["01/2023", "12/2021", "01/2022"]
+        registros = [analisar_texto_dctfweb(TEXTO.replace("03/2026", p), f"{i}.pdf") for i, p in enumerate(periodos)]
+        with patch("modules.ecac_parser.iterar_pdfs") as it, patch("modules.ecac_parser.analisar_pdf", side_effect=registros):
+            it.side_effect = [iter([(f"{i}.pdf", bytes([i]))]) for i in range(3)]
+            resumo, documentos, _ = processar_arquivos([(f"{i}.pdf", bytes([i])) for i in range(3)])
+        for base in (resumo, documentos):
+            self.assertEqual(base.competencia.tolist(), ["12/2021", "01/2022", "01/2023"])
+
     def test_extrai_apenas_dados_necessarios(self):
         registro = analisar_texto_dctfweb(TEXTO, "declaracao.pdf")
         self.assertEqual(registro.cnpj, "20.364.206/0001-08")

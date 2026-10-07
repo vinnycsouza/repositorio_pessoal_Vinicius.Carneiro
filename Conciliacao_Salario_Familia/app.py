@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import io
+import hashlib
 
 import pandas as pd
 import streamlit as st
 
 from modules.comparador import comparar, localizar_coluna, preparar_levantamento
 from modules.ecac_parser import processar_arquivos
+from modules.levantamento_parser import identificar_modelo, importar_modelo
 from modules.excel_output import gerar_excel_comparativo, gerar_excel_ecac
 
 
@@ -93,45 +95,73 @@ else:
     origem = st.selectbox("Origem do levantamento", ["MANAD", "XML/eSocial", "Outro"])
 
     if arquivo_ecac and arquivo_levantamento:
+        assinatura = hashlib.sha256(arquivo_ecac.getvalue() + arquivo_levantamento.getvalue()).hexdigest()
+        if st.session_state.get("comparativo_arquivos") != assinatura:
+            st.session_state.pop("comparativo", None)
+            st.session_state["comparativo_arquivos"] = assinatura
         ecac = pd.read_excel(io.BytesIO(arquivo_ecac.getvalue()), sheet_name="Salário Família")
-        levantamento, _ = ler_planilha(arquivo_levantamento)
-        colunas = list(map(str, levantamento.columns))
+        modelo = None
+        if arquivo_levantamento.name.lower().endswith(".xlsx"):
+            with pd.ExcelFile(io.BytesIO(arquivo_levantamento.getvalue())) as excel_modelo:
+                modelo = identificar_modelo(excel_modelo.sheet_names)
+        automatico = modelo and st.checkbox(f"Usar leitura automática do modelo {modelo}", value=True)
+        preparado = None
+        detalhe = None
+        if automatico:
+            try:
+                preparado, detalhe, avisos = importar_modelo(arquivo_levantamento.getvalue(), modelo)
+                if preparado.empty:
+                    st.session_state.pop("comparativo", None)
+                for aviso in avisos:
+                    st.warning(aviso)
+                st.dataframe(preparado, use_container_width=True, hide_index=True)
+            except (ValueError, KeyError) as exc:
+                st.session_state.pop("comparativo", None)
+                st.error(f"Não foi possível importar o modelo: {exc}")
+        else:
+            levantamento, _ = ler_planilha(arquivo_levantamento)
+            colunas = list(map(str, levantamento.columns))
 
-        sugestao_cnpj = localizar_coluna(colunas, ["cnpj", "cnpj_empregador"])
-        sugestao_comp = localizar_coluna(colunas, ["competencia", "per_apur", "periodo"])
-        sugestao_valor = localizar_coluna(colunas, ["valor", "vr_rubr", "valor_pago"])
-        sugestao_desc = localizar_coluna(colunas, ["descricao", "dsc_rubr", "rubrica"])
+            sugestao_cnpj = localizar_coluna(colunas, ["cnpj", "cnpj_empregador"])
+            sugestao_comp = localizar_coluna(colunas, ["competencia", "per_apur", "periodo"])
+            sugestao_valor = localizar_coluna(colunas, ["valor", "vr_rubr", "valor_pago"])
+            sugestao_desc = localizar_coluna(colunas, ["descricao", "dsc_rubr", "rubrica"])
 
-        def indice(coluna):
-            return colunas.index(coluna) if coluna in colunas else 0
+            def indice(coluna):
+                return colunas.index(coluna) if coluna in colunas else 0
 
-        c1, c2, c3 = st.columns(3)
-        coluna_cnpj = c1.selectbox("Coluna do CNPJ", colunas, index=indice(sugestao_cnpj))
-        coluna_comp = c2.selectbox("Coluna da competência", colunas, index=indice(sugestao_comp))
-        coluna_valor = c3.selectbox("Coluna do valor", colunas, index=indice(sugestao_valor))
-        opcoes_desc = ["Não filtrar"] + colunas
-        indice_desc = opcoes_desc.index(sugestao_desc) if sugestao_desc in opcoes_desc else 0
-        coluna_desc = st.selectbox("Coluna para localizar salário-família", opcoes_desc, index=indice_desc)
-        filtro = st.text_input(
-            "Descrições consideradas (separe por ponto e vírgula)",
-            value="salário família;salario familia",
-            disabled=coluna_desc == "Não filtrar",
-        )
-
-        if st.button("Gerar comparação", type="primary"):
-            preparado = preparar_levantamento(
-                levantamento,
-                coluna_cnpj,
-                coluna_comp,
-                coluna_valor,
-                origem,
-                None if coluna_desc == "Não filtrar" else coluna_desc,
-                filtro,
+            c1, c2, c3 = st.columns(3)
+            coluna_cnpj = c1.selectbox("Coluna do CNPJ", colunas, index=indice(sugestao_cnpj))
+            coluna_comp = c2.selectbox("Coluna da competência", colunas, index=indice(sugestao_comp))
+            coluna_valor = c3.selectbox("Coluna do valor", colunas, index=indice(sugestao_valor))
+            opcoes_desc = ["Não filtrar"] + colunas
+            indice_desc = opcoes_desc.index(sugestao_desc) if sugestao_desc in opcoes_desc else 0
+            coluna_desc = st.selectbox("Coluna para localizar salário-família", opcoes_desc, index=indice_desc)
+            filtro = st.text_input(
+                "Descrições consideradas (separe por ponto e vírgula)",
+                value="salário família;salario familia",
+                disabled=coluna_desc == "Não filtrar",
             )
-            resultado = comparar(ecac, preparado)
-            st.session_state["comparativo"] = resultado
-            st.session_state["comparativo_ecac"] = ecac
-            st.session_state["comparativo_levantamento"] = preparado
+
+
+        if st.button("Gerar comparação", type="primary", disabled=bool(automatico and (preparado is None or preparado.empty))):
+            st.session_state.pop("comparativo", None)
+            try:
+                if not automatico:
+                    preparado = preparar_levantamento(
+                        levantamento, coluna_cnpj, coluna_comp, coluna_valor, origem,
+                        None if coluna_desc == "Não filtrar" else coluna_desc, filtro,
+                    )
+                if preparado.empty:
+                    st.warning("Nenhum lançamento encontrado para comparar. Ausência não representa zero.")
+                else:
+                    resultado = comparar(ecac, preparado)
+                    st.session_state["comparativo"] = resultado
+                    st.session_state["comparativo_ecac"] = ecac
+                    st.session_state["comparativo_levantamento"] = preparado
+                    st.session_state["comparativo_detalhe"] = detalhe
+            except (ValueError, KeyError) as exc:
+                st.error(f"Não foi possível comparar: {exc}")
 
     resultado = st.session_state.get("comparativo")
     if isinstance(resultado, pd.DataFrame):
@@ -151,6 +181,7 @@ else:
             resultado,
             st.session_state["comparativo_ecac"],
             st.session_state["comparativo_levantamento"],
+            st.session_state.get("comparativo_detalhe"),
         )
         st.download_button(
             "Baixar Excel comparativo",
