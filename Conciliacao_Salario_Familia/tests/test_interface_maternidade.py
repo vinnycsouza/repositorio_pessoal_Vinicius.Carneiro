@@ -46,12 +46,24 @@ class InterfaceMaternidadeTest(unittest.TestCase):
             self.assertFalse(app.exception)
             self.assertEqual(len(app.get("download_button")), 1)
             self.assertTrue(any(h.value == "Resultado da conciliação" for h in app.subheader))
-            classes = app.dataframe[0].value.copy()
-            classes.loc[classes.grupo == "Apoio", "grupo"] = "Excluir"
-            with patch("streamlit.data_editor", return_value=classes):
-                app.run()
-                self.assertFalse(app.exception)
-                self.assertEqual(len(app.get("download_button")), 0)
+            grupos = [s for s in app.selectbox if s.label == "Como considerar esta rubrica?"]
+            self.assertEqual(len(grupos), 2)
+            grupos[1].set_value("Excluir").run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.get("download_button")), 0)
+            grupos = [s for s in app.selectbox if s.label == "Como considerar esta rubrica?"]
+            grupos[0].set_value("Revisar").run()
+            self.assertFalse(app.exception)
+            self.assertTrue(app.button[0].disabled)
+            self.assertFalse(app.error)
+            self.assertTrue(any("Faltam classificar 1" in w.value for w in app.warning))
+            grupos = [s for s in app.selectbox if s.label == "Como considerar esta rubrica?"]
+            grupos[0].set_value("Principal").run()
+            app.button[0].click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.get("download_button")), 1)
+            resultado = app.session_state["comparativo_maternidade"][0]
+            self.assertEqual(resultado.iloc[0]["Apoios considerados"], 0)
 
 
 if __name__ == "__main__":

@@ -103,21 +103,41 @@ else:
             else:
                 st.subheader("Classificação das rubricas")
                 st.caption("Principal e Apoio são sugestões pela descrição. Exclua itens não relacionados. Para 13º em período mensal, rescisão e períodos anteriores, registre a justificativa e, se necessário, a competência de destino. Um destino não pode reunir anos diferentes.")
-                classificacao = st.data_editor(
-                    sugerir_classificacao(detalhe), hide_index=True, key=f"classificacao_{assinatura}",
-                    disabled=["cnpj", "codigo", "tabela", "descricao"],
-                    column_config={"grupo": st.column_config.SelectboxColumn("Grupo", options=GRUPOS, required=True),
-                                   "competencia_destino": st.column_config.TextColumn("Competência de destino (opcional)", help="MM/AAAA ou AAAA para apuração anual. Deixe vazio para manter a origem."),
-                                   "justificativa": st.column_config.TextColumn("Justificativa")},
-                )
+                st.info("Para considerar uma rubrica, escolha Principal ou Apoio. Para não considerá-la nos cálculos, escolha Excluir. Revisar significa que a decisão está pendente.")
+                classificacao = sugerir_classificacao(detalhe)
+                for indice, rubrica in classificacao.iterrows():
+                    chave = hashlib.sha256(f"{assinatura}|{rubrica.cnpj}|{rubrica.codigo}|{rubrica.tabela}".encode()).hexdigest()
+                    st.markdown(f"**{rubrica.codigo} — {rubrica.descricao}**")
+                    st.caption(f"CNPJ: {rubrica.cnpj}" + (f" · Tabela: {rubrica.tabela}" if rubrica.tabela else ""))
+                    classificacao.loc[indice, "grupo"] = st.selectbox(
+                        "Como considerar esta rubrica?", GRUPOS,
+                        index=GRUPOS.index(rubrica.grupo), key=f"grupo_{chave}",
+                    )
+                    with st.expander("Justificativa e ajuste de período", expanded=bool(detalhe.loc[(detalhe.cnpj == rubrica.cnpj) & (detalhe.codigo == rubrica.codigo) & (detalhe.tabela == rubrica.tabela), "periodo_revisar"].any())):
+                        classificacao.loc[indice, "justificativa"] = st.text_input("Justificativa da classificação", key=f"justificativa_{chave}")
+                        classificacao.loc[indice, "competencia_destino"] = st.text_input("Competência de destino (opcional)", key=f"destino_{chave}", help="MM/AAAA ou AAAA para apuração anual. Deixe vazio para manter a origem.")
+                with st.expander("Resumo da classificação"):
+                    st.dataframe(classificacao, hide_index=True)
+                pendentes = classificacao.loc[~classificacao.grupo.isin(["Principal", "Apoio", "Excluir"])]
+                composto = None
+                if not pendentes.empty:
+                    st.warning(f"Faltam classificar {len(pendentes)} rubrica(s). Nos seletores acima, troque Revisar por Principal, Apoio ou Excluir.")
+                    st.dataframe(pendentes[["codigo", "descricao", "grupo"]], hide_index=True)
+                    st.caption("Principal: verba principal de maternidade. Apoio: componente que será apresentado no cenário com apoios. Excluir: item fora dos dois cenários; continuará registrado no detalhe. A classificação pode ser revisada depois pela responsável jurídica.")
+                else:
+                    try:
+                        composto = aplicar_classificacao(detalhe, classificacao)
+                    except ValueError as exc:
+                        st.warning(str(exc))
                 with st.expander("Conferência dos lançamentos"):
                     st.dataframe(detalhe, hide_index=True)
                 confirmado = st.checkbox("Revisei a classificação e os períodos das rubricas", key=f"revisao_{assinatura}")
+                if composto is not None and not confirmado:
+                    st.info("Classificação preenchida. Marque a confirmação de revisão acima para habilitar Gerar conciliação.")
                 configuracao = hashlib.sha256((assinatura + classificacao.to_json()).encode()).hexdigest()
                 if st.session_state.get("resultado_configuracao") != configuracao or not confirmado:
                     st.session_state.pop("comparativo_maternidade", None)
-                if st.button("Gerar conciliação", type="primary", disabled=not confirmado):
-                    composto = aplicar_classificacao(detalhe, classificacao)
+                if st.button("Gerar conciliação", type="primary", disabled=not confirmado or composto is None):
                     resultado = comparar_maternidade(ecac, composto)
                     resultado["Escopo da validação"] = "Conferência parcial; consultar ocorrências" if avisos or not ocorrencias.empty or not ocorrencias_ecac.empty else "Conferência dos documentos recebidos"
                     controles = [ocorrencias, pd.DataFrame([{"ocorrencia": a} for a in avisos]), ocorrencias_ecac.rename(columns={"mensagem": "ocorrencia"})]

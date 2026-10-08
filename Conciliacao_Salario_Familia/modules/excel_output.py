@@ -5,10 +5,17 @@ import io
 import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from modules.comparador import ordenar_competencias
 
 
 AZUL = "1F4E78"
 AZUL_CLARO = "D9EAF7"
+
+
+def _ordenar(dados: pd.DataFrame) -> pd.DataFrame:
+    if {"cnpj", "competencia"}.issubset(dados.columns):
+        return ordenar_competencias(dados).reset_index(drop=True)
+    return dados
 
 
 def _ajustar_planilha(ws) -> None:
@@ -35,8 +42,8 @@ def gerar_excel_ecac(
     with pd.ExcelWriter(memoria, engine="openpyxl") as writer:
         aba = "Salário Maternidade" if "salario_maternidade" in resumo else "Salário Família"
         exibicao = resumo.drop(columns="salario_familia", errors="ignore") if "salario_maternidade" in resumo else resumo
-        exibicao.to_excel(writer, sheet_name=aba, index=False)
-        documentos.to_excel(writer, sheet_name="Documentos", index=False)
+        _ordenar(exibicao).to_excel(writer, sheet_name=aba, index=False)
+        _ordenar(documentos).to_excel(writer, sheet_name="Documentos", index=False)
         if not ocorrencias.empty:
             ocorrencias.to_excel(writer, sheet_name="Ocorrências", index=False)
         for ws in writer.book.worksheets:
@@ -66,15 +73,15 @@ def gerar_excel_comparativo(
 ) -> bytes:
     memoria = io.BytesIO()
     with pd.ExcelWriter(memoria, engine="openpyxl") as writer:
-        comparativo.to_excel(writer, sheet_name="Comparativo", index=False)
-        ecac.to_excel(writer, sheet_name="Dados e-CAC", index=False)
-        levantamento.to_excel(writer, sheet_name="Levantamento", index=False)
+        _ordenar(comparativo).to_excel(writer, sheet_name="Comparativo", index=False)
+        _ordenar(ecac).to_excel(writer, sheet_name="Dados e-CAC", index=False)
+        _ordenar(levantamento).to_excel(writer, sheet_name="Levantamento", index=False)
         if detalhe is not None:
-            detalhe.to_excel(writer, sheet_name="Composição das rubricas", index=False)
+            _ordenar(detalhe).to_excel(writer, sheet_name="Composição das rubricas", index=False)
         if classificacao is not None:
             classificacao.to_excel(writer, sheet_name="Classificação", index=False)
         if ocorrencias is not None and not ocorrencias.empty:
-            ocorrencias.to_excel(writer, sheet_name="Validação e ocorrências", index=False)
+            _ordenar(ocorrencias).to_excel(writer, sheet_name="Validação e ocorrências", index=False)
         if "Potencial crédito com apoios" in comparativo:
             pd.DataFrame([
                 {"Critério": "Potencial crédito sem apoios", "Descrição": "Máximo entre Principal menos Declarado no e-CAC e zero. Campo indisponível quando falta valor de origem."},

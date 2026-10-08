@@ -125,6 +125,16 @@ class MaternidadeTest(unittest.TestCase):
         ecac = gerar_excel_ecac(self.ecac(), pd.DataFrame(), pd.DataFrame())
         self.assertIn("Salário Maternidade", openpyxl.load_workbook(io.BytesIO(ecac)).sheetnames)
 
+    def test_todas_abas_exportadas_em_ordem_cronologica(self):
+        base = pd.DataFrame([{"cnpj": "20364206000108", "competencia": c, "valor": i} for i, c in enumerate(["01/2023", "2022", "12/2021", "01/2022", "12/2022", "2021"])])
+        esperado = ["12/2021", "2021", "01/2022", "12/2022", "2022", "01/2023"]
+        dados = gerar_excel_comparativo(base, base, base, base, ocorrencias=base)
+        w = openpyxl.load_workbook(io.BytesIO(dados), data_only=True)
+        for nome in ["Comparativo", "Dados e-CAC", "Levantamento", "Composição das rubricas", "Validação e ocorrências"]:
+            with self.subTest(aba=nome):
+                self.assertEqual([r[1] for r in list(w[nome].values)[1:]], esperado)
+        self.assertEqual(base.competencia.iloc[0], "01/2023")
+
 
 if __name__ == "__main__":
     unittest.main()

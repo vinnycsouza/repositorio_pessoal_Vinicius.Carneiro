@@ -231,7 +231,7 @@ def validar(levantamento: pd.DataFrame, fonte: pd.DataFrame, origem: str) -> tup
     for i, r in fonte.iterrows():
         if i not in usados and candidata(r.descricao):
             ocorrencias.append({**r.to_dict(), "ocorrencia": "Lançamento de maternidade no validador ausente do levantamento"})
-    return detalhe, pd.DataFrame(ocorrencias)
+    return ordenar_competencias(detalhe).reset_index(drop=True), pd.DataFrame(ocorrencias)
 
 
 def sugerir_classificacao(detalhe: pd.DataFrame) -> pd.DataFrame:
