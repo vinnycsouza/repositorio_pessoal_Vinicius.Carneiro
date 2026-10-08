@@ -10,7 +10,8 @@ from modules.ecac_parser import processar_arquivos
 from modules.excel_output import gerar_excel_comparativo, gerar_excel_ecac
 from modules.maternidade import (
     GRUPOS, aplicar_classificacao, comparar_maternidade, ler_incidencia,
-    ler_levantamento, ler_manad, sugerir_classificacao, validar,
+    ler_levantamento, ler_manad, resumir_maternidade, separar_periodos_sem_dados,
+    sugerir_classificacao, validar,
 )
 
 
@@ -123,7 +124,7 @@ else:
                 if not pendentes.empty:
                     st.warning(f"Faltam classificar {len(pendentes)} rubrica(s). Nos seletores acima, troque Revisar por Principal, Apoio ou Excluir.")
                     st.dataframe(pendentes[["codigo", "descricao", "grupo"]], hide_index=True)
-                    st.caption("Principal: verba principal de maternidade. Apoio: componente que será apresentado no cenário com apoios. Excluir: item fora dos dois cenários; continuará registrado no detalhe. A classificação pode ser revisada depois pela responsável jurídica.")
+                    st.caption("Principal: verba principal de maternidade. Apoio: componente incluído no total identificado. Excluir: item fora do cálculo, preservado no detalhe. A classificação pode ser revisada depois pela responsável jurídica.")
                 else:
                     try:
                         composto = aplicar_classificacao(detalhe, classificacao)
@@ -134,21 +135,36 @@ else:
                 confirmado = st.checkbox("Revisei a classificação e os períodos das rubricas", key=f"revisao_{assinatura}")
                 if composto is not None and not confirmado:
                     st.info("Classificação preenchida. Marque a confirmação de revisão acima para habilitar Gerar conciliação.")
-                configuracao = hashlib.sha256((assinatura + classificacao.to_json()).encode()).hexdigest()
+                configuracao = hashlib.sha256(("comparativo_simplificado_v2|" + assinatura + classificacao.to_json()).encode()).hexdigest()
                 if st.session_state.get("resultado_configuracao") != configuracao or not confirmado:
                     st.session_state.pop("comparativo_maternidade", None)
                 if st.button("Gerar conciliação", type="primary", disabled=not confirmado or composto is None):
                     resultado = comparar_maternidade(ecac, composto)
-                    resultado["Escopo da validação"] = "Conferência parcial; consultar ocorrências" if avisos or not ocorrencias.empty or not ocorrencias_ecac.empty else "Conferência dos documentos recebidos"
                     controles = [ocorrencias, pd.DataFrame([{"ocorrencia": a} for a in avisos]), ocorrencias_ecac.rename(columns={"mensagem": "ocorrencia"})]
                     st.session_state["comparativo_maternidade"] = (resultado, ecac, composto, classificacao, pd.concat(controles, ignore_index=True))
                     st.session_state["resultado_configuracao"] = configuracao
                 if "comparativo_maternidade" in st.session_state:
                     resultado, dados_ecac, composto, classes, controles = st.session_state["comparativo_maternidade"]
                     st.subheader("Resultado da conciliação")
-                    st.caption("Potencial crédito = excedente positivo sobre o declarado, sujeito à validação jurídica. Valor declarado superior aparece separadamente. Campos ausentes permanecem indisponíveis.")
-                    monetarias = [c for c in resultado if c not in ["cnpj", "competencia", "Validação documental", "Situação", "Escopo da validação"]]
-                    st.dataframe(resultado.style.format({c: dinheiro for c in monetarias}), hide_index=True)
+                    st.caption("Diferença = total identificado − e-CAC. Positiva: potencial crédito; negativa: declarado superior. Apoios sujeitos à validação jurídica. Campos ausentes permanecem indisponíveis. AAAA indica apuração anual de 13º.")
+                    indicadores = resumir_maternidade(resultado)
+                    for coluna, (rotulo, valor) in zip(st.columns(4), indicadores.items()):
+                        coluna.metric(rotulo, dinheiro(valor) if "valor" in rotulo.lower() or "crédito" in rotulo else valor)
+                    if not controles.empty:
+                        st.caption("Conferência parcial; consultar as ocorrências dos documentos recebidos.")
+                    empresas = resultado.cnpj.unique()
+                    exibicao, sem_dados = separar_periodos_sem_dados(resultado)
+                    if len(empresas) == 1:
+                        st.caption(f"CNPJ: {empresas[0]}")
+                        exibicao = exibicao.drop(columns="cnpj")
+                        sem_dados = sem_dados.drop(columns="cnpj")
+                    nomes = {"cnpj": "CNPJ", "competencia": "Competência", "Apoios considerados": "Apoios"}
+                    exibicao = exibicao.rename(columns=nomes)
+                    monetarias = ["Principal", "Apoios", "Total identificado", "Declarado no e-CAC", "Diferença"]
+                    st.dataframe(exibicao.style.format({c: dinheiro for c in monetarias}), hide_index=True)
+                    if not sem_dados.empty:
+                        with st.expander(f"Períodos sem dados para comparação ({len(sem_dados)})"):
+                            st.dataframe(sem_dados.rename(columns=nomes), hide_index=True)
                     consolidado = composto.groupby(["cnpj", "competencia", "grupo"], as_index=False)["valor"].sum(min_count=1)
                     excel = gerar_excel_comparativo(resultado, dados_ecac, consolidado, composto, classes, controles)
                     st.download_button("Baixar relatório final", excel, "conciliacao_salario_maternidade.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

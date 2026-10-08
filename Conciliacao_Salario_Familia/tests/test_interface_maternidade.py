@@ -46,6 +46,12 @@ class InterfaceMaternidadeTest(unittest.TestCase):
             self.assertFalse(app.exception)
             self.assertEqual(len(app.get("download_button")), 1)
             self.assertTrue(any(h.value == "Resultado da conciliação" for h in app.subheader))
+            self.assertEqual(len(app.metric), 4)
+            self.assertEqual(app.metric[0].value, "R$ 0,00")
+            self.assertTrue(any(list(t.value.columns) == [
+                "Competência", "Principal", "Apoios", "Total identificado",
+                "Declarado no e-CAC", "Diferença", "Pendência de revisão",
+            ] for t in app.dataframe))
             grupos = [s for s in app.selectbox if s.label == "Como considerar esta rubrica?"]
             self.assertEqual(len(grupos), 2)
             grupos[1].set_value("Excluir").run()

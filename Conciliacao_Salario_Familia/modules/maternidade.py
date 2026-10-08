@@ -289,26 +289,57 @@ def comparar_maternidade(ecac: pd.DataFrame, detalhe: pd.DataFrame) -> pd.DataFr
             itens = base.loc[base.grupo.eq(grupo), "valor"]
             valores[coluna] = float("nan") if itens.isna().any() else round(itens.sum(), 2)
         linhas.append(dict(zip(chaves, k), **valores, **{
-            "Validação documental": "Conferência com ressalvas" if not base.validacao.eq("Lançamento confere").all() else "Lançamentos conferem",
+            "Pendência de revisão": "; ".join(dict.fromkeys(
+                texto(v) for v in base.validacao if texto(v) != "Lançamento confere"
+            )),
         }))
-    consolidado = pd.DataFrame(linhas, columns=chaves + ["Principal", "Apoios considerados", "Validação documental"])
+    consolidado = pd.DataFrame(linhas, columns=chaves + ["Principal", "Apoios considerados", "Pendência de revisão"])
     resultado = consolidado.merge(dados[chaves + ["Declarado no e-CAC"]], on=chaves, how="outer")
     resultado["Total identificado"] = (resultado["Principal"] + resultado["Apoios considerados"]).round(2)
-    for grupo, coluna in [("Principal", "sem apoios"), ("Total identificado", "com apoios")]:
-        diferenca = (resultado[grupo] - resultado["Declarado no e-CAC"]).round(2)
-        resultado[f"Potencial crédito {coluna}"] = diferenca.clip(lower=0)
-        resultado[f"Declarado superior {coluna}"] = (-diferenca).clip(lower=0)
-    def situacao(r):
+    resultado["Diferença"] = (resultado["Total identificado"] - resultado["Declarado no e-CAC"]).round(2)
+
+    def pendencia(r):
+        notas = []
+        validacao = texto(r["Pendência de revisão"])
+        if "repeti" in _sem_acentos(validacao):
+            notas.append("Repetição preservada; revisar origem")
+            # Preservar problemas adicionais, além da repetição identificada.
+            outros = [p.strip() for p in validacao.split(";")
+                      if p.strip() != "Lançamento confere" and
+                      ("repeti" not in _sem_acentos(p) or "excedente" in _sem_acentos(p))]
+            notas.extend(dict.fromkeys(outros))
+        elif validacao:
+            notas.append(validacao)
+        sem_levantamento = pd.isna(r["Pendência de revisão"])
+        if sem_levantamento and pd.isna(r["Declarado no e-CAC"]):
+            return "Sem levantamento e sem valor e-CAC"
         if pd.isna(r["Declarado no e-CAC"]):
-            return "Valor e-CAC ausente ou não informado"
-        if pd.isna(r["Total identificado"]):
-            return "Levantamento ausente ou valor inválido"
-        if r["Potencial crédito com apoios"] > 0:
-            return "Potencial crédito sujeito à validação jurídica"
-        if r["Declarado superior com apoios"] > 0:
-            return "Declarado superior ao total identificado"
-        return "Valores coincidentes com apoios"
-    resultado["Situação"] = resultado.apply(situacao, axis=1)
-    resultado["Validação documental"] = resultado["Validação documental"].fillna("Sem levantamento considerado")
-    ordem = chaves + ["Principal", "Apoios considerados", "Total identificado", "Declarado no e-CAC", "Potencial crédito sem apoios", "Potencial crédito com apoios", "Declarado superior sem apoios", "Declarado superior com apoios", "Validação documental", "Situação"]
+            notas.append("Valor e-CAC não informado")
+        if sem_levantamento:
+            notas.append("Levantamento não informado")
+        elif pd.isna(r["Total identificado"]):
+            notas.append("Valor do levantamento ausente ou inválido")
+        if pd.notna(r["Diferença"]) and r["Diferença"] < 0:
+            notas.append("Declarado superior; revisar diferença")
+        return "; ".join(dict.fromkeys(notas))
+
+    resultado["Pendência de revisão"] = resultado.apply(pendencia, axis=1) if not resultado.empty else pd.Series(dtype=str)
+    ordem = chaves + ["Principal", "Apoios considerados", "Total identificado", "Declarado no e-CAC", "Diferença", "Pendência de revisão"]
     return ordenar_competencias(resultado[ordem]).reset_index(drop=True)
+
+
+def separar_periodos_sem_dados(resultado: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Manter valores inválidos na revisão; separar apenas ausências de ambas as fontes."""
+    sem_dados = resultado["Pendência de revisão"].eq("Sem levantamento e sem valor e-CAC")
+    return resultado.loc[~sem_dados].copy(), resultado.loc[sem_dados, ["cnpj", "competencia", "Pendência de revisão"]].copy()
+
+
+def resumir_maternidade(resultado: pd.DataFrame) -> dict:
+    diferenca = resultado["Diferença"]
+    repetidas = resultado["Pendência de revisão"].str.contains("Repetição", na=False)
+    return {
+        "Potencial crédito calculado": round(diferenca.clip(lower=0).sum(), 2) if diferenca.notna().any() else float("nan"),
+        "Desse valor, pendente por repetição": round(diferenca.loc[repetidas].clip(lower=0).sum(), 2) if diferenca.notna().any() else float("nan"),
+        "Apurações com diferença": int(diferenca.fillna(0).ne(0).sum()),
+        "Apurações sem dados para comparação": int(diferenca.isna().sum()),
+    }

@@ -33,9 +33,11 @@ As competências são ordenadas por ano e período dentro de cada CNPJ. `MM/AAAA
 
 ## Relatório final
 
-A aba Comparativo contém Principal, Apoios considerados, Total identificado, Declarado no e-CAC, Potencial crédito sem apoios e Potencial crédito com apoios. As duas colunas de crédito mostram somente excedentes positivos sobre o declarado e ficam indisponíveis quando falta algum valor necessário. Declarado superior, com e sem apoios, aparece em colunas separadas.
+A tela e a aba Comparativo apresentam Competência, Principal, Apoios, Total identificado, Declarado no e-CAC, Diferença e Pendência de revisão. Diferença é total identificado menos declarado: positiva indica potencial crédito; negativa indica declarado superior. Fica indisponível quando falta um valor necessário. O CNPJ aparece no cabeçalho para uma empresa; com várias empresas, permanece em uma coluna.
 
-O Excel também contém dados e-CAC com referência ao documento/recibo, consolidação por grupo, composição dos lançamentos, classificação adotada, critérios e ocorrências. Campos ausentes não viram zero; a retificadora mais recente prevalece e as declarações anteriores continuam na aba Documentos do Excel de extração. Os resultados dependem da composição selecionada e da validação jurídica.
+O resumo mostra potencial crédito calculado (somente diferenças positivas, sem compensar diferenças negativas), a parcela pendente por repetição, a quantidade de apurações com diferença e a quantidade sem dados para comparação. Se nenhuma apuração puder ser calculada, o crédito permanece indisponível. Lançamentos repetidos continuam preservados e sinalizados para revisar a origem; não são deduplicados automaticamente. Períodos sem levantamento e sem valor e-CAC ficam em uma seção separada. Valores inválidos e ausências de apenas uma fonte continuam no comparativo principal.
+
+O Excel também contém dados e-CAC com referência ao documento/recibo, composição dos lançamentos, classificação adotada e ocorrências. A consolidação por grupo permanece na aba Levantamento, oculta como apoio interno. Os critérios e o escopo aparecem como notas gerais no Comparativo. Campos ausentes não viram zero; a retificadora mais recente prevalece e as declarações anteriores continuam na aba Documentos do Excel de extração. Os resultados dependem da composição selecionada e da validação jurídica dos apoios.
 
 ## Testes
 

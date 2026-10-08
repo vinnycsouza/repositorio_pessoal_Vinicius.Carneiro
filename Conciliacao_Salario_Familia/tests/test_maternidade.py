@@ -9,6 +9,7 @@ from modules.excel_output import gerar_excel_comparativo, gerar_excel_ecac
 from modules.maternidade import (
     aplicar_classificacao, comparar_maternidade, competencia, ler_manad,
     normalizar_esocial, normalizar_manad, sugerir_classificacao, validar,
+    resumir_maternidade, separar_periodos_sem_dados,
 )
 from test_ecac_parser import TEXTO
 
@@ -34,28 +35,67 @@ class MaternidadeTest(unittest.TestCase):
         zero = analisar_texto_dctfweb(texto.replace("995,16", "0,00"), "d.pdf")
         self.assertEqual(zero.salario_maternidade, 0)
 
-    def test_duas_colunas_credito_e_divergencia_sem_credito_negativo(self):
+    def test_diferenca_unica_inclui_apoios_e_preserva_sinal(self):
         d = self.detalhe()
         d = aplicar_classificacao(d, sugerir_classificacao(d))
         r = comparar_maternidade(self.ecac(), d).iloc[0]
         self.assertEqual(r["Principal"], 809.32)
         self.assertEqual(r["Total identificado"], 995.16)
-        self.assertEqual(r["Potencial crédito sem apoios"], 0)
-        self.assertEqual(r["Potencial crédito com apoios"], 0)
-        self.assertEqual(r["Declarado superior sem apoios"], 185.84)
+        self.assertEqual(r["Diferença"], 0)
+        self.assertEqual(r["Pendência de revisão"], "")
         r = comparar_maternidade(self.ecac(700), d).iloc[0]
-        self.assertEqual(r["Potencial crédito sem apoios"], 109.32)
-        self.assertEqual(r["Potencial crédito com apoios"], 295.16)
+        self.assertEqual(r["Diferença"], 295.16)
+        self.assertEqual(comparar_maternidade(self.ecac(1100), d).iloc[0]["Diferença"], -104.84)
 
     def test_ausencia_nao_vira_credito_zero(self):
         d = self.detalhe()
         d = aplicar_classificacao(d, sugerir_classificacao(d))
         r = comparar_maternidade(self.ecac(None), d).iloc[0]
-        self.assertTrue(pd.isna(r["Potencial crédito com apoios"]))
+        self.assertTrue(pd.isna(r["Diferença"]))
         ecac = pd.concat([self.ecac(), pd.DataFrame([{"cnpj": "20364206000108", "competencia": "02/2023", "salario_maternidade": 50}])])
         r = comparar_maternidade(ecac, d).iloc[1]
         self.assertTrue(pd.isna(r["Principal"]))
-        self.assertTrue(pd.isna(r["Potencial crédito com apoios"]))
+        self.assertTrue(pd.isna(r["Diferença"]))
+
+    def test_repeticao_nao_e_credito_confirmado_nem_deduplicada(self):
+        detalhe = self.detalhe().iloc[:1]
+        repetido = pd.concat([detalhe, detalhe], ignore_index=True)
+        detalhe, _ = validar(repetido, repetido, "MANAD")
+        d = aplicar_classificacao(detalhe, sugerir_classificacao(detalhe))
+        resultado = comparar_maternidade(self.ecac(809.32), d)
+        self.assertEqual(resultado.iloc[0]["Principal"], 1618.64)
+        self.assertIn("Repetição", resultado.iloc[0]["Pendência de revisão"])
+        resumo = resumir_maternidade(resultado)
+        self.assertEqual(resumo["Potencial crédito calculado"], 809.32)
+        self.assertEqual(resumo["Desse valor, pendente por repetição"], 809.32)
+
+    def test_sem_dados_separado_e_valor_invalido_permanece_no_comparativo(self):
+        d = aplicar_classificacao(self.detalhe(), sugerir_classificacao(self.detalhe()))
+        ecac = pd.concat([self.ecac(None), pd.DataFrame([
+            {"cnpj": "20364206000108", "competencia": "02/2023", "salario_maternidade": None},
+        ])], ignore_index=True)
+        d.loc[d.grupo.eq("Principal"), "valor"] = float("nan")
+        resultado = comparar_maternidade(ecac, d)
+        exibicao, sem_dados = separar_periodos_sem_dados(resultado)
+        self.assertEqual(list(exibicao.competencia), ["01/2023"])
+        self.assertIn("inválido", exibicao.iloc[0]["Pendência de revisão"])
+        self.assertEqual(list(sem_dados.competencia), ["02/2023"])
+        resumo = resumir_maternidade(resultado)
+        self.assertTrue(pd.isna(resumo["Potencial crédito calculado"]))
+        self.assertEqual(resumo["Apurações sem dados para comparação"], 2)
+
+    def test_credito_nao_compensa_diferencas_negativas_e_zero_e_informado(self):
+        d = aplicar_classificacao(self.detalhe(), sugerir_classificacao(self.detalhe()))
+        outro = d.copy()
+        outro["competencia"] = "02/2023"
+        ecac = pd.concat([self.ecac(0), pd.DataFrame([
+            {"cnpj": "20364206000108", "competencia": "02/2023", "salario_maternidade": 1100},
+        ])], ignore_index=True)
+        resultado = comparar_maternidade(ecac, pd.concat([d, outro]))
+        resumo = resumir_maternidade(resultado)
+        self.assertEqual(resumo["Potencial crédito calculado"], 995.16)
+        self.assertEqual(resumo["Apurações com diferença"], 2)
+        self.assertEqual(resumo["Apurações sem dados para comparação"], 0)
 
     def test_validador_nao_soma_apoios_ausentes(self):
         detalhe = self.detalhe().drop(columns=["validacao", "descricao_validador", "incidencia_validador", "candidata"])
@@ -121,7 +161,11 @@ class MaternidadeTest(unittest.TestCase):
         w = openpyxl.load_workbook(io.BytesIO(dados), data_only=True)
         self.assertIn("Composição das rubricas", w.sheetnames)
         self.assertIn("Classificação", w.sheetnames)
-        self.assertEqual(w["Comparativo"]["C2"].value, 809.32)
+        self.assertEqual(w["Comparativo"]["B13"].value, 809.32)
+        self.assertEqual([c.value for c in w["Comparativo"][12]], ["Competência", "Principal", "Apoios", "Total identificado", "Declarado no e-CAC", "Diferença", "Pendência de revisão"])
+        self.assertNotIn("Critérios", w.sheetnames)
+        self.assertEqual(w["Levantamento"].sheet_state, "hidden")
+        self.assertEqual(w["Comparativo"]["C4"].value, 0)
         ecac = gerar_excel_ecac(self.ecac(), pd.DataFrame(), pd.DataFrame())
         self.assertIn("Salário Maternidade", openpyxl.load_workbook(io.BytesIO(ecac)).sheetnames)
 
@@ -134,6 +178,20 @@ class MaternidadeTest(unittest.TestCase):
             with self.subTest(aba=nome):
                 self.assertEqual([r[1] for r in list(w[nome].values)[1:]], esperado)
         self.assertEqual(base.competencia.iloc[0], "01/2023")
+
+    def test_exportacao_multiplos_cnpjs_preserva_identificacao(self):
+        d = aplicar_classificacao(self.detalhe(), sugerir_classificacao(self.detalhe()))
+        outro = d.copy()
+        outro["cnpj"] = "02633573000188"
+        ecac = pd.concat([self.ecac(), pd.DataFrame([
+            {"cnpj": "02633573000188", "competencia": "01/2023", "salario_maternidade": 995.16},
+        ])], ignore_index=True)
+        composto = pd.concat([d, outro], ignore_index=True)
+        resultado = comparar_maternidade(ecac, composto)
+        arquivo = gerar_excel_comparativo(resultado, ecac, composto, composto)
+        ws = openpyxl.load_workbook(io.BytesIO(arquivo), data_only=True)["Comparativo"]
+        self.assertEqual(ws["A12"].value, "CNPJ")
+        self.assertEqual({ws["A13"].value, ws["A14"].value}, {"02633573000188", "20364206000108"})
 
 
 if __name__ == "__main__":
