@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 from datetime import datetime
+from manad_validacao import verificar_duplicidades
 
 st.set_page_config(page_title="Unir MANAD (TXT/Excel)", layout="centered")
 
@@ -44,6 +45,9 @@ def gerar_txt_bruto(files, add_newline_between: bool) -> bytes:
     Concatena os arquivos exatamente como estão (byte a byte).
     Nenhuma modificação é feita no conteúdo.
     """
+    erros = verificar_duplicidades(files)
+    if erros:
+        raise ValueError("\n".join(erros))
     out = io.BytesIO()
 
     for i, f in enumerate(files):
@@ -60,6 +64,9 @@ def gerar_excel(files, encoding: str, incluir_origem: bool) -> bytes:
     Gera um Excel para análise.
     OBS: Excel exige decodificação (não é byte idêntico ao original).
     """
+    erros = verificar_duplicidades(files)
+    if erros:
+        raise ValueError("\n".join(erros))
     rows = []
 
     for f in files:
@@ -92,6 +99,16 @@ if not arquivos:
     st.stop()
 
 st.success(f"{len(arquivos)} arquivo(s) carregado(s).")
+
+erros_duplicidade = verificar_duplicidades(arquivos)
+if erros_duplicidade:
+    st.error("União bloqueada: foram encontrados arquivos ou blocos MANAD repetidos.")
+    for erro in erros_duplicidade:
+        st.warning(erro)
+    st.info("Retire as cópias repetidas ou corrija o arquivo já unido e envie novamente.")
+    st.stop()
+
+st.caption("Verificação concluída: nenhum arquivo ou bloco MANAD completo repetido.")
 
 agora = datetime.now().strftime("%Y%m%d_%H%M%S")
 
