@@ -7,8 +7,38 @@ import pandas as pd
 
 from modules.excel_builder import FontePlanilha, gerar_workbook
 
-CODIGOS_INCIDENTES_CP = {"11", "12", "13", "14", "15", "16", "21", "22", "23", "24", "25", "26"}
-CODIGOS_CP_EXPORTACAO_PADRAO = {"11", "12", "21", "22"}
+CODIGOS_MATERNIDADE_NT20 = {"21", "22"}
+CODIGOS_INCIDENTES_CP = {"11", "12", "13", "14", "15", "16", "23", "24", "25", "26"}
+CODIGOS_CP_EXPORTACAO_PADRAO = {"11", "12"}
+OBSERVACAO_MATERNIDADE_NT20 = (
+    "Salário-maternidade (codIncCP 21/22): tratamento patronal específico conforme "
+    "NT 20/2020 do eSocial. Mantida a incidência do segurado; fora da soma automática "
+    "considerada CP nesta análise patronal. Conferir competência, totalizadores e "
+    "recolhimentos; o código não comprova pagamento patronal nem crédito recuperável."
+)
+
+
+def revisar_maternidade_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Atualiza somente campos analíticos, inclusive em Excels legados."""
+    if df.empty or "cod_inc_cp" not in df.columns:
+        return df
+    mask = df["cod_inc_cp"].fillna("").astype(str).str.strip().isin(CODIGOS_MATERNIDADE_NT20)
+    if not mask.any():
+        return df
+    base = df.copy()
+    if "status_cp" not in base:
+        base["status_cp"] = base["cod_inc_cp"].apply(classificar_status_cp)
+    if "considerado_cp" not in base:
+        base["considerado_cp"] = base["cod_inc_cp"].apply(lambda cod: "Sim" if entra_base_cp(cod) else "Não")
+    base.loc[mask, "status_cp"] = "Revisar codIncCP"
+    base.loc[mask, "considerado_cp"] = "Não"
+    # Não sobrescrever observações de origem/auditoria já existentes.
+    anterior = base.get("observacao", pd.Series("", index=base.index)).fillna("").astype(str)
+    anexar = mask & ~anterior.str.contains(OBSERVACAO_MATERNIDADE_NT20, regex=False)
+    base.loc[anexar, "observacao"] = anterior[anexar].apply(
+        lambda texto: (texto + " | " if texto else "") + OBSERVACAO_MATERNIDADE_NT20
+    )
+    return base
 
 PALAVRAS_TECNICAS = (
     "base de calculo", "base cálculo", "base inss", "base previd", "inss base", "fgts base",
@@ -129,6 +159,8 @@ def preparar_movimentos_cp(df_remun: pd.DataFrame) -> pd.DataFrame:
 
 
 def _observacao_movimento(row: pd.Series) -> str:
+    if _texto_limpo(row.get("cod_inc_cp", "")) in CODIGOS_MATERNIDADE_NT20:
+        return OBSERVACAO_MATERNIDADE_NT20
     status = row.get("status_cp", "")
     tipo = row.get("tipo_verba", "")
     if status == "Sem S-1010":
@@ -190,6 +222,8 @@ def _prioridade_rubrica(row: pd.Series) -> str:
 
 
 def _observacao_rubrica(row: pd.Series) -> str:
+    if _texto_limpo(row.get("cod_inc_cp", "")) in CODIGOS_MATERNIDADE_NT20:
+        return OBSERVACAO_MATERNIDADE_NT20
     status_auditoria = row.get("status_auditoria", "")
     if status_auditoria == "S1010_ANTERIOR_ESOCIAL":
         return "S-1010 com vigência anterior a janeiro de 2018, mantido por continuar válido na competência analisada."
@@ -346,12 +380,12 @@ def _filtrar_movimentos_cp_exportacao(df: pd.DataFrame | None, modo: str = "todo
     A ausência de S-1010 é tratada separadamente na aba/arquivo 05_sem_s1010.
 
     Modos:
-    - ``incidencia_cp_padrao``: somente Incide CP (11, 12, 21 e 22);
+    - ``incidencia_cp_padrao``: somente Incide CP; maternidade 21/22 fica em revisão;
     - ``analise_prioritaria``: Incide CP + Revisar codIncCP;
     - ``classificados``: Incide CP + Não incide CP + Revisar codIncCP;
     - ``todos``: todos os movimentos, inclusive Sem S-1010.
     """
-    base = df if df is not None else pd.DataFrame()
+    base = revisar_maternidade_dataframe(df) if df is not None else pd.DataFrame()
     if base.empty or modo == "todos":
         return base
 
@@ -432,7 +466,7 @@ def gerar_excel_saida(
     fontes = [
         FontePlanilha("00_empresa", dataframe=df_empresa if df_empresa is not None else pd.DataFrame()),
         FontePlanilha("01_resumo", dataframe=df_resumo_visual),
-        FontePlanilha("02_rubricas_cp", dataframe=df_rubricas_cp),
+        FontePlanilha("02_rubricas_cp", dataframe=revisar_maternidade_dataframe(df_rubricas_cp)),
         FontePlanilha("03_movimentos_cp", dataframe=movimentos),
         FontePlanilha("04_base_trabalhador", dataframe=df_base_trabalhador),
         FontePlanilha("05_sem_s1010", dataframe=df_sem_cadastro),
@@ -455,7 +489,7 @@ def gerar_excel_saida(
             else pd.DataFrame(),
         ),
         FontePlanilha("apoio_s1010", dataframe=df_rubricas),
-        FontePlanilha("apoio_s1200", dataframe=df_remun),
+        FontePlanilha("apoio_s1200", dataframe=movimentos),
         FontePlanilha("apoio_s5001", dataframe=df_bases_trabalhador),
         FontePlanilha("apoio_s5011", dataframe=df_bases_contribuicao),
         FontePlanilha("apoio_s3000", dataframe=df_exclusoes),

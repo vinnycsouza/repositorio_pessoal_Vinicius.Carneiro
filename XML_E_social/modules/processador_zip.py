@@ -32,6 +32,8 @@ from modules.sqlite_relatorio import (
     carregar_pacote_resumido,
     reconstruir_consolidados_analiticos,
     reiniciar_materializacao_analitica,
+    atualizar_regra_maternidade,
+    VERSAO_REGRA_MATERNIDADE,
 )
 from modules.progresso import emitir_progresso
 from modules.event_metadata import (
@@ -1760,9 +1762,22 @@ def preparar_workspace_para_relatorios(
         versao = int(_meta_get(
             leitura, "versao_consistencia_recibo_s1200", "0"
         ) or 0)
+        versao_maternidade = _meta_get(leitura, "versao_regra_maternidade", "")
     finally:
         leitura.close()
     if versao >= VERSAO_CONSISTENCIA_RECIBO_S1200:
+        if versao_maternidade != VERSAO_REGRA_MATERNIDADE:
+            bloqueio = _adquirir_bloqueio_workspace(workspace)
+            conn_regra = None
+            try:
+                conn_regra = _conectar(db_path)
+                if _meta_get(conn_regra, "status", "") != "concluido":
+                    raise ValueError("Conclua ou retome a carga antes de atualizar a análise patronal.")
+                atualizar_regra_maternidade(conn_regra, progress_callback)
+            finally:
+                if conn_regra is not None:
+                    conn_regra.close()
+                _liberar_bloqueio_workspace(bloqueio)
         return {
             "grupos": 0,
             "eventos_inativados": 0,

@@ -14,6 +14,7 @@ from modules.auditoria import (
     gerar_busca_recibos,
     gerar_resumo_visual,
     preparar_pacote_analitico,
+    revisar_maternidade_dataframe,
 )
 from modules.auditoria_movimentos import (
     auditar_movimentos_workspace,
@@ -51,6 +52,7 @@ from modules.processador_zip import (
 from modules.sqlite_relatorio import (
     contar_movimentos_exportacao_sqlite,
     gerar_excel_saida_sqlite,
+    VERSAO_REGRA_MATERNIDADE,
 )
 from modules.workspace_manager import (
     abrir_workspace,
@@ -1073,14 +1075,14 @@ else:
     df_inventario = pd.DataFrame()
     df_rubricas = pd.DataFrame()
     df_exclusoes = pd.DataFrame()
-    df_remun = resultado_excel.get("movimentos_cp", pd.DataFrame()).copy()
+    df_remun = revisar_maternidade_dataframe(resultado_excel.get("movimentos_cp", pd.DataFrame()).copy())
     df_bases_trab = pd.DataFrame()
     df_bases_contrib = pd.DataFrame()
     df_erros = pd.DataFrame()
     df_layout = resultado_excel.get("abas", pd.DataFrame())
     df_empresa = resultado_excel.get("empresa", pd.DataFrame())
-    df_rubricas_cp_excel = resultado_excel.get("rubricas_cp", pd.DataFrame()).copy()
-    df_movimentos_cp_excel = resultado_excel.get("movimentos_cp", pd.DataFrame()).copy()
+    df_rubricas_cp_excel = revisar_maternidade_dataframe(resultado_excel.get("rubricas_cp", pd.DataFrame()).copy())
+    df_movimentos_cp_excel = df_remun.copy()
     modo_excel_consolidado = True
 
 
@@ -1112,6 +1114,25 @@ atualizar_analise, barra_analise, status_analise = _criar_progresso("Progresso d
 modo_sqlite_seguro = bool(resultado.get("modo_sqlite_seguro", False)) if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente", "Workspace (SQLite existente)"} else False
 pacote_sqlite = resultado.get("pacote_sqlite", {}) if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente", "Workspace (SQLite existente)"} else {}
 db_path_sqlite = resultado.get("db_path", "") if modo_entrada in {"ZIP(s) do eSocial", "SQLite existente", "Workspace (SQLite existente)"} else ""
+if db_path_sqlite and resultado.get("versao_regra_maternidade", pacote_sqlite.get("versao_regra_maternidade")) != VERSAO_REGRA_MATERNIDADE:
+    try:
+        with st.spinner("Atualizando a análise patronal do salário-maternidade sem reler XMLs..."):
+            atualizado = carregar_resultado_sqlite_existente(
+                db_path_sqlite, somente_levantamento=(modulo_ativo == "Levantamento de Verbas")
+            )
+        atualizado["versao_regra_maternidade"] = VERSAO_REGRA_MATERNIDADE
+        st.session_state["resultado_v82"] = atualizado
+        st.cache_data.clear()
+        st.rerun()
+    except Exception as exc:
+        st.error(f"Não foi possível atualizar a análise patronal do Workspace: {exc}")
+        st.stop()
+st.info(
+    "Salário-maternidade: codIncCP 21/22 permanece na análise prioritária como Revisar codIncCP, "
+    "fora da soma automática considerada CP. A NT 20/2020 distingue o tratamento patronal "
+    "da contribuição do segurado. Código no XML não comprova recolhimento nem crédito recuperável; "
+    "confira competência e totalizadores."
+)
 if modo_sqlite_seguro:
         atualizar_analise(0.20, "Carregando resumos consolidados diretamente do SQLite...")
         df_resumo_visual = pacote_sqlite.get("resumo_visual", pd.DataFrame()).copy()
@@ -2269,7 +2290,7 @@ if modulo_ativo == "Relatório de Incidência CP":
         else "auditoria_completa"
     )
     assinatura_rubricas = "todas" if chaves_rubricas_relatorio is None else "|".join(chaves_rubricas_relatorio)
-    assinatura_exportacao = f"v10_filtro_apoio_s1200:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}:{perfil_relatorio_sql}:{assinatura_rubricas}"
+    assinatura_exportacao = f"v10_nt20_{VERSAO_REGRA_MATERNIDADE}:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}:{perfil_relatorio_sql}:{assinatura_rubricas}"
     if st.session_state.get("relatorio_excel_assinatura") != assinatura_exportacao:
         st.session_state.pop("relatorio_excel_bytes", None)
         st.session_state.pop("relatorio_excel_path", None)

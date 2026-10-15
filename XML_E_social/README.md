@@ -54,6 +54,34 @@ arquivo concluido. A escrita do workbook fica centralizada em
 
 ## Saida
 
+### Salário-maternidade: análise patronal (NT 20/2020)
+
+- `codIncCP` 21 (mensal) e 22 (13º pago pelo empregador) são preservados como
+  informados no S-1010. O S-1200 continua vinculado ao cadastro por rubrica/tabela.
+- Esses códigos recebem `Revisar codIncCP`, com observação específica de
+  salário-maternidade, e `considerado_cp=Não` para a soma automática desta análise.
+  A contribuição do segurado é distinta do tratamento patronal.
+- Permanecem na análise prioritária, em todos os classificados e em todos os
+  movimentos. Não aparecem em “Apenas Incide CP”. Não são tratados como Sem S-1010.
+- Não se presume recolhimento indevido, crédito, retroatividade ou elegibilidade
+  a partir do código: competências históricas e atuais exigem conferência dos
+  totalizadores e recolhimentos. O enquadramento em revisão vale para ambas.
+- Ao carregar um Workspace concluído antigo, a regra é atualizada uma única vez
+  sob bloqueio, em transação: classificações e totais derivados são ajustados sem
+  reler XML, reconstruir a tabela inteira de movimentos ou alterar totalizadores
+  oficiais. A versão e o resumo das classificações anteriores ficam em `meta`.
+  Cargas interrompidas devem ser retomadas/concluídas antes dessa atualização.
+  Em bases grandes a atualização pode demorar e emite avisos de atividade.
+- Os workbooks já entregues permanecem como estavam. A mudança vale para novos
+  relatórios; Excels legados importados recebem a revisão em memória.
+- Não foram modificadas as regras dos demais códigos CP nem a segregação S-2299.
+
+Referências oficiais:
+[NT 20/2020](https://www.gov.br/esocial/pt-br/documentacao-tecnica/manuais/nota-tecnica-20-2020.pdf)
+e [leiaute S-1.3, S-5001/infoBaseCS](https://www.gov.br/esocial/pt-br/documentacao-tecnica/leiautes-esocial-versao-s-1-3-nt-07-2026/index.html).
+O leiaute vincula 21/22 ao `tpValor=19` (base exclusiva do empregado) e ao 32
+(salário-maternidade), distinguindo-os da base normal 11.
+
 A seleção de movimentos (análise prioritária, apenas Incide CP, classificados
 ou todos) é aplicada tanto à aba `03_movimentos_cp` quanto a `apoio_s1200`.
 O filtro de rubricas por código e tabela também é preservado nas duas abas.

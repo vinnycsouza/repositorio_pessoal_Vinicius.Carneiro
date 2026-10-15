@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import os
 import pickle
 import shutil
@@ -17,12 +18,14 @@ from openpyxl import Workbook
 
 from modules.auditoria import (
     CODIGOS_CP_EXPORTACAO_PADRAO,
+    OBSERVACAO_MATERNIDADE_NT20,
     _observacao_rubrica,
     _prioridade_rubrica,
     classificar_carater,
     classificar_status_cp,
     classificar_tipo_verba,
     entra_base_cp,
+    revisar_maternidade_dataframe,
 )
 from modules.excel_builder import FontePlanilha, gerar_workbook
 from modules.busca_rubricas import combinar_filtros_sql, filtro_sql_chaves_rubricas
@@ -32,6 +35,126 @@ from modules.sqlite_writer import BatchPolicy, SQLiteWriter
 ProgressCallback = Callable[[float, str], None]
 MAX_DADOS_ABA = 1_048_575
 CHUNK_EXPORT = 25_000
+VERSAO_REGRA_MATERNIDADE = "1"
+
+
+def atualizar_regra_maternidade(
+    conn: sqlite3.Connection, cb: ProgressCallback | None = None,
+) -> bool:
+    """Migra projeções em uma transação, sem reler XML ou reconstruir movimentos.
+
+    Guarda os totais/classificações anteriores no meta. Só subtrai das bases
+    os valores 21/22 que a versão anterior efetivamente somava (considerado=Sim).
+    Eventos, objetos, recibos, valores originais e totalizadores oficiais são preservados.
+    """
+    row = conn.execute("SELECT valor FROM meta WHERE chave='versao_regra_maternidade'").fetchone()
+    if row and row[0] == VERSAO_REGRA_MATERNIDADE:
+        return False
+    emitir_progresso(cb, "integridade", 0.0,
+                     "Atualizando a análise patronal do salário-maternidade (NT 20/2020)...")
+    worker = ("per_apur", "cpf", "matricula", "cod_categ", "cod_lotacao")
+    recon = ("per_apur", "nr_insc_estab", "cod_lotacao", "cod_categ")
+    tabelas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    snapshots = {}
+    def executar(sql):
+        return _executar_consulta_com_heartbeat(
+            conn, sql, cb, 0.1,
+            "Atualizando as projeções de maternidade no SQLite; XMLs preservados...",
+        )
+    # Todos os comandos abaixo participam da mesma transação; em falha, rollback.
+    with conn:
+        deltas = []
+        for origem, nome, chaves in [
+            ("rel_movimentos_cp", "nt20_trab", worker),
+            ("rel_movimentos_cp", "nt20_s1200", recon),
+            ("rel_movimentos_s2299", "nt20_s2299", recon),
+        ]:
+            if origem not in tabelas:
+                continue
+            conn.execute(f"DROP TABLE IF EXISTS temp.{nome}")
+            executar(
+                f"CREATE TEMP TABLE {nome} AS SELECT {','.join(chaves)},"
+                "SUM(CAST(vr_rubr AS REAL)) retirar "
+                f"FROM {origem} WHERE TRIM(cod_inc_cp) IN ('21','22') "
+                "AND considerado_cp='Sim' "
+                f"GROUP BY {','.join(chaves)}"
+            )
+            conn.execute(f"CREATE INDEX {nome}_chave ON {nome}({','.join(chaves)})")
+            deltas.append(nome)
+
+        def condicao(chaves):
+            return " AND ".join(f"d.{k} IS b.{k}" for k in chaves)
+
+        if "rel_base_trabalhador" in tabelas and "nt20_trab" in deltas:
+            match = condicao(worker)
+            executar(
+                "UPDATE rel_base_trabalhador AS b SET total_incide_cp=total_incide_cp-"
+                f"(SELECT retirar FROM nt20_trab d WHERE {match}) "
+                f"WHERE b.qtd_rubricas>0 AND EXISTS(SELECT 1 FROM nt20_trab d WHERE {match})"
+            )
+            executar(
+                "UPDATE rel_base_trabalhador AS b SET "
+                "diferenca_incide_cp_vs_s5001=total_incide_cp-total_s5001_infoBaseCS,"
+                "status_conferencia=CASE WHEN ABS(total_incide_cp-total_s5001_infoBaseCS)<=0.05 "
+                "THEN 'OK' ELSE 'Revisar' END "
+                f"WHERE b.qtd_rubricas>0 AND EXISTS(SELECT 1 FROM nt20_trab d WHERE {match})"
+            )
+        if "rel_reconciliacao_s5011" in tabelas:
+            afetadas = []
+            for nome, campo in [("nt20_s1200", "base_s1200"), ("nt20_s2299", "base_s2299")]:
+                if nome not in deltas:
+                    continue
+                match = condicao(recon)
+                afetadas.append(f"EXISTS(SELECT 1 FROM {nome} d WHERE {match})")
+                executar(
+                    f"UPDATE rel_reconciliacao_s5011 AS b SET {campo}={campo}-"
+                    f"(SELECT retirar FROM {nome} d WHERE {match}) "
+                    f"WHERE EXISTS(SELECT 1 FROM {nome} d WHERE {match})"
+                )
+            if afetadas:
+                executar(
+                    "UPDATE rel_reconciliacao_s5011 AS b SET "
+                    "base_teorica_total=base_s1200+base_s2299,"
+                    "diferenca_s1200_s5011=base_s1200-base_s5011,"
+                    "diferenca_total_s5011=base_s1200+base_s2299-base_s5011,"
+                    "status_reconciliacao=CASE WHEN status_reconciliacao='Sem S-5011' THEN 'Sem S-5011' "
+                    "WHEN ABS(base_s1200+base_s2299-base_s5011)<=0.05 THEN 'OK' ELSE 'Revisar' END "
+                    "WHERE " + " OR ".join(afetadas)
+                )
+        for tabela in ("dados_remuneracoes", "dados_remuneracoes_s2299",
+                       "rel_movimentos_cp", "rel_movimentos_s2299", "rel_rubricas_cp_base"):
+            if tabela not in tabelas:
+                continue
+            valor = "valor_total" if tabela == "rel_rubricas_cp_base" else "vr_rubr"
+            snapshots[tabela] = executar(
+                f"SELECT cod_inc_cp,status_cp,considerado_cp,COUNT(*),SUM(CAST({valor} AS REAL)) "
+                f"FROM {tabela} WHERE TRIM(cod_inc_cp) IN ('21','22') "
+                "GROUP BY cod_inc_cp,status_cp,considerado_cp"
+            ).fetchall()
+            if not snapshots[tabela]:
+                continue
+            executar(
+                f"UPDATE {tabela} SET status_cp='Revisar codIncCP',considerado_cp='Não' "
+                "WHERE TRIM(cod_inc_cp) IN ('21','22') "
+                "AND (COALESCE(status_cp,'')<>'Revisar codIncCP' OR COALESCE(considerado_cp,'')<>'Não')"
+            )
+        if {"rel_controle_integridade", "rel_reconciliacao_s5011"} <= tabelas:
+            conn.execute(
+                "UPDATE rel_controle_integridade SET soma_valores="
+                "(SELECT COALESCE(SUM(diferenca_total_s5011),0) FROM rel_reconciliacao_s5011) "
+                "WHERE tabela='rel_reconciliacao_s5011'"
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(chave,valor) VALUES('backup_classificacao_maternidade',?)",
+            (json.dumps(snapshots, ensure_ascii=False),),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(chave,valor) VALUES('versao_regra_maternidade',?)",
+            (VERSAO_REGRA_MATERNIDADE,),
+        )
+        for nome in deltas:
+            conn.execute(f"DROP TABLE temp.{nome}")
+    return True
 
 
 _SQL_MOVIMENTOS_CP_EFETIVOS = """
@@ -131,6 +254,13 @@ def materializar_tabelas_analiticas(
 
     A operação é retomável: o último id de payload processado é salvo em meta.
     """
+    if not _colunas_tabela(conn, "dados_remuneracoes") and not _colunas_tabela(conn, "rel_movimentos_cp"):
+        # Materialização inteiramente nova já usa o classificador atual. Evita
+        # varrer os movimentos recém-criados apenas para migrar a própria regra.
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(chave,valor) VALUES('versao_regra_maternidade',?)",
+            (VERSAO_REGRA_MATERNIDADE,),
+        )
     categorias = [
         ("rubricas", "dados_rubricas"),
         ("exclusoes", "dados_exclusoes"),
@@ -316,7 +446,7 @@ def _executar_consulta_com_heartbeat(
     cb: ProgressCallback | None,
     progresso: float,
     mensagem: str,
-) -> None:
+) -> sqlite3.Cursor:
     """Executa SQL longo mantendo o HUD vivo, sem consultar o banco no callback."""
     inicio = time.monotonic()
     ultimo_aviso = inicio
@@ -343,7 +473,7 @@ def _executar_consulta_com_heartbeat(
 
     conn.set_progress_handler(avisar_atividade, 250_000)
     try:
-        conn.execute(sql)
+        return conn.execute(sql)
     finally:
         conn.set_progress_handler(None, 0)
 
@@ -376,6 +506,7 @@ def _recriar_tabela_derivada(
 
 
 def _criar_tabelas_relatorio(conn: sqlite3.Connection, cb: ProgressCallback | None) -> None:
+    atualizar_regra_maternidade(conn, cb)
     # Migrações de Workspace podem reconstruir derivados sem passar novamente
     # pela materialização. As tabelas novas da V10 precisam existir, ainda que
     # vazias, para manter compatibilidade com bancos V9.
@@ -598,6 +729,7 @@ def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) ->
     try:
         rub = pd.read_sql_query("SELECT * FROM rel_rubricas_cp_base ORDER BY status_cp, carater_verba, valor_total DESC", conn)
         if not rub.empty:
+            rub = revisar_maternidade_dataframe(rub)
             rub["prioridade_revisao"] = rub.apply(_prioridade_rubrica, axis=1)
             rub["observacao"] = rub.apply(_observacao_rubrica, axis=1)
         resumo_rows = []
@@ -634,6 +766,9 @@ def carregar_pacote_resumido(db_path: str | Path, limite_previa: int = 5_000) ->
             else pd.DataFrame()
         )
         return {
+            "versao_regra_maternidade": (
+                conn.execute("SELECT valor FROM meta WHERE chave='versao_regra_maternidade'").fetchone() or ("",)
+            )[0] if existe_tabela("meta") else "",
             "resumo_visual": pd.DataFrame(resumo_rows),
             "rubricas_cp": rub,
             "movimentos_cp": pd.read_sql_query(f"SELECT * FROM rel_movimentos_cp LIMIT {int(limite_previa)}", conn),
@@ -706,6 +841,14 @@ def _filtro_sql_movimentos_exportacao(modo: str) -> str:
     return ""
 
 
+def _consulta_movimentos_cp(filtro: str) -> str:
+    observacao = OBSERVACAO_MATERNIDADE_NT20.replace("'", "''")
+    return (
+        "SELECT *, CASE WHEN TRIM(cod_inc_cp) IN ('21','22') THEN "
+        f"'{observacao}' ELSE '' END observacao_cp_patronal FROM rel_movimentos_cp" + filtro
+    )
+
+
 def contar_movimentos_exportacao_sqlite(
     db_path: str | Path,
     modo_exportacao_movimentos_cp: str,
@@ -761,6 +904,7 @@ def gerar_excel_saida_sqlite(
     conn.execute("PRAGMA temp_store = FILE")
     conn.execute("PRAGMA cache_size = -262144")
     try:
+        df_rubricas_cp = revisar_maternidade_dataframe(df_rubricas_cp)
         condicao_rubricas = filtro_sql_chaves_rubricas(chaves_rubricas)
         filtro = combinar_filtros_sql(
             _filtro_sql_movimentos_exportacao(modo_exportacao_movimentos_cp),
@@ -768,6 +912,14 @@ def gerar_excel_saida_sqlite(
         )
         filtro_rubricas = combinar_filtros_sql("", condicao_rubricas)
         metricas = _metricas_movimentos(conn)
+        df_resumo_visual = df_resumo_visual.copy()
+        if {"indicador", "valor"} <= set(df_resumo_visual.columns):
+            novos_valores = {
+                "Rubricas com incidência CP": int(conn.execute("SELECT COUNT(*) FROM rel_rubricas_cp_base WHERE status_cp='Incide CP'").fetchone()[0]),
+                "Valor com incidência CP": float(metricas["valor_incide"]),
+            }
+            for indicador, valor in novos_valores.items():
+                df_resumo_visual.loc[df_resumo_visual["indicador"].eq(indicador), "valor"] = valor
         totais_controle = {
             str(tabela): int(quantidade)
             for tabela, quantidade in conn.execute(
@@ -797,7 +949,7 @@ def gerar_excel_saida_sqlite(
             FontePlanilha("02_rubricas_cp", dataframe=df_rubricas_cp),
             FontePlanilha(
                 "03_movimentos_cp",
-                query="SELECT * FROM rel_movimentos_cp" + filtro,
+                query=_consulta_movimentos_cp(filtro),
                 total_esperado=(
                     contar_movimentos_exportacao_sqlite(
                         db_path, modo_exportacao_movimentos_cp, chaves_rubricas
@@ -839,7 +991,7 @@ def gerar_excel_saida_sqlite(
                 "09_versoes",
                 query="SELECT chave,valor FROM meta WHERE chave IN "
                 "('versao_engine','versao_schema_sqlite','versao_parser',"
-                "'versao_consistencia_recibo_s1200') ORDER BY chave",
+                "'versao_consistencia_recibo_s1200','versao_regra_maternidade') ORDER BY chave",
             ),
         ]
         if perfil_relatorio == "enxuto":
@@ -855,7 +1007,7 @@ def gerar_excel_saida_sqlite(
             ),
             FontePlanilha(
                 "apoio_s1200",
-                query="SELECT * FROM rel_movimentos_cp" + filtro,
+                query=_consulta_movimentos_cp(filtro),
                 total_esperado=(
                     contar_movimentos_exportacao_sqlite(
                         db_path, modo_exportacao_movimentos_cp, chaves_rubricas

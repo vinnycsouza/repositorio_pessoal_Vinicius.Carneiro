@@ -86,6 +86,10 @@ class WorkspaceContext:
             raise ValueError(
                 f"O Workspace não está concluído (status: {status or 'desconhecido'})."
             )
+        if status == "concluido" and "dados_remuneracoes" in tabelas:
+            from modules.processador_zip import preparar_workspace_para_relatorios
+
+            preparar_workspace_para_relatorios(db_path)
         return cls(
             workspace_path=db_path.parent,
             db_path=db_path,
