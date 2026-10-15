@@ -54,6 +54,14 @@ arquivo concluido. A escrita do workbook fica centralizada em
 
 ## Saida
 
+A seleção de movimentos (análise prioritária, apenas Incide CP, classificados
+ou todos) é aplicada tanto à aba `03_movimentos_cp` quanto a `apoio_s1200`.
+O filtro de rubricas por código e tabela também é preservado nas duas abas.
+As pendências Sem S-1010 permanecem disponíveis separadamente em `05_sem_s1010`.
+Para exportar todos os movimentos S-1200, selecione explicitamente a opção
+"Todos os movimentos, inclusive Sem S-1010". O inventário continua completo
+para rastreabilidade dos arquivos; ele não representa movimentos exportados.
+
 O relatorio de incidencia CP e entregue como
 `relatorio_incidencia_cp_esocial_v10.xlsx`. Bases acima de 1.048.575 linhas sao
 divididas em abas numeradas dentro desse mesmo arquivo.

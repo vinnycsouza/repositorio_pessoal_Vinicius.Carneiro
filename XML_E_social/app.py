@@ -2186,7 +2186,7 @@ if modulo_ativo == "Relatório de Incidência CP":
         ],
         index=0,
         help=(
-            "A opção recomendada exporta Incide CP e Revisar codIncCP na aba 03, reduzindo o tamanho sem esconder pendências. "
+            "A opção recomendada exporta Incide CP e Revisar codIncCP nas abas 03_movimentos_cp e apoio_s1200, reduzindo o tamanho sem esconder pendências. "
             "Os movimentos Sem S-1010 são sempre exportados separadamente no arquivo/aba 05_sem_s1010, exceto na opção "
             "'Todos os movimentos', em que também aparecem na aba 03."
         ),
@@ -2259,7 +2259,8 @@ if modulo_ativo == "Relatório de Incidência CP":
         horizontal=True,
         help=(
             "O perfil enxuto evita repetir 03_movimentos_cp em apoio_s1200 e "
-            "mantém a empresa consolidada. Auditoria completa preserva todas as bases de apoio."
+            "mantém a empresa consolidada. Auditoria completa inclui as bases de apoio; "
+            "apoio_s1200 respeita o mesmo filtro de movimentos da aba 03."
         ),
         key="perfil_workbook_incidencia_v10",
     )
@@ -2268,7 +2269,7 @@ if modulo_ativo == "Relatório de Incidência CP":
         else "auditoria_completa"
     )
     assinatura_rubricas = "todas" if chaves_rubricas_relatorio is None else "|".join(chaves_rubricas_relatorio)
-    assinatura_exportacao = f"v10:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}:{perfil_relatorio_sql}:{assinatura_rubricas}"
+    assinatura_exportacao = f"v10_filtro_apoio_s1200:{modo_exportacao_movimentos_cp}:{total_movimentos_cp}:{qtd_exportacao}:{qtd_sem_s1010}:{gerar_manifesto_rel}:{perfil_relatorio_sql}:{assinatura_rubricas}"
     if st.session_state.get("relatorio_excel_assinatura") != assinatura_exportacao:
         st.session_state.pop("relatorio_excel_bytes", None)
         st.session_state.pop("relatorio_excel_path", None)
@@ -2348,7 +2349,7 @@ if modulo_ativo == "Relatório de Incidência CP":
                 FontePlanilha("06_s5001_tpvalor", dataframe=df_s5001_resumo),
                 FontePlanilha("07_levantamento", dataframe=df_levantamento_export),
                 FontePlanilha("apoio_s1010", dataframe=filtrar_dataframe_por_chaves(df_rubricas, chaves_rubricas_relatorio)),
-                FontePlanilha("apoio_s1200", dataframe=filtrar_dataframe_por_chaves(df_remun, chaves_rubricas_relatorio)),
+                FontePlanilha("apoio_s1200", dataframe=movimentos_export),
                 FontePlanilha("apoio_s5001", dataframe=df_bases_trab),
                 FontePlanilha("apoio_s5011", dataframe=df_bases_contrib),
                 FontePlanilha("apoio_s3000", dataframe=df_exclusoes),

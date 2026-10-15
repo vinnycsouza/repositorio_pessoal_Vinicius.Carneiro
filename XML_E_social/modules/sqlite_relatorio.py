@@ -855,11 +855,15 @@ def gerar_excel_saida_sqlite(
             ),
             FontePlanilha(
                 "apoio_s1200",
-                query="SELECT * FROM rel_movimentos_cp" + filtro_rubricas,
+                query="SELECT * FROM rel_movimentos_cp" + filtro,
                 total_esperado=(
-                    contar_movimentos_exportacao_sqlite(db_path, "todos", chaves_rubricas)
+                    contar_movimentos_exportacao_sqlite(
+                        db_path, modo_exportacao_movimentos_cp, chaves_rubricas
+                    )
                     if chaves_rubricas is not None
-                    else int(metricas["total"])
+                    else totais_modo.get(
+                        modo_exportacao_movimentos_cp, int(metricas["total"])
+                    )
                 ),
             ),
             FontePlanilha(

@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+from openpyxl import load_workbook
 
 from modules.data_source import SQLiteDataSource, WorkspaceContext
 from modules.levantamento_sqlite import (
@@ -71,6 +72,71 @@ class CargaIncrementalTest(unittest.TestCase):
         return processar_fontes_esocial(
             [("inicial.zip", zip_xmls(**{"s1200.xml": S1200}))]
         )
+
+    def test_exportacao_s1200_respeita_modo_e_rubricas_nas_duas_abas(self):
+        # Um mesmo S-1200 contém movimentos de todos os status: o filtro
+        # precisa selecionar linhas, não incluir o evento inteiro.
+        itens = "".join(
+            f"<itensRemun><codRubr>{codigo}</codRubr>"
+            f"<ideTabRubr>{tabela}</ideTabRubr><vrRubr>100.00</vrRubr></itensRemun>"
+            for codigo, tabela in [
+                ("100", "1"), ("200", "1"), ("300", "1"),
+                ("400", "1"), ("500", "1"), ("100", "2"),
+            ]
+        )
+        inicio = S1200.index("<itensRemun>")
+        fim = S1200.index("</itensRemun>") + len("</itensRemun>")
+        arquivos = {"movimentos.xml": S1200[:inicio] + itens + S1200[fim:]}
+        for codigo, tabela, incidencia in [
+            ("100", "1", "11"), ("200", "1", "00"),
+            ("300", "1", "99"), ("500", "1", "11"), ("100", "2", "11"),
+        ]:
+            arquivos[f"rubrica_{codigo}_{tabela}.xml"] = (
+                S1010.replace('Id="ID1010"', f'Id="ID1010-{codigo}-{tabela}"')
+                .replace("<codRubr>100</codRubr>", f"<codRubr>{codigo}</codRubr>")
+                .replace("<ideTabRubr>1</ideTabRubr>", f"<ideTabRubr>{tabela}</ideTabRubr>")
+                .replace("<codIncCP>11</codIncCP>", f"<codIncCP>{incidencia}</codIncCP>")
+            )
+        resultado = processar_fontes_esocial([("sintetico.zip", zip_xmls(**arquivos))])
+        prioritarios = {("100", "1"), ("300", "1"), ("500", "1"), ("100", "2")}
+        casos = [
+            ("analise_prioritaria", None, prioritarios),
+            ("incidencia_cp_padrao", None, prioritarios - {("300", "1")}),
+            ("classificados", None, prioritarios | {("200", "1")}),
+            ("todos", None, prioritarios | {("200", "1"), ("400", "1")}),
+            ("analise_prioritaria", ["100||1", "300||1"], {("100", "1"), ("300", "1")}),
+            ("analise_prioritaria", [], set()),
+        ]
+        for numero, (modo, chaves, esperado) in enumerate(casos):
+            with self.subTest(modo=modo, chaves=chaves):
+                destino = Path(self.temp.name) / f"filtro_{numero}.xlsx"
+                gerar_excel_saida_sqlite(
+                    resultado["db_path"], destino, resultado["empresa"],
+                    resultado["pacote_sqlite"]["resumo_visual"],
+                    resultado["pacote_sqlite"]["rubricas_cp"],
+                    modo_exportacao_movimentos_cp=modo,
+                    chaves_rubricas=chaves,
+                )
+                wb = load_workbook(destino, read_only=True, data_only=True)
+                try:
+                    for aba in ("03_movimentos_cp", "apoio_s1200"):
+                        linhas = wb[aba].iter_rows(values_only=True)
+                        cabecalho = next(linhas)
+                        dados = [dict(zip(cabecalho, linha)) for linha in linhas]
+                        self.assertEqual(len(dados), len(esperado))
+                        self.assertEqual(
+                            {(r["cod_rubr"], r["ide_tab_rubr"]) for r in dados}, esperado
+                        )
+                    # As pendências não somem por causa do modo prioritário.
+                    if chaves is None:
+                        pendencias = wb["05_sem_s1010"].iter_rows(values_only=True)
+                        cabecalho = next(pendencias)
+                        self.assertEqual(
+                            [dict(zip(cabecalho, linha))["cod_rubr"] for linha in pendencias],
+                            ["400"],
+                        )
+                finally:
+                    wb.close()
 
     def test_carga_inicial_combina_historico_antes_do_principal_e_recibos(self):
         fontes = organizar_fontes_carga_inicial(
