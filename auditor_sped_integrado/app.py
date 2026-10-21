@@ -78,25 +78,28 @@ with aba_entrada:
         )
 
     st.subheader("2. Triagem dos itens C170")
-    st.write("A triagem usa os Excel de ICMS/IPI e Contribuições informados acima. O cruzamento exige chave de NF-e de 44 dígitos e número do item únicos em cada base.")
+    st.write("A triagem usa as abas C170 dos Excel de ICMS/IPI e Contribuições. Antes de comparar valores, confere chave da NF-e, item, estabelecimento, competência e tipo de operação. A cobertura do ICMS/IPI é identificada pela aba 0000.")
     arquivo_icms = entradas["EFD ICMS/IPI"]
     arquivo_pis = entradas["EFD-Contribuições"]
     if st.button("Executar triagem", type="primary"):
         try:
             if arquivo_icms is None or arquivo_pis is None:
                 raise ValueError("Informe os Excel de ICMS/IPI e EFD-Contribuições.")
-            st.session_state["achados"] = triagem_c170(
-                arquivo_icms[0], arquivo_pis[0], tolerancia,
-                nome_icms=arquivo_icms[1], nome_pis=arquivo_pis[1],
-            )
+            with st.spinner("Lendo C170 e verificando a cobertura por estabelecimento e competência..."):
+                st.session_state["achados"] = triagem_c170(
+                    arquivo_icms[0], arquivo_pis[0], tolerancia,
+                    nome_icms=arquivo_icms[1], nome_pis=arquivo_pis[1],
+                )
         except Exception as erro:
             st.error(str(erro))
     if "achados" in st.session_state:
         achados = st.session_state["achados"]
-        st.metric("Itens sinalizados para revisão", len(achados))
+        st.metric("Resultados da triagem C170", len(achados))
         if achados.empty:
             st.info("Nenhum indício encontrado nos itens comparáveis. Isso não atesta ausência de crédito.")
         else:
+            st.dataframe(achados["estado"].value_counts().rename_axis("Estado").reset_index(name="Itens"),
+                         use_container_width=True, hide_index=True)
             editavel = achados.copy()
             editavel["decisao_analista"] = "Pendente"
             editavel["justificativa_analista"] = ""

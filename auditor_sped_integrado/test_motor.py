@@ -11,6 +11,8 @@ from auditor_sped_integrado.motor import _contar_linhas_aba, inventariar_excel, 
 
 
 CHAVE = "1" * 44
+CNPJ_MATRIZ = "10693312000181"
+CNPJ_FILIAL = "10693312000262"
 TEST_DIR = Path(__file__).resolve().parent
 
 
@@ -22,6 +24,7 @@ def pasta_temporaria():
 class MotorTest(unittest.TestCase):
     def _planilhas(self, pasta: Path, duplicar_icms: bool = False) -> tuple[Path, Path]:
         base = {
+            "Mês": "Janeiro", "Ano": 2023, "CNPJ": CNPJ_MATRIZ,
             "Chave": CHAVE,
             "Item": 1,
             "Indicador de Operacao": 1,
@@ -33,7 +36,9 @@ class MotorTest(unittest.TestCase):
             "Base de COFINS": 100.0,
         }
         icms, pis = pasta / "icms.xlsx", pasta / "pis.xlsx"
-        pd.DataFrame([base, base] if duplicar_icms else [base]).to_excel(icms, sheet_name="C170", index=False)
+        with pd.ExcelWriter(icms) as livro:
+            pd.DataFrame({"Mês": ["Janeiro"], "Ano": [2023], "CNPJ": [CNPJ_MATRIZ]}).to_excel(livro, sheet_name="0000", index=False)
+            pd.DataFrame([base, base] if duplicar_icms else [base]).to_excel(livro, sheet_name="C170", index=False)
         pd.DataFrame([base]).to_excel(pis, sheet_name="C170", index=False)
         return icms, pis
 
@@ -69,13 +74,77 @@ class MotorTest(unittest.TestCase):
     def test_entrada_icms_nao_e_comparada_com_saida_pis(self):
         with pasta_temporaria() as tmp:
             icms, pis = self._planilhas(Path(tmp))
-            quadro_icms = pd.read_excel(icms, dtype={"Chave": str})
+            quadro_icms = pd.read_excel(icms, sheet_name="C170", dtype={"Chave": str})
             quadro_icms["Indicador de Operacao"] = 0
-            quadro_icms.to_excel(icms, sheet_name="C170", index=False)
+            with pd.ExcelWriter(icms, mode="a", engine="openpyxl", if_sheet_exists="replace") as livro:
+                quadro_icms.to_excel(livro, sheet_name="C170", index=False)
             achados = triagem_c170(icms, pis)
             self.assertEqual(achados["regra"].tolist(), ["CONCILIACAO_C170"])
-            self.assertEqual(achados.iloc[0]["estado"], "Não comparável")
+            self.assertEqual(achados.iloc[0]["estado"], "Operação diferente")
             self.assertEqual(achados.iloc[0]["linha_icms"], 2)
+
+    def test_saida_da_filial_com_entrada_na_matriz_e_sem_cobertura(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            quadro_pis = pd.read_excel(pis, dtype={"Chave": str, "CNPJ": str})
+            quadro_pis["CNPJ Estabelecimento(C010)"] = CNPJ_FILIAL
+            quadro_pis.to_excel(pis, sheet_name="C170", index=False)
+            quadro_icms = pd.read_excel(icms, sheet_name="C170", dtype={"Chave": str, "CNPJ": str})
+            quadro_icms["Indicador de Operacao"] = 0
+            with pd.ExcelWriter(icms, mode="a", engine="openpyxl", if_sheet_exists="replace") as livro:
+                quadro_icms.to_excel(livro, sheet_name="C170", index=False)
+            achado = triagem_c170(icms, pis).iloc[0]
+            self.assertEqual(achado["estado"], "Estabelecimento sem cobertura")
+            self.assertEqual(achado["cnpj_pis"], CNPJ_FILIAL)
+            self.assertEqual(achado["cnpj_icms"], CNPJ_MATRIZ)
+            self.assertEqual(achado["competencia_pis"], "2023-01")
+            self.assertEqual(achado["linha_icms"], 2)
+            self.assertTrue(pd.isna(achado["base_icms"]))
+
+    def test_mesma_nota_em_outro_estabelecimento_nao_gera_indicio(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            quadro_pis = pd.read_excel(pis, dtype={"Chave": str, "CNPJ": str})
+            quadro_pis["CNPJ Estabelecimento(C010)"] = CNPJ_FILIAL
+            quadro_pis.to_excel(pis, sheet_name="C170", index=False)
+            achados = triagem_c170(icms, pis)
+            self.assertEqual(achados["estado"].tolist(), ["Estabelecimento sem cobertura"])
+
+    def test_filial_coberta_mas_item_so_na_matriz_e_contexto_diferente(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            quadro_pis = pd.read_excel(pis, dtype={"Chave": str, "CNPJ": str})
+            quadro_pis["CNPJ Estabelecimento(C010)"] = CNPJ_FILIAL
+            quadro_pis.to_excel(pis, sheet_name="C170", index=False)
+            quadro_0000 = pd.read_excel(icms, sheet_name="0000", dtype=str)
+            filial = quadro_0000.copy()
+            filial["CNPJ"] = CNPJ_FILIAL
+            with pd.ExcelWriter(icms, mode="a", engine="openpyxl", if_sheet_exists="replace") as livro:
+                pd.concat([quadro_0000, filial], ignore_index=True).to_excel(livro, sheet_name="0000", index=False)
+            achado = triagem_c170(icms, pis).iloc[0]
+            self.assertEqual(achado["estado"], "Estabelecimento ou competência diferente")
+
+    def test_saida_da_mesma_filial_em_outra_competencia_nao_e_comparada(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            quadro_pis = pd.read_excel(pis, dtype={"Chave": str, "CNPJ": str})
+            quadro_pis["Mês"] = "Fevereiro"
+            quadro_pis.to_excel(pis, sheet_name="C170", index=False)
+            achado = triagem_c170(icms, pis).iloc[0]
+            self.assertEqual(achado["estado"], "Estabelecimento sem cobertura")
+            self.assertEqual(achado["competencia_pis"], "2023-02")
+            self.assertEqual(achado["competencia_icms"], "2023-01")
+
+    def test_saida_em_outra_filial_nao_cria_duplicidade(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            quadro_pis = pd.read_excel(pis, dtype={"Chave": str, "CNPJ": str})
+            quadro_pis["CNPJ Estabelecimento(C010)"] = CNPJ_MATRIZ
+            outra_filial = quadro_pis.copy()
+            outra_filial["CNPJ Estabelecimento(C010)"] = CNPJ_FILIAL
+            pd.concat([quadro_pis, outra_filial], ignore_index=True).to_excel(pis, sheet_name="C170", index=False)
+            achados = triagem_c170(icms, pis)
+            self.assertEqual(achados["estado"].tolist(), ["Indício para revisão", "Estabelecimento sem cobertura"])
 
     def test_planilha_sem_aba_c170_e_rejeitada(self):
         with pasta_temporaria() as tmp:
@@ -89,7 +158,7 @@ class MotorTest(unittest.TestCase):
             icms, pis = self._planilhas(Path(tmp))
             dados_icms, dados_pis = icms.read_bytes(), pis.read_bytes()
             inventario = inventariar_excel(dados_icms, "EFD ICMS/IPI", "icms.xlsx")
-            self.assertEqual(inventario["abas"], {"C170": 1})
+            self.assertEqual(inventario["abas"], {"0000": 1, "C170": 1})
             achados = triagem_c170(dados_icms, dados_pis, nome_icms="icms.xlsx", nome_pis="pis.xlsx")
             self.assertEqual(achados["regra"].tolist(), ["PISCOFINS_ICMS_69"])
 
