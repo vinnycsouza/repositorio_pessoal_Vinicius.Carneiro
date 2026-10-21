@@ -61,6 +61,15 @@ class MotorTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Aba C170 não encontrada"):
                 triagem_c170(icms, pis)
 
+    def test_excel_selecionado_pelo_navegador(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            dados_icms, dados_pis = icms.read_bytes(), pis.read_bytes()
+            inventario = inventariar_excel(dados_icms, "EFD ICMS/IPI", "icms.xlsx")
+            self.assertEqual(inventario["abas"], {"C170": 1})
+            achados = triagem_c170(dados_icms, dados_pis, nome_icms="icms.xlsx", nome_pis="pis.xlsx")
+            self.assertEqual(achados["regra"].tolist(), ["PISCOFINS_ICMS_69"])
+
     def test_inventario_excel_preserva_hash_e_contagem_por_aba(self):
         with pasta_temporaria() as tmp:
             arquivo = Path(tmp) / "efd.xlsx"

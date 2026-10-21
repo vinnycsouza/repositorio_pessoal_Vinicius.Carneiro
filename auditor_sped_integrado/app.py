@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -14,6 +14,11 @@ if str(ROOT) not in sys.path:
 
 from auditor_sped_integrado.catalogo import REGRAS
 from auditor_sped_integrado.motor import TIPOS, inventariar_excel, triagem_c170
+
+
+def limpar_analises():
+    st.session_state.pop("inventario", None)
+    st.session_state.pop("achados", None)
 
 
 st.set_page_config(page_title="Auditor SPED integrado", layout="wide")
@@ -30,13 +35,19 @@ aba_entrada, aba_regras, aba_metodo = st.tabs(["Análise", "Catálogo de regras"
 
 with aba_entrada:
     st.subheader("1. Arquivos Excel convertidos pelo Sysconv")
-    st.write("Informe os caminhos dos Excel de cada escrituração. O inventário registra nome, hash SHA-256 e quantidade de linhas por aba.")
-    caminhos = {tipo: st.text_input(f"Excel {tipo}", key=f"excel_{i}") for i, tipo in enumerate(TIPOS)}
+    st.write("Selecione os Excel baixados em seu computador. O inventário registra nome, hash SHA-256 e quantidade de linhas por aba.")
+    arquivos = {
+        tipo: st.file_uploader(f"Excel {tipo}", type=["xlsx", "xlsm"], key=f"excel_{i}", on_change=limpar_analises)
+        for i, tipo in enumerate(TIPOS)
+    }
     if st.button("Inventariar Excel"):
         try:
-            if not any(caminhos.values()):
+            if not any(arquivo is not None for arquivo in arquivos.values()):
                 raise ValueError("Informe ao menos um arquivo Excel.")
-            inventario = [inventariar_excel(caminho, tipo) for tipo, caminho in caminhos.items() if caminho.strip()]
+            inventario = [
+                inventariar_excel(arquivo.getvalue(), tipo, arquivo.name)
+                for tipo, arquivo in arquivos.items() if arquivo is not None
+            ]
             st.session_state["inventario"] = inventario
         except Exception as erro:
             st.error(str(erro))
@@ -53,17 +64,17 @@ with aba_entrada:
         )
 
     st.subheader("2. Triagem dos itens C170")
-    st.write("A triagem usa os Excel de ICMS/IPI e Contribuições informados acima. O cruzamento exige chave de NF-e de 44 dígitos e número do item únicos em cada base.")
-    caminho_icms = caminhos["EFD ICMS/IPI"]
-    caminho_pis = caminhos["EFD-Contribuições"]
+    st.write("A triagem usa os Excel de ICMS/IPI e Contribuições selecionados acima. O cruzamento exige chave de NF-e de 44 dígitos e número do item únicos em cada base.")
+    arquivo_icms = arquivos["EFD ICMS/IPI"]
+    arquivo_pis = arquivos["EFD-Contribuições"]
     if st.button("Executar triagem", type="primary"):
         try:
-            if not caminho_icms or not caminho_pis:
-                raise ValueError("Informe os dois arquivos Excel.")
-            for caminho in (caminho_icms, caminho_pis):
-                if not Path(caminho).is_file():
-                    raise FileNotFoundError(caminho)
-            st.session_state["achados"] = triagem_c170(caminho_icms, caminho_pis, tolerancia)
+            if arquivo_icms is None or arquivo_pis is None:
+                raise ValueError("Selecione os Excel de ICMS/IPI e EFD-Contribuições.")
+            st.session_state["achados"] = triagem_c170(
+                arquivo_icms.getvalue(), arquivo_pis.getvalue(), tolerancia,
+                nome_icms=arquivo_icms.name, nome_pis=arquivo_pis.name,
+            )
         except Exception as erro:
             st.error(str(erro))
     if "achados" in st.session_state:

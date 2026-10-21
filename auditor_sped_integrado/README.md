@@ -7,7 +7,7 @@ Projeto local para organizar análises de possíveis recuperações tributárias
 - Excel `.xlsx` ou `.xlsm` do Sysconv para EFD ICMS/IPI, EFD-Contribuições, ECD e ECF: hash SHA-256 e contagem de linhas por aba;
 - Abas C170 dos Excel de EFD ICMS/IPI e EFD-Contribuições: triagem fiscal em nível de item.
 
-Os quatro Excel são inventariados. A triagem usa as abas C170 dos dois primeiros. ECD e ECF ainda não têm interpretação contábil automática nesta versão. A contagem do inventário considera a primeira linha preenchida de cada aba como cabeçalho.
+Os quatro Excel são selecionados pelo navegador e processados em memória. A triagem usa as abas C170 dos dois primeiros. ECD e ECF ainda não têm interpretação contábil automática nesta versão. A contagem do inventário considera a primeira linha preenchida de cada aba como cabeçalho.
 
 ## Saídas e segurança jurídica
 
@@ -28,7 +28,7 @@ python -m pip install -r auditor_sped_integrado/requirements.txt
 streamlit run auditor_sped_integrado/app.py
 ```
 
-Não coloque planilhas de clientes ou relatórios com dados fiscais sob controle de versão. A aplicação lê caminhos locais, não envia dados para serviços externos e só exporta arquivos quando o usuário aciona o botão de download.
+Não coloque planilhas de clientes ou relatórios com dados fiscais sob controle de versão. A aplicação recebe arquivos pelo navegador, processa-os localmente em memória, não os envia para serviços externos e só exporta resultados quando o usuário aciona o botão de download.
 
 ## Próximas integrações
 

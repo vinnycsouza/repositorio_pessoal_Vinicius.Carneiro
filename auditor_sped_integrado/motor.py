@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 import re
 import sys
@@ -25,15 +26,23 @@ COLUNAS = (
 )
 
 
-def inventariar_excel(caminho: str | Path, tipo: str) -> dict:
+def inventariar_excel(arquivo: str | Path | bytes, tipo: str, nome_arquivo: str | None = None) -> dict:
     """Conta linhas de dados por aba do Excel convertido e registra seu hash."""
     if tipo not in TIPOS:
         raise ValueError(f"Tipo de escrituração inválido: {tipo}")
-    caminho = Path(caminho)
-    if not caminho.is_file() or caminho.suffix.lower() not in {".xlsx", ".xlsm"}:
-        raise ValueError("Informe um arquivo Excel existente (.xlsx ou .xlsm) gerado pelo Sysconv.")
+    nome = nome_arquivo or ("arquivo.xlsx" if isinstance(arquivo, bytes) else Path(arquivo).name)
+    if Path(nome).suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise ValueError(f"Formato Excel não aceito: {nome}. Use .xlsx ou .xlsm.")
+    if isinstance(arquivo, bytes):
+        if not arquivo:
+            raise ValueError(f"O arquivo {nome} está vazio.")
+        fonte = BytesIO(arquivo)
+    else:
+        fonte = Path(arquivo)
+        if not fonte.is_file():
+            raise FileNotFoundError(f"Arquivo Excel não encontrado: {fonte}")
     abas = {}
-    livro = load_workbook(caminho, read_only=True, data_only=True)
+    livro = load_workbook(fonte, read_only=True, data_only=True)
     try:
         for aba in livro.worksheets:
             linhas = (linha for linha in aba.iter_rows(values_only=True) if any(valor is not None and str(valor).strip() for valor in linha))
@@ -43,14 +52,16 @@ def inventariar_excel(caminho: str | Path, tipo: str) -> dict:
         livro.close()
     return {
         "tipo": tipo,
-        "arquivo": caminho.name,
-        "sha256": hash_arquivo(caminho),
+        "arquivo": nome,
+        "sha256": hash_arquivo(arquivo),
         "linhas": sum(abas.values()),
         "abas": abas,
     }
 
 
-def hash_arquivo(caminho: str | Path) -> str:
+def hash_arquivo(caminho: str | Path | bytes) -> str:
+    if isinstance(caminho, bytes):
+        return sha256(caminho).hexdigest()
     digest = sha256()
     with Path(caminho).open("rb") as arquivo:
         for bloco in iter(lambda: arquivo.read(1024 * 1024), b""):
@@ -71,25 +82,29 @@ def _numero(linha: pd.Series, campo: str) -> float:
     return 0.0 if pd.isna(valor) else float(valor)
 
 
-def _ler_c170(caminho: Path) -> pd.DataFrame:
-    with pd.ExcelFile(caminho) as livro:
-        aba = next((nome for nome in livro.sheet_names if "c170" in nome.casefold()), None)
+def _ler_c170(arquivo: str | Path | bytes, nome: str) -> pd.DataFrame:
+    fonte = BytesIO(arquivo) if isinstance(arquivo, bytes) else Path(arquivo)
+    with pd.ExcelFile(fonte) as livro:
+        aba = next((nome_aba for nome_aba in livro.sheet_names if "c170" in nome_aba.casefold()), None)
         if not aba:
-            raise ValueError(f"Aba C170 não encontrada em {caminho.name}.")
+            raise ValueError(f"Aba C170 não encontrada em {nome}.")
         return pd.read_excel(livro, sheet_name=aba)
 
 
 def triagem_c170(
-    caminho_icms: str | Path,
-    caminho_pis: str | Path,
+    caminho_icms: str | Path | bytes,
+    caminho_pis: str | Path | bytes,
     tolerancia: float = 0.01,
+    nome_icms: str | None = None,
+    nome_pis: str | None = None,
 ) -> pd.DataFrame:
     """Produz indícios documentados; nenhum valor é declarado recuperável."""
     if tolerancia < 0:
         raise ValueError("A tolerância não pode ser negativa.")
-    caminho_icms, caminho_pis = Path(caminho_icms), Path(caminho_pis)
-    icms = normalize_icms_items(_ler_c170(caminho_icms))
-    pis = normalize_piscofins_items(_ler_c170(caminho_pis))
+    nome_icms = nome_icms or ("ICMS/IPI.xlsx" if isinstance(caminho_icms, bytes) else Path(caminho_icms).name)
+    nome_pis = nome_pis or ("Contribuições.xlsx" if isinstance(caminho_pis, bytes) else Path(caminho_pis).name)
+    icms = normalize_icms_items(_ler_c170(caminho_icms, nome_icms))
+    pis = normalize_piscofins_items(_ler_c170(caminho_pis, nome_pis))
     for quadro, nome in ((icms, "ICMS/IPI"), (pis, "PIS/COFINS")):
         if quadro.empty:
             raise ValueError(f"A aba C170 de {nome} está vazia.")
