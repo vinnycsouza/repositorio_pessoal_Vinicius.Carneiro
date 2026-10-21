@@ -14,6 +14,7 @@ Cada Excel pode ser selecionado pelo navegador ou informado por caminho local co
 - Indício de possível ICMS próprio não excluído da base de PIS/COFINS (Tema 69);
 - Item com ICMS-ST sinalizado para verificar a situação do substituído e o Tema 1125;
 - Conciliação ambígua quando há mais de uma linha para a mesma NF-e e item;
+- Conciliação não comparável quando uma saída em Contribuições encontra apenas entrada no ICMS/IPI;
 - Hashes e linhas das planilhas de origem; decisão e justificativa do analista exportáveis em CSV;
 - Catálogo de hipóteses futuras com fontes oficiais e tratamento ainda pendente.
 

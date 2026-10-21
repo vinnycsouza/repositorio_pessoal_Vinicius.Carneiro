@@ -55,6 +55,28 @@ class MotorTest(unittest.TestCase):
             self.assertEqual(achados["regra"].tolist(), ["CONCILIACAO_C170"])
             self.assertEqual(achados.iloc[0]["estado"], "Ambíguo")
 
+    def test_entrada_e_saida_na_base_pis_nao_criam_ambiguidade(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            saida = pd.read_excel(pis, dtype={"Chave": str})
+            entrada = saida.copy()
+            entrada["Indicador de Operacao"] = 0
+            pd.concat([entrada, saida], ignore_index=True).to_excel(pis, sheet_name="C170", index=False)
+            achados = triagem_c170(icms, pis)
+            self.assertEqual(achados["regra"].tolist(), ["PISCOFINS_ICMS_69"])
+            self.assertEqual(achados.iloc[0]["linha_pis"], 3)
+
+    def test_entrada_icms_nao_e_comparada_com_saida_pis(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            quadro_icms = pd.read_excel(icms, dtype={"Chave": str})
+            quadro_icms["Indicador de Operacao"] = 0
+            quadro_icms.to_excel(icms, sheet_name="C170", index=False)
+            achados = triagem_c170(icms, pis)
+            self.assertEqual(achados["regra"].tolist(), ["CONCILIACAO_C170"])
+            self.assertEqual(achados.iloc[0]["estado"], "Não comparável")
+            self.assertEqual(achados.iloc[0]["linha_icms"], 2)
+
     def test_planilha_sem_aba_c170_e_rejeitada(self):
         with pasta_temporaria() as tmp:
             icms, pis = self._planilhas(Path(tmp))

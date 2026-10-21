@@ -129,33 +129,41 @@ def triagem_c170(
     icms["_chave_item"] = icms.apply(_chave_item, axis=1)
     pis["_chave_item"] = pis.apply(_chave_item, axis=1)
     grupos_icms = {chave: grupo for chave, grupo in icms[icms["_chave_item"] != ""].groupby("_chave_item")}
-    contagem_pis = pis[pis["_chave_item"] != ""]["_chave_item"].value_counts()
+    pis_saida = pis[(pis["ind_oper_desc"] == "Saída") & pis["situacao_ok"] & (pis["_chave_item"] != "")]
+    contagem_pis = pis_saida["_chave_item"].value_counts()
     hash_pis, hash_icms = hash_arquivo(caminho_pis), hash_arquivo(caminho_icms)
     achados = []
-    for indice, linha in pis.iterrows():
-        if linha.get("ind_oper_desc") != "Saída" or not bool(linha.get("situacao_ok")):
-            continue
+    for indice, linha in pis_saida.iterrows():
         chave_item = linha["_chave_item"]
-        if not chave_item:
-            continue
         grupo = grupos_icms.get(chave_item)
         if grupo is None:
             continue
-        if len(grupo) != 1 or int(contagem_pis[chave_item]) != 1:
+        grupo_saida = grupo[(grupo["ind_oper_desc"] == "Saída") & grupo["situacao_ok"]]
+        if grupo_saida.empty:
+            achados.append({
+                "regra": "CONCILIACAO_C170", "estado": "Não comparável",
+                "motivo": "Saída em Contribuições sem saída correspondente no ICMS/IPI para a mesma NF-e e item",
+                "chave_nfe": chave_item.split(":")[0], "item": int(linha["item"]),
+                "linha_pis": int(indice) + 2,
+                "linha_icms": int(grupo.index[0]) + 2 if len(grupo) == 1 else None,
+                "arquivo_pis_sha256": hash_pis, "arquivo_icms_sha256": hash_icms,
+            })
+            continue
+        if len(grupo_saida) != 1 or int(contagem_pis[chave_item]) != 1:
             achados.append({
                 "regra": "CONCILIACAO_C170", "estado": "Ambíguo", "motivo": "Chave da NF-e e item repetidos em uma das bases",
                 "chave_nfe": chave_item.split(":")[0], "item": int(linha["item"]), "linha_pis": int(indice) + 2,
                 "linha_icms": None, "arquivo_pis_sha256": hash_pis, "arquivo_icms_sha256": hash_icms,
             })
             continue
-        outra = grupo.iloc[0]
+        outra = grupo_saida.iloc[0]
         valor_icms = _numero(outra, "vl_icms") or _numero(linha, "vl_icms")
         valor_st = _numero(outra, "vl_icms_st") or _numero(linha, "vl_icms_st")
         base_icms = _numero(outra, "bc_icms") or _numero(linha, "bc_icms")
         base_pis, base_cofins = _numero(linha, "bc_pis"), _numero(linha, "bc_cofins")
         comum = {
             "chave_nfe": chave_item.split(":")[0], "item": int(linha["item"]),
-            "linha_pis": int(indice) + 2, "linha_icms": int(grupo.index[0]) + 2,
+            "linha_pis": int(indice) + 2, "linha_icms": int(grupo_saida.index[0]) + 2,
             "base_icms": base_icms, "valor_icms": valor_icms, "valor_icms_st": valor_st,
             "base_pis": base_pis, "base_cofins": base_cofins,
             "diferenca_pis": base_icms - base_pis, "diferenca_cofins": base_icms - base_cofins,
