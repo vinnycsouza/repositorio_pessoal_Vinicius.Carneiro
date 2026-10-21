@@ -5,6 +5,7 @@ import unittest
 import pandas as pd
 from openpyxl import load_workbook
 
+from auditor_sped_integrado.conferencia_nfe import ConferenciaNFe
 from auditor_sped_integrado.relatorio_excel import gerar_relatorio_excel, resumir_candidatos
 
 
@@ -34,23 +35,34 @@ class RelatorioExcelTest(unittest.TestCase):
         self.assertEqual(candidatos.iloc[0]["contribuicoes_sob_analise"], 7.4)
         self.assertIsNone(candidatos.iloc[0]["credito_pis_calculado"])
         vazio = pd.DataFrame()
-        dados = gerar_relatorio_excel(
-            [{"tipo": "EFD-Contribuições", "arquivo": "origem.xlsx", "sha256": "abc",
-              "abas": {"C175": 2}, "linhas": 2}],
-            vazio, vazio, vazio, vendas, vazio, "Lucro real", datetime(2026, 10, 21, 15, 0),
-        )
-        livro = load_workbook(BytesIO(dados), read_only=True, data_only=True)
-        self.assertEqual(livro.sheetnames, [
-            "Resumo", "C175_5405", "Simulacao_UF", "Premissas_UF", "Panorama_UF", "Historico_Regime",
-            "ST_C170", "ST_C100", "ST_C190",
-            "Triagem_C170", "Inventario", "Metodo",
-        ])
-        resumo = livro["Resumo"]
-        colunas = {celula.value: celula.column_letter for celula in resumo[6]}
-        self.assertEqual(resumo["F7"].value, 1.32)
-        self.assertEqual(resumo[f"{colunas['contribuicoes_sob_analise']}7"].value, 7.4)
-        self.assertIsNone(resumo[f"{colunas['simulacao_pis_cofins_uf']}7"].value)
-        self.assertIsNone(resumo[f"{colunas['credito_pis_calculado']}7"].value)
-        self.assertEqual(resumo[f"{colunas['estado']}7"].value, "Possível recuperação em análise")
-        self.assertEqual(livro["Inventario"]["B2"].value, "origem.xlsx")
+        from decimal import Decimal
+        with ConferenciaNFe() as conferencia:
+            for valor in (Decimal("40"), Decimal("40")):
+                conferencia.adicionar(
+                    competencia="2025-01", cnpj="10693312000505",
+                    chave="51250110693312000505550010000000011000000000", chave_ok=True,
+                    uf="51", regime="1", aliquota_pis=Decimal("1.65"),
+                    aliquota_cofins=Decimal("7.6"), operacao=valor, desconto=Decimal("0"),
+                    base_pis=valor, pis=Decimal("0.66"), base_cofins=valor,
+                    cofins=Decimal("3.04"), base_ok=True, duplicado=False,
+                    aba="C175", linha=2,
+                )
+            dados = gerar_relatorio_excel(
+                [{"tipo": "EFD-Contribuições", "arquivo": "origem.xlsx", "sha256": "abc",
+                  "abas": {"C175": 2}, "linhas": 2}],
+                vazio, vazio, vazio, vendas, vazio, "Lucro real", datetime(2026, 10, 21, 15, 0),
+                conferencia_nfe=conferencia,
+            )
+        livro = load_workbook(BytesIO(dados), read_only=False, data_only=False)
+        self.assertEqual(livro.sheetnames, ["Resumo_Executivo", "Memoria_Mensal", "Conferencia_NF"])
+        self.assertEqual(livro["Resumo_Executivo"]["B12"].value, 1.32)
+        self.assertEqual(livro["Resumo_Executivo"]["C12"].value, 6.08)
+        self.assertEqual(livro["Resumo_Executivo"]["B18"].data_type, "f")
+        nf = livro["Conferencia_NF"]
+        self.assertEqual(nf["F2"].value, 2)
+        self.assertEqual(nf["I2"].value, 80)
+        self.assertEqual(nf["Q2"].value, "Apto para conferência")
+        self.assertEqual(nf["T2"].value, "Pendente")
+        self.assertTrue(nf["U2"].value.startswith("=IF("))
+        self.assertEqual(len(nf.data_validations.dataValidation), 1)
         livro.close()

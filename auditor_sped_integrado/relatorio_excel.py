@@ -7,52 +7,23 @@ from io import BytesIO
 
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
-from auditor_sped_integrado.premissas_icms import (
-    COLUNAS_SIMULACAO, PeriodoRegime, tabela_panorama_anual, tabela_premissas,
-)
+from auditor_sped_integrado.premissas_icms import PeriodoRegime, UFS
 
 
 COR_TITULO = "17365D"
 COR_CABECALHO = "DCE6F1"
 FORMATO_MOEDA = '#,##0.00'
-COLUNAS_VALOR = {
-    "valor_operacao", "base_pis", "valor_pis", "base_cofins", "valor_cofins",
-    "pis_escriturado", "cofins_escriturada", "contribuicoes_sob_analise",
-    "simulacao_pis_cofins_uf", "icms_st_vinculado",
-    "exclusao_calculada", "credito_pis_calculado", "credito_cofins_calculado",
-    "valor_icms_st_destacado", "base_icms", "valor_icms", "valor_icms_st",
-    "diferenca_pis", "diferenca_cofins",
-    "parcela_icms_simulada", "pis_simulado", "cofins_simulada", "total_simulado",
-}
-
-
 def _valor_celula(valor: object) -> object:
     if pd.isna(valor):
         return None
     if isinstance(valor, str) and valor[:1] in ("=", "+", "-", "@"):
         return "'" + valor
     return valor
-
-
-def _aba_quadro(livro: Workbook, nome: str, quadro: pd.DataFrame) -> None:
-    aba = livro.create_sheet(nome)
-    aba.append(list(quadro.columns))
-    for celula in aba[1]:
-        celula.fill = PatternFill("solid", fgColor=COR_CABECALHO)
-        celula.font = Font(bold=True)
-    for linha in quadro.itertuples(index=False, name=None):
-        aba.append([_valor_celula(valor) for valor in linha])
-    aba.freeze_panes = "A2"
-    aba.auto_filter.ref = aba.dimensions
-    for indice, coluna in enumerate(quadro.columns, start=1):
-        aba.column_dimensions[get_column_letter(indice)].width = min(max(len(str(coluna)) + 3, 14), 34)
-        if coluna in COLUNAS_VALOR:
-            for celulas in aba.iter_cols(min_col=indice, max_col=indice, min_row=2):
-                for celula in celulas:
-                    celula.number_format = FORMATO_MOEDA
 
 
 def resumir_candidatos(c175: pd.DataFrame, simulacao: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -126,81 +97,167 @@ def gerar_relatorio_excel(
     simulacao: pd.DataFrame | None = None,
     historico_regime: tuple[PeriodoRegime, ...] = (),
     uf_selecionada: str | None = None,
+    conferencia_nfe=None,
 ) -> bytes:
-    """Gera livro com resumo de candidatos e abas de evidência rastreável."""
-    livro = Workbook()
-    resumo = livro.active
-    resumo.title = "Resumo"
-    resumo["A1"] = "Auditoria SPED — análise preliminar de possível recuperação"
-    resumo["A1"].font = Font(size=16, bold=True, color="FFFFFF")
-    resumo["A1"].fill = PatternFill("solid", fgColor=COR_TITULO)
-    resumo.merge_cells("A1:S1")
-    resumo["A2"] = "Gerado em"
-    resumo["B2"] = (gerado_em or datetime.now()).strftime("%d/%m/%Y %H:%M")
-    resumo["D2"] = "IRPJ/CSLL declarado"
-    resumo["E2"] = regime
-    resumo["G2"] = "UF da simulação"
-    resumo["H2"] = uf_selecionada or "Automática pela NF-e"
-    resumo["A3"] = "Filtro principal: C175, CFOP 5405, CST PIS 01 e CST COFINS 01."
-    resumo.merge_cells("A3:S3")
-    resumo["A4"] = "A simulação pela alíquota geral da UF é exploratória e distinta do ICMS-ST da nota; crédito calculado exige vínculo documental."
-    resumo.merge_cells("A4:S4")
-    resumo["A4"].alignment = Alignment(wrap_text=True, vertical="center")
-    resumo.row_dimensions[4].height = 32
-    resumo["A5"] = "Histórico informado: " + (
-        "; ".join(f"{p.inicio} a {p.fim}: {p.regime}" for p in historico_regime) or "não informado"
-    )
-    resumo.merge_cells("A5:S5")
-    candidatos = resumir_candidatos(vendas_c175, simulacao)
-    for coluna, titulo in enumerate(candidatos.columns, start=1):
-        celula = resumo.cell(6, coluna, titulo)
-        celula.fill = PatternFill("solid", fgColor=COR_CABECALHO)
-        celula.font = Font(bold=True)
-    for linha_excel, valores in enumerate(candidatos.itertuples(index=False, name=None), start=7):
-        for coluna, valor in enumerate(valores, start=1):
-            celula = resumo.cell(linha_excel, coluna, _valor_celula(valor))
-            if candidatos.columns[coluna - 1] in COLUNAS_VALOR:
-                celula.number_format = FORMATO_MOEDA
-    if candidatos.empty:
-        resumo["A7"] = "Nenhuma receita no filtro principal foi encontrada."
-    resumo.freeze_panes = "C7"
-    resumo.auto_filter.ref = f"A6:S{max(7, 6 + len(candidatos))}"
-    for indice, nome in enumerate(candidatos.columns, start=1):
-        resumo.column_dimensions[get_column_letter(indice)].width = min(max(len(nome) + 3, 16), 35)
-    resumo.column_dimensions["S"].width = 70
+    """Gera três abas: apresentação, memória e validação documental por NF-e."""
+    livro = Workbook(write_only=True)
+    resumo = livro.create_sheet("Resumo_Executivo")
+    memoria = livro.create_sheet("Memoria_Mensal")
+    conferencia = livro.create_sheet("Conferencia_NF")
 
-    _aba_quadro(livro, "C175_5405", vendas_c175)
-    _aba_quadro(livro, "Simulacao_UF", simulacao if simulacao is not None else pd.DataFrame(columns=COLUNAS_SIMULACAO))
-    _aba_quadro(livro, "Premissas_UF", tabela_premissas())
-    _aba_quadro(livro, "Panorama_UF", tabela_panorama_anual())
-    _aba_quadro(livro, "Historico_Regime", pd.DataFrame(
-        [{"inicio": p.inicio, "fim": p.fim, "regime": p.regime} for p in historico_regime],
-        columns=["inicio", "fim", "regime"],
-    ))
-    _aba_quadro(livro, "ST_C170", st_c170)
-    _aba_quadro(livro, "ST_C100", st_c100)
-    _aba_quadro(livro, "ST_C190", st_c190)
-    _aba_quadro(livro, "Triagem_C170", achados)
-    inventario_linhas = [
-        {"tipo": item["tipo"], "nome_arquivo": item["arquivo"], "sha256": item["sha256"],
-         "aba": aba, "linhas_dados": total}
-        for item in inventario for aba, total in item["abas"].items()
-    ]
-    _aba_quadro(livro, "Inventario", pd.DataFrame(
-        inventario_linhas, columns=["tipo", "nome_arquivo", "sha256", "aba", "linhas_dados"]
-    ))
-    metodo = pd.DataFrame([
-        ("Escopo", "Triagem e documentação de possível exclusão de ICMS-ST da base de PIS/COFINS."),
-        ("Filtro principal", "C175, CFOP 5405, CST 01 de PIS e de COFINS."),
-        ("Resultado preliminar", "PIS/COFINS sob análise soma os valores escriturados nas receitas selecionadas; não é o valor a recuperar."),
-        ("Simulação estadual", "Alíquota interna geral de PE por competência aplicada à base conferida e às alíquotas efetivas do C175. Não equivale ao ICMS-ST destacado."),
-        ("C175", "Registro analítico; não comprova por si só item, quantidade nem ICMS-ST da aquisição."),
-        ("C100/C170/C190", "Níveis distintos; não somar os valores entre si."),
-        ("Responsabilidade", "O auditor não altera nem retifica SPED ou declarações."),
-        ("Tema 1125", "https://www.gov.br/receitafederal/pt-br/acesso-a-informacao/legislacao/jurisprudencia-vinculante/pis-cofins"),
-        ("CST oficial", "https://www.gov.br/sped/pt-br/assuntos/escrituracoes-digitais/efd-contribuicoes/tabelas-de-codigos/tabelas-utilizadas-na-apuracao-das-contribuicoes-para-o-pis-pasep-e-da-cofins/tabela-4-3-12"),
-    ], columns=["tema", "observacao"])
-    _aba_quadro(livro, "Metodo", metodo)
+    def adicionar(aba, valores, estilo=None, moedas=(), formulas=()):
+        linha = []
+        for indice, valor in enumerate(valores, start=1):
+            formula_interna = isinstance(valor, str) and valor.startswith("=") and (
+                indice in formulas or (aba is conferencia and indice in (21, 22))
+            )
+            celula = WriteOnlyCell(aba, value=valor if formula_interna else _valor_celula(valor))
+            if estilo == "titulo":
+                celula.font = Font(size=16, bold=True, color="FFFFFF")
+                celula.fill = PatternFill("solid", fgColor=COR_TITULO)
+            elif estilo == "cabecalho":
+                celula.font = Font(bold=True, color="FFFFFF")
+                celula.fill = PatternFill("solid", fgColor=COR_TITULO)
+                celula.alignment = Alignment(wrap_text=True, vertical="center")
+            elif estilo == "destaque":
+                celula.font = Font(bold=True, color=COR_TITULO)
+                celula.fill = PatternFill("solid", fgColor=COR_CABECALHO)
+            if indice in moedas:
+                celula.number_format = FORMATO_MOEDA
+            linha.append(celula)
+        aba.append(linha)
+
+    candidatos = resumir_candidatos(vendas_c175, simulacao)
+    sim = simulacao if simulacao is not None else pd.DataFrame()
+    sim_validas = sim.loc[sim["total_simulado"].notna()] if not sim.empty else sim
+    anos = sorted(set(candidatos["competencia"].astype(str).str[:4])) if not candidatos.empty else []
+    resumo.column_dimensions["A"].width = 35
+    for letra in "BCDE":
+        resumo.column_dimensions[letra].width = 26
+    resumo.column_dimensions["F"].width = 84
+    resumo.freeze_panes = "B12"
+    resumo.sheet_view.showGridLines = False
+    resumo.page_setup.orientation = "landscape"
+    resumo.page_setup.fitToWidth = 1
+    adicionar(resumo, ["AUDITORIA SPED | ICMS-ST na base de PIS/COFINS", None, None, None, None, None], "titulo")
+    adicionar(resumo, ["Análise preliminar para avaliação e conferência documental"])
+    adicionar(resumo, ["Gerado em", (gerado_em or datetime.now()).strftime("%d/%m/%Y %H:%M"),
+                     "UF escolhida", uf_selecionada or "Pela chave da NF-e"])
+    adicionar(resumo, ["Regime IRPJ/CSLL informado", regime])
+    adicionar(resumo, ["Histórico informado", "; ".join(f"{p.inicio} a {p.fim}: {p.regime}" for p in historico_regime) or "Não informado"])
+    adicionar(resumo, ["Filtro", "C175 | CFOP 5405 | CST PIS 01 | CST COFINS 01"])
+    adicionar(resumo, ["Escopo", "Valores de vendas tributadas e cenário pela alíquota geral da UF. O ICMS-ST da aquisição exige documentos e vínculo às vendas."])
+    adicionar(resumo, ["Situação", "Nenhum valor abaixo representa crédito validado ou valor a retificar."])
+    adicionar(resumo, ["Alíquotas PIS/COFINS", "Alíquotas escrituradas no C175 têm prioridade. Preenchimentos manuais de campos ausentes aparecem identificados na memória e na conferência."])
+    adicionar(resumo, [])
+    adicionar(resumo, ["INDICADORES", "PIS escriturado sob análise", "COFINS escriturada sob análise", "Simulação PIS", "Simulação COFINS", "Simulação total"], "cabecalho")
+    adicionar(resumo, ["Total", float(candidatos["pis_escriturado"].sum()),
+                     float(candidatos["cofins_escriturada"].sum()),
+                     float(sim_validas["pis_simulado"].sum()) if not sim_validas.empty else None,
+                     float(sim_validas["cofins_simulada"].sum()) if not sim_validas.empty else None,
+                     float(sim_validas["total_simulado"].sum()) if not sim_validas.empty else None], "destaque", (2, 3, 4, 5, 6))
+    adicionar(resumo, [])
+    adicionar(resumo, ["ANO", "PIS escriturado", "COFINS escriturada", "PIS simulado", "COFINS simulada", "Total simulado"], "cabecalho")
+    for ano in anos:
+        cand_ano = candidatos.loc[candidatos["competencia"].astype(str).str.startswith(ano)]
+        sim_ano = sim_validas.loc[sim_validas["competencia"].astype(str).str.startswith(ano)] if not sim_validas.empty else sim_validas
+        adicionar(resumo, [int(ano), float(cand_ano["pis_escriturado"].sum()),
+                         float(cand_ano["cofins_escriturada"].sum()),
+                         float(sim_ano["pis_simulado"].sum()) if not sim_ano.empty else None,
+                         float(sim_ano["cofins_simulada"].sum()) if not sim_ano.empty else None,
+                         float(sim_ano["total_simulado"].sum()) if not sim_ano.empty else None], moedas=(2, 3, 4, 5, 6))
+    adicionar(resumo, [])
+    adicionar(resumo, ["POTENCIAL COM ST DOCUMENTADO", "PIS", "COFINS", "TOTAL"], "cabecalho")
+    adicionar(resumo, ["Após conferência manual",
+        '=IF(COUNT(Conferencia_NF!U:U)=0,"Pendente",SUM(Conferencia_NF!U:U))',
+        '=IF(COUNT(Conferencia_NF!V:V)=0,"Pendente",SUM(Conferencia_NF!V:V))',
+        '=IF(COUNT(Conferencia_NF!U:V)=0,"Pendente",SUM(Conferencia_NF!U:V))'],
+        "destaque", (2, 3, 4), (2, 3, 4))
+    adicionar(resumo, ["Natureza", "Valor sujeito à revisão da apuração, recolhimento, vínculo e aproveitamentos anteriores."])
+    adicionar(resumo, [])
+    adicionar(resumo, ["COMO LER", "Memoria_Mensal: cenário por competência, estabelecimento, regime, alíquotas e situação."])
+    adicionar(resumo, [None, "Conferencia_NF: uma linha por chave de venda; preencher NF de aquisição e ICMS-ST comprovado alocado à venda."])
+    adicionar(resumo, [None, "PIS/COFINS potencial com ST só aparece na linha da NF após confirmação manual e dados completos. Ainda depende de apuração, recolhimento e aproveitamentos anteriores."])
+    adicionar(resumo, [])
+    adicionar(resumo, ["ARQUIVOS-FONTE", "Nome", "SHA-256"], "cabecalho")
+    for item in inventario:
+        adicionar(resumo, [item["tipo"], item["arquivo"], item["sha256"]])
+
+    colunas_memoria = ["Competência", "CNPJ estabelecimento", "UF NF-e", "Regime 0110",
+                      "Alíquota PIS %", "Alíquota COFINS %", "Registros C175", "Base PIS conferida",
+                      "Base COFINS conferida", "Alíquota geral UF %", "Parcela ICMS simulada",
+                      "PIS simulado", "COFINS simulada", "Total simulado", "Bases divergentes",
+                      "Chaves inválidas", "Duplicados entre abas", "Situação da simulação", "Fonte da premissa",
+                      "Fonte alíquota PIS", "Fonte alíquota COFINS", "Incidência PIS/COFINS"]
+    for indice, nome in enumerate(colunas_memoria, start=1):
+        memoria.column_dimensions[get_column_letter(indice)].width = min(max(len(nome) + 3, 16), 55)
+    memoria.freeze_panes = "C2"
+    adicionar(memoria, colunas_memoria, "cabecalho")
+    for item in sim.to_dict("records"):
+        adicionar(memoria, [item.get(chave) for chave in (
+            "competencia", "cnpj_estabelecimento", "uf", "regime_0110", "aliquota_pis",
+            "aliquota_cofins", "registros_c175", "base_pis_conferida", "base_cofins_conferida",
+            "aliquota_icms_referencia", "parcela_icms_simulada", "pis_simulado", "cofins_simulada",
+            "total_simulado", "registros_base_divergente", "registros_chave_invalida",
+            "registros_duplicados_entre_abas", "estado_simulacao", "fonte_premissa",
+            "fonte_aliquota_pis", "fonte_aliquota_cofins", "descricao_regime",
+        )], moedas=(8, 9, 11, 12, 13, 14))
+    memoria.auto_filter.ref = f"A1:V{max(2, 1 + len(sim))}"
+
+    colunas_nfe = ["Competência", "CNPJ estabelecimento", "Chave NF-e de venda", "UF NF-e",
+                   "Incidência PIS/COFINS (0110)", "Itens C175", "Valor operação", "Desconto", "Base PIS",
+                   "PIS escriturado", "Base COFINS", "COFINS escriturada", "Alíquota PIS %",
+                   "Alíquota COFINS %", "Bases divergentes", "Duplicados entre abas",
+                   "Situação automática", "NF(s) de aquisição vinculada(s)", "ICMS-ST comprovado alocado (R$)",
+                   "Conferência manual", "PIS potencial com ST", "COFINS potencial com ST",
+                   "Revisor", "Observações", "Aba C175", "Primeira linha C175",
+                   "Fonte alíquota PIS", "Fonte alíquota COFINS"]
+    for indice, nome in enumerate(colunas_nfe, start=1):
+        conferencia.column_dimensions[get_column_letter(indice)].width = min(max(len(nome) + 3, 14), 52)
+    conferencia.column_dimensions["C"].width = 48
+    conferencia.column_dimensions["R"].width = 45
+    conferencia.column_dimensions["X"].width = 55
+    conferencia.freeze_panes = "D2"
+    adicionar(conferencia, colunas_nfe, "cabecalho")
+    total_nfe = 0
+    if conferencia_nfe is not None:
+        for total_nfe, linha in enumerate(conferencia_nfe.linhas(), start=1):
+            if total_nfe > 1048575:
+                raise ValueError("Mais de 1.048.575 NF-e; divida o levantamento por período para caber no Excel.")
+            (periodo, cnpj, chave, chave_ok, uf, regime_0110, pis_min, pis_max,
+             cof_min, cof_max, itens, oper, desc, base_pis, pis, base_cof, cof,
+             divergentes, duplicados, aba, primeira_linha, fonte_pis, fonte_cofins) = linha
+            codigo_regime = regime_0110 or ("1" if (pis_min, cof_min) == (1.65, 7.6) else "2" if (pis_min, cof_min) == (0.65, 3.0) else "")
+            pares_aceitos = {
+                "1": {(1.65, 7.6)}, "2": {(0.65, 3.0)},
+                "3": {(1.65, 7.6), (0.65, 3.0)},
+            }
+            aliquotas_compativeis = (round(pis_min, 4), round(cof_min, 4)) in pares_aceitos.get(codigo_regime, set())
+            situacao = ("Duplicação entre abas" if duplicados else
+                        "Chave incompatível" if not chave_ok else
+                        "Alíquotas diferentes na NF-e" if pis_min != pis_max or cof_min != cof_max else
+                        "Base divergente" if divergentes else
+                        "Alíquotas/regime pendentes" if not aliquotas_compativeis else
+                        "UF diferente da escolhida" if uf_selecionada and UFS.get(uf) != uf_selecionada else
+                        "Apto para conferência")
+            excel_linha = total_nfe + 1
+            formula_pis = (f'=IF(AND(T{excel_linha}="Confirmado",ISNUMBER(S{excel_linha}),'
+                           f'S{excel_linha}>0,Q{excel_linha}="Apto para conferência",R{excel_linha}<>""),'
+                           f'MAX(0,MIN(ROUND(MIN(S{excel_linha},I{excel_linha})*M{excel_linha}/100,2),J{excel_linha})),"")')
+            formula_cof = (f'=IF(AND(T{excel_linha}="Confirmado",ISNUMBER(S{excel_linha}),'
+                           f'S{excel_linha}>0,Q{excel_linha}="Apto para conferência",R{excel_linha}<>""),'
+                           f'MAX(0,MIN(ROUND(MIN(S{excel_linha},K{excel_linha})*N{excel_linha}/100,2),L{excel_linha})),"")')
+            adicionar(conferencia, [periodo, cnpj, chave, UFS.get(uf, ""), regime_0110,
+                itens, oper / 100, desc / 100, base_pis / 100, pis / 100, base_cof / 100,
+                cof / 100, pis_min if pis_min == pis_max else None,
+                cof_min if cof_min == cof_max else None, divergentes, duplicados,
+                situacao, None, None, "Pendente", formula_pis, formula_cof,
+                None, None, aba, primeira_linha, fonte_pis or "C175", fonte_cofins or "C175"],
+                moedas=(7, 8, 9, 10, 11, 12, 19, 21, 22))
+    conferencia.auto_filter.ref = f"A1:AB{max(2, total_nfe + 1)}"
+    validacao = DataValidation(type="list", formula1='"Pendente,Confirmado,Rejeitado"')
+    validacao.add(f"T2:T{max(2, total_nfe + 1)}")
+    conferencia.data_validations.append(validacao)
     arquivo = BytesIO()
     livro.save(arquivo)
     return arquivo.getvalue()

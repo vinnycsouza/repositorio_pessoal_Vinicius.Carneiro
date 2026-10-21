@@ -12,22 +12,54 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from auditor_sped_integrado.catalogo import REGRAS
+from auditor_sped_integrado.conferencia_nfe import ConferenciaNFe
 from auditor_sped_integrado.diagnostico_st import (
     COLUNAS as COLUNAS_ST_C170, COLUNAS_C100, COLUNAS_C190,
     diagnosticar_st_c100, diagnosticar_st_c170, diagnosticar_st_c190, diagnosticar_vendas_st_c175,
 )
-from auditor_sped_integrado.motor import COLUNAS as COLUNAS_TRIAGEM, TIPOS, inventariar_excel, triagem_c170
+from auditor_sped_integrado.motor import COLUNAS as COLUNAS_TRIAGEM, TIPOS, hash_arquivo, inventariar_excel, triagem_c170
 from auditor_sped_integrado.premissas_icms import (
     CODIGOS_POR_UF, simular_potencial, tabela_panorama_anual,
     tabela_premissas, validar_historico_regime,
 )
 from auditor_sped_integrado.relatorio_excel import gerar_relatorio_excel, resumir_candidatos
 
-VERSAO_RESULTADO = 3
+VERSAO_RESULTADO = 6
+
+
+def limpar_resultado() -> None:
+    st.session_state.pop("resultado_auditoria", None)
 
 
 def limpar_analises() -> None:
-    st.session_state.pop("resultado_auditoria", None)
+    limpar_resultado()
+    st.session_state.pop("preanalise_auditoria", None)
+
+
+def aliquotas_pendentes(vendas: pd.DataFrame) -> list[dict]:
+    if vendas.empty:
+        return []
+    filtro = (
+        (vendas["cfop"].astype(str) == "5405")
+        & (vendas["cst_pis"].astype(str).str.zfill(2) == "01")
+        & (vendas["cst_cofins"].astype(str).str.zfill(2) == "01")
+        & ((vendas["fonte_aliquota_pis"] == "Ausente") | (vendas["fonte_aliquota_cofins"] == "Ausente"))
+    )
+    pendencias = []
+    chaves = set()
+    for item in vendas.loc[filtro].to_dict("records"):
+        pis = float(item["aliquota_pis"]) if item["fonte_aliquota_pis"] == "C175" else None
+        cofins = float(item["aliquota_cofins"]) if item["fonte_aliquota_cofins"] == "C175" else None
+        chave = (item["competencia"], item["cnpj_estabelecimento"], pis, cofins)
+        if chave in chaves:
+            continue
+        chaves.add(chave)
+        pendencias.append({
+            "Competência": item["competencia"], "Estabelecimento": item["cnpj_estabelecimento"],
+            "PIS no C175 (%)": pis, "COFINS no C175 (%)": cofins,
+            "PIS a informar (%)": None, "COFINS a informar (%)": None,
+        })
+    return pendencias
 
 
 def moeda_br(valor: float) -> str:
@@ -49,7 +81,7 @@ with st.sidebar:
     st.header("Contexto")
     uf_escolha = st.selectbox(
         "UF para a simulação", ["Automática pela chave da NF-e", *sorted(CODIGOS_POR_UF)],
-        on_change=limpar_analises,
+        on_change=limpar_resultado,
     )
     uf_selecionada = None if uf_escolha.startswith("Automática") else uf_escolha
     st.caption("A UF escolhida deve coincidir com a chave da NF-e. Premissas com vigência confirmada cobrem PE e MT. O relatório traz panorama anual das 27 UFs de 2022 a 2025 para consulta; ele não é usado no cálculo sem data de vigência.")
@@ -67,29 +99,10 @@ with st.sidebar:
                     ["ano", "aliquota_geral_referencia"],
                 ], hide_index=True,
             )
-    regime = st.selectbox(
-        "IRPJ/CSLL declarado", [
-            "A confirmar por período", "Misto: real e presumido",
-            "Lucro real em todo período", "Lucro presumido em todo período",
-        ], on_change=limpar_analises,
-    )
-    with st.expander("Períodos de regime informados (opcional)"):
-        st.caption("Use AAAA-MM. O 0110 prevalece; divergências bloqueiam a simulação.")
-        historico_tabela = st.data_editor(
-            pd.DataFrame(columns=["inicio", "fim", "regime"]),
-            num_rows="dynamic", hide_index=True, key="historico_regime",
-            column_config={
-                "regime": st.column_config.SelectboxColumn(
-                    "Regime IRPJ informado", options=["Lucro presumido", "Lucro real", "Misto"],
-                ),
-            },
-            on_change=limpar_analises,
-        )
     tolerancia = st.number_input(
         "Tolerância de comparação (R$)", min_value=0.0, value=0.01, step=0.01,
-        on_change=limpar_analises,
+        on_change=limpar_resultado,
     )
-    st.info("Esta escolha registra o contexto geral. O cálculo por competência usa o registro 0110 e as alíquotas efetivas do C175.")
 
 aba_entrada, aba_regras, aba_metodo = st.tabs(["Análise", "Catálogo de regras", "Método e limites"])
 
@@ -118,55 +131,158 @@ with aba_entrada:
 
     arquivo_icms = entradas["EFD ICMS/IPI"]
     arquivo_pis = entradas["EFD-Contribuições"]
-    if st.button("Executar todas as análises e preparar Excel", type="primary"):
+    if st.button("1. Ler documentos e mostrar pré-análise", type="primary"):
         limpar_analises()
         try:
             if arquivo_pis is None:
                 raise ValueError("Informe o Excel com EFD-Contribuições e aba C175.")
-            historico = validar_historico_regime(historico_tabela)
-            with st.spinner("Inventariando arquivos e executando as análises; Excel grandes podem levar alguns minutos..."):
+            with st.spinner("Lendo os Excel e levantando as alíquotas escrituradas..."):
                 inventario = [
                     inventariar_excel(entrada[0], tipo, entrada[1])
                     for tipo, entrada in entradas.items() if entrada is not None
                 ]
                 abas = {item["tipo"]: set(item["abas"]) for item in inventario}
-                abas_pis = abas["EFD-Contribuições"]
-                abas_icms = abas.get("EFD ICMS/IPI", set())
-                tem_aba_pis = lambda prefixo: any(nome.casefold().startswith(prefixo) for nome in abas_pis)
-                tem_aba_icms = lambda prefixo: any(nome.casefold().startswith(prefixo) for nome in abas_icms)
-                if not tem_aba_pis("c175"):
+                if not any(nome.casefold().startswith("c175") for nome in abas["EFD-Contribuições"]):
                     raise ValueError("Aba C175 não encontrada no Excel de EFD-Contribuições.")
-                if arquivo_icms is not None and tem_aba_pis("c170") and tem_aba_icms("c170"):
-                    achados = triagem_c170(
-                        arquivo_icms[0], arquivo_pis[0], tolerancia,
-                        nome_icms=arquivo_icms[1], nome_pis=arquivo_pis[1],
-                    )
-                else:
-                    achados = pd.DataFrame(columns=COLUNAS_TRIAGEM)
-                st_c170 = diagnosticar_st_c170(arquivo_pis[0]) if tem_aba_pis("c170") else pd.DataFrame(columns=COLUNAS_ST_C170)
-                st_c100 = diagnosticar_st_c100(arquivo_pis[0]) if tem_aba_pis("c100") else pd.DataFrame(columns=COLUNAS_C100)
-                vendas_c175 = diagnosticar_vendas_st_c175(arquivo_pis[0])
-                simulacao = simular_potencial(vendas_c175, historico, uf_selecionada)
-                st_c190 = diagnosticar_st_c190(arquivo_icms[0]) if arquivo_icms is not None and tem_aba_icms("c190") else pd.DataFrame(columns=COLUNAS_C190)
-                relatorio = gerar_relatorio_excel(
-                    inventario, achados, st_c170, st_c100, vendas_c175, st_c190, regime,
-                    simulacao=simulacao, historico_regime=historico,
-                    uf_selecionada=uf_selecionada,
-                )
-                st.session_state["resultado_auditoria"] = {
+                vendas_previas = diagnosticar_vendas_st_c175(arquivo_pis[0])
+                st.session_state["preanalise_auditoria"] = {
                     "versao": VERSAO_RESULTADO,
                     "inventario": inventario,
-                    "achados": achados,
-                    "st_c170": st_c170,
-                    "st_c100": st_c100,
-                    "vendas_c175": vendas_c175,
-                    "simulacao": simulacao,
-                    "st_c190": st_c190,
-                    "icms_fornecido": arquivo_icms is not None,
-                    "relatorio": relatorio,
+                    "vendas_c175": vendas_previas,
                 }
+            st.rerun()
         except Exception as erro:
-            st.error(f"Não foi possível concluir a auditoria: {erro}")
+            st.error(f"Não foi possível ler os documentos: {erro}")
+
+    preanalise = st.session_state.get("preanalise_auditoria")
+    if isinstance(preanalise, dict) and preanalise.get("versao") == VERSAO_RESULTADO:
+        st.subheader("Pré-análise documental")
+        vendas_previas = preanalise["vendas_c175"]
+        candidatos_previos = vendas_previas.loc[
+            (vendas_previas["cfop"].astype(str) == "5405")
+            & (vendas_previas["cst_pis"].astype(str).str.zfill(2) == "01")
+            & (vendas_previas["cst_cofins"].astype(str).str.zfill(2) == "01")
+        ] if not vendas_previas.empty else vendas_previas
+        st.write(f"Registros C175 no filtro principal: {int(candidatos_previos['registros_c175'].sum()) if not candidatos_previos.empty else 0:,}".replace(",", "."))
+        st.caption("O 0110 descreve a incidência de PIS/COFINS; não comprova, por si só, o regime de IRPJ/CSLL. As alíquotas abaixo vieram do C175.")
+        if not candidatos_previos.empty:
+            panorama = candidatos_previos[[
+                "competencia", "cnpj_estabelecimento", "regime_0110",
+                "aliquota_pis", "fonte_aliquota_pis", "aliquota_cofins",
+                "fonte_aliquota_cofins", "registros_c175",
+            ]].copy()
+            panorama["regime_0110"] = panorama["regime_0110"].map({
+                "1": "Não cumulativo", "2": "Cumulativo", "3": "Cumulativo e não cumulativo",
+            }).fillna("Não informado")
+            panorama = panorama.rename(columns={"regime_0110": "incidencia_pis_cofins_0110"}).sort_values(
+                ["competencia", "cnpj_estabelecimento", "aliquota_pis", "aliquota_cofins"]
+            )
+            with st.expander("Ver incidência e alíquotas por competência", expanded=True):
+                st.dataframe(panorama, use_container_width=True, hide_index=True)
+
+        identificador_pis = next(item["sha256"] for item in preanalise["inventario"] if item["tipo"] == "EFD-Contribuições")[:12]
+        st.subheader("Contexto tributário após a leitura")
+        regime = st.selectbox(
+            "Regime de IRPJ/CSLL no período analisado",
+            ["A confirmar por período", "Misto: real e presumido", "Lucro real em todo período", "Lucro presumido em todo período"],
+            index=None, placeholder="Selecione após conferir a pré-análise",
+            key=f"regime_pos_documentos_{identificador_pis}", on_change=limpar_resultado,
+        )
+        with st.expander("Períodos de regime informados (se houver mudança)"):
+            st.caption("Use AAAA-MM. O histórico de IRPJ/CSLL não substitui as alíquotas escrituradas no C175.")
+            historico_tabela = st.data_editor(
+                pd.DataFrame(columns=["inicio", "fim", "regime"]),
+                num_rows="dynamic", hide_index=True, key=f"historico_regime_{identificador_pis}",
+                column_config={
+                    "regime": st.column_config.SelectboxColumn(
+                        "Regime IRPJ informado", options=["Lucro presumido", "Lucro real", "Misto"],
+                    ),
+                },
+                on_change=limpar_resultado,
+            )
+        pendencias = aliquotas_pendentes(vendas_previas)
+        escolhas_editor = None
+        if pendencias:
+            st.warning("O C175 tem alíquotas vazias no filtro principal. Informe apenas esses campos para continuar.")
+            quadro_pendencias = pd.DataFrame(pendencias)
+            for coluna in ("PIS no C175 (%)", "COFINS no C175 (%)", "PIS a informar (%)", "COFINS a informar (%)"):
+                quadro_pendencias[coluna] = pd.to_numeric(quadro_pendencias[coluna], errors="coerce")
+            escolhas_editor = st.data_editor(
+                quadro_pendencias, key=f"editor_aliquotas_{identificador_pis}",
+                hide_index=True, use_container_width=True,
+                disabled=["Competência", "Estabelecimento", "PIS no C175 (%)", "COFINS no C175 (%)"],
+                column_config={
+                    "Estabelecimento": st.column_config.TextColumn(),
+                    "PIS a informar (%)": st.column_config.NumberColumn(min_value=0.01, max_value=100.0, step=0.01),
+                    "COFINS a informar (%)": st.column_config.NumberColumn(min_value=0.01, max_value=100.0, step=0.01),
+                },
+                on_change=limpar_resultado,
+            )
+
+        if st.button("2. Concluir análises e gerar Excel", type="primary"):
+            limpar_resultado()
+            try:
+                if regime is None:
+                    raise ValueError("Selecione o regime de IRPJ/CSLL ou 'A confirmar por período'.")
+                historico = validar_historico_regime(historico_tabela)
+                if regime == "Misto: real e presumido" and not historico:
+                    raise ValueError("Informe os períodos de lucro real e presumido no histórico.")
+                escolhas_aliquotas = {}
+                if escolhas_editor is not None:
+                    for item in escolhas_editor.to_dict("records"):
+                        pis_c175, cofins_c175 = item["PIS no C175 (%)"], item["COFINS no C175 (%)"]
+                        pis = pis_c175 if pd.notna(pis_c175) else item["PIS a informar (%)"]
+                        cofins = cofins_c175 if pd.notna(cofins_c175) else item["COFINS a informar (%)"]
+                        if pd.isna(pis) or pd.isna(cofins) or float(pis) <= 0 or float(cofins) <= 0:
+                            raise ValueError(f"Informe as alíquotas ausentes para {item['Competência']} / {item['Estabelecimento']}.")
+                        chave = (item["Competência"], item["Estabelecimento"],
+                                 float(pis_c175) if pd.notna(pis_c175) else None,
+                                 float(cofins_c175) if pd.notna(cofins_c175) else None)
+                        escolhas_aliquotas[chave] = (float(pis), float(cofins))
+                inventario = preanalise["inventario"]
+                for item in inventario:
+                    entrada = entradas[item["tipo"]]
+                    if entrada is None or hash_arquivo(entrada[0]) != item["sha256"]:
+                        raise ValueError(f"O arquivo {item['arquivo']} mudou desde a pré-análise. Leia os documentos novamente.")
+                with st.spinner("Executando as demais análises e preparando o relatório..."):
+                    abas = {item["tipo"]: set(item["abas"]) for item in inventario}
+                    abas_pis = abas["EFD-Contribuições"]
+                    abas_icms = abas.get("EFD ICMS/IPI", set())
+                    tem_aba_pis = lambda prefixo: any(nome.casefold().startswith(prefixo) for nome in abas_pis)
+                    tem_aba_icms = lambda prefixo: any(nome.casefold().startswith(prefixo) for nome in abas_icms)
+                    if arquivo_icms is not None and tem_aba_pis("c170") and tem_aba_icms("c170"):
+                        achados = triagem_c170(
+                            arquivo_icms[0], arquivo_pis[0], tolerancia,
+                            nome_icms=arquivo_icms[1], nome_pis=arquivo_pis[1],
+                        )
+                    else:
+                        achados = pd.DataFrame(columns=COLUNAS_TRIAGEM)
+                    st_c170 = diagnosticar_st_c170(arquivo_pis[0]) if tem_aba_pis("c170") else pd.DataFrame(columns=COLUNAS_ST_C170)
+                    st_c100 = diagnosticar_st_c100(arquivo_pis[0]) if tem_aba_pis("c100") else pd.DataFrame(columns=COLUNAS_C100)
+                    with ConferenciaNFe() as conferencia_nfe:
+                        vendas_c175 = diagnosticar_vendas_st_c175(
+                            arquivo_pis[0], coletor_nfe=conferencia_nfe,
+                            aliquotas_informadas=escolhas_aliquotas,
+                        )
+                        if aliquotas_pendentes(vendas_c175):
+                            raise ValueError("Ainda há alíquotas C175 ausentes. Complete as escolhas na pré-análise.")
+                        simulacao = simular_potencial(vendas_c175, historico, uf_selecionada)
+                        st_c190 = diagnosticar_st_c190(arquivo_icms[0]) if arquivo_icms is not None and tem_aba_icms("c190") else pd.DataFrame(columns=COLUNAS_C190)
+                        relatorio = gerar_relatorio_excel(
+                            inventario, achados, st_c170, st_c100, vendas_c175, st_c190, regime,
+                            simulacao=simulacao, historico_regime=historico,
+                            uf_selecionada=uf_selecionada, conferencia_nfe=conferencia_nfe,
+                        )
+                    st.session_state["resultado_auditoria"] = {
+                        "versao": VERSAO_RESULTADO,
+                        "inventario": inventario, "achados": achados,
+                        "st_c170": st_c170, "st_c100": st_c100,
+                        "vendas_c175": vendas_c175, "simulacao": simulacao,
+                        "st_c190": st_c190, "icms_fornecido": arquivo_icms is not None,
+                        "relatorio": relatorio,
+                    }
+            except Exception as erro:
+                st.error(f"Não foi possível concluir a auditoria: {erro}")
 
     if "resultado_auditoria" in st.session_state:
         resultado = st.session_state["resultado_auditoria"]
@@ -184,7 +300,6 @@ with aba_entrada:
         simulados = candidatos["simulacao_pis_cofins_uf"].dropna()
         if not simulados.empty:
             st.metric("Simulação preliminar pela alíquota geral da UF", moeda_br(simulados.sum()))
-            st.caption("A simulação usa a alíquota interna geral documentada de PE ou MT, conforme a UF da nota. Não verifica a alíquota específica da mercadoria, o ICMS-ST destacado nem crédito confirmado.")
         else:
             st.caption("Sem simulação estadual automática para os dados fornecidos. A triagem e o relatório continuam disponíveis.")
         if candidatos.empty:
@@ -209,7 +324,7 @@ with aba_entrada:
                     use_container_width=True, hide_index=True,
                 )
         with st.expander("Regime e alíquotas por competência"):
-            colunas = ["competencia", "cnpj_estabelecimento", "regime_0110", "aliquota_pis", "aliquota_cofins"]
+            colunas = ["competencia", "cnpj_estabelecimento", "regime_0110", "aliquota_pis", "fonte_aliquota_pis", "aliquota_cofins", "fonte_aliquota_cofins"]
             st.dataframe(
                 resultado["vendas_c175"][colunas].drop_duplicates().sort_values(
                     ["competencia", "cnpj_estabelecimento", "aliquota_pis", "aliquota_cofins"]
@@ -217,7 +332,7 @@ with aba_entrada:
                 use_container_width=True, hide_index=True,
             )
         st.download_button(
-            "Baixar relatório completo em Excel",
+            "Baixar relatório executivo e conferência em Excel",
             data=resultado["relatorio"],
             file_name="relatorio_auditoria_sped.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

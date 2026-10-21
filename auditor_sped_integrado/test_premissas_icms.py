@@ -32,7 +32,7 @@ class PremissasICMSTest(unittest.TestCase):
             "valor_pis_conferido": 0.65, "valor_cofins_conferido": 3.0,
         }])
         estimativa = simular_potencial(base, historico).iloc[0]
-        self.assertEqual(estimativa["fonte_regime"], "Histórico informado")
+        self.assertEqual(estimativa["fonte_regime"], "Alíquotas C175")
         self.assertEqual(estimativa["codigo_regime_calculo"], "2")
         self.assertAlmostEqual(estimativa["total_simulado"], 0.66)
         self.assertAlmostEqual(simular_potencial(base, historico, "PE").iloc[0]["total_simulado"], 0.66)
@@ -46,8 +46,12 @@ class PremissasICMSTest(unittest.TestCase):
         base["regime_0110"] = "1"
         conflito = simular_potencial(base, historico).iloc[0]
         self.assertIsNone(conflito["total_simulado"])
-        self.assertEqual(conflito["estado_simulacao"], "Divergência entre 0110 e histórico informado")
+        self.assertEqual(conflito["estado_simulacao"], "Alíquotas C175 incompatíveis com regime básico informado")
         base["regime_0110"] = "2"
+        historico_real = validar_historico_regime(pd.DataFrame([
+            {"inicio": "2018-01", "fim": "2018-12", "regime": "Lucro real"},
+        ]))
+        self.assertAlmostEqual(simular_potencial(base, historico_real).iloc[0]["total_simulado"], 0.66)
         base["aliquota_pis"] = 1.65
         incompatível = simular_potencial(base, historico).iloc[0]
         self.assertIsNone(incompatível["total_simulado"])

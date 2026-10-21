@@ -95,6 +95,8 @@ REGIMES_DECLARADOS = {
     "Lucro presumido": "2",
     "Misto": "3",
 }
+
+
 ALIQUOTAS_BASICAS = {
     "1": (Decimal("1.65"), Decimal("7.6")),
     "2": (Decimal("0.65"), Decimal("3")),
@@ -111,6 +113,7 @@ COLUNAS_SIMULACAO = (
     "aliquota_icms_referencia", "parcela_icms_simulada",
     "pis_simulado", "cofins_simulada", "total_simulado",
     "estado_simulacao", "fonte_premissa",
+    "fonte_aliquota_pis", "fonte_aliquota_cofins",
 )
 
 
@@ -188,16 +191,19 @@ def simular_potencial(
         if str(item["cfop"]) != "5405" or str(item["cst_pis"]).zfill(2) != "01" or str(item["cst_cofins"]).zfill(2) != "01":
             continue
         regime = _texto(item.get("regime_0110"))
-        declarados = [
-            periodo for periodo in historico_regime
-            if periodo.inicio <= str(item["competencia"]) <= periodo.fim
-        ]
-        declarado = declarados[0].regime if declarados else ""
-        codigo_declarado = REGIMES_DECLARADOS.get(declarado, "")
-        codigo_calculo = regime or codigo_declarado
-        fonte_regime = "0110" if regime else ("Histórico informado" if declarado else "Não informado")
-        conflito_regime = bool(regime and codigo_declarado and regime != codigo_declarado)
+        declarados = [p.regime for p in historico_regime if p.inicio <= str(item["competencia"]) <= p.fim]
+        declarado = declarados[0] if declarados else ""
         aliquotas = (Decimal(str(item["aliquota_pis"])), Decimal(str(item["aliquota_cofins"])))
+        fonte_pis = str(item.get("fonte_aliquota_pis") or "C175")
+        fonte_cofins = str(item.get("fonte_aliquota_cofins") or "C175")
+        codigo_pelas_aliquotas = next(
+            (codigo for codigo, par in ALIQUOTAS_BASICAS.items() if aliquotas == par), ""
+        )
+        codigo_calculo = regime or codigo_pelas_aliquotas
+        fonte_regime = "0110" if regime else (
+            "Alíquota informada pelo usuário" if "Informada pelo usuário" in (fonte_pis, fonte_cofins) else
+            "Alíquotas C175" if codigo_pelas_aliquotas else "Não informado"
+        )
         pares_permitidos = (
             tuple(ALIQUOTAS_BASICAS.values()) if codigo_calculo == "3"
             else (ALIQUOTAS_BASICAS[codigo_calculo],) if codigo_calculo in ALIQUOTAS_BASICAS
@@ -220,8 +226,8 @@ def simular_potencial(
             estado = "Registros repetidos entre abas; simulação bloqueada"
         elif chaves_invalidas:
             estado = "Chave NF-e inválida ou incompatível; conferir UF"
-        elif conflito_regime:
-            estado = "Divergência entre 0110 e histórico informado"
+        elif "Ausente" in (fonte_pis, fonte_cofins):
+            estado = "Alíquota não escriturada no C175; informar para simular"
         elif codigo_calculo not in REGIMES_0110:
             estado = "Regime por competência não disponível"
         elif not aliquotas_compativeis:
@@ -235,7 +241,7 @@ def simular_potencial(
         pode_simular = (
             regra is not None and (not uf_selecionada or uf_nfe == uf_selecionada)
             and not duplicados and not chaves_invalidas
-            and not conflito_regime and codigo_calculo in REGIMES_0110
+            and codigo_calculo in REGIMES_0110
             and aliquotas_compativeis and conferidos > 0
         )
         aliquota_uf = regra.aliquota_geral if regra else None
@@ -274,6 +280,7 @@ def simular_potencial(
             "cofins_simulada": float(cofins) if cofins is not None else None,
             "total_simulado": float(pis + cofins) if pis is not None else None,
             "estado_simulacao": estado, "fonte_premissa": regra.fonte if regra else "",
+            "fonte_aliquota_pis": fonte_pis, "fonte_aliquota_cofins": fonte_cofins,
         })
     return pd.DataFrame(linhas, columns=COLUNAS_SIMULACAO).sort_values(
         ["competencia", "cnpj_estabelecimento", "aliquota_pis", "aliquota_cofins"],

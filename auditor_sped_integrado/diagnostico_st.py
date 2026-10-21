@@ -30,7 +30,8 @@ COLUNAS_C100 = (
 COLUNAS_C175 = (
     "competencia", "cnpj_estabelecimento", "uf_nfe", "chave_conferida",
     "regime_0110", "cfop", "cst_pis", "cst_cofins",
-    "aliquota_pis", "aliquota_cofins", "registros_c175", "valor_operacao",
+    "aliquota_pis", "aliquota_cofins", "fonte_aliquota_pis", "fonte_aliquota_cofins",
+    "registros_c175", "valor_operacao",
     "valor_desconto", "base_pis", "valor_pis", "base_cofins", "valor_cofins",
     "registros_base_conferida", "base_pis_conferida", "base_cofins_conferida",
     "valor_pis_conferido", "valor_cofins_conferido", "registros_base_divergente",
@@ -205,7 +206,10 @@ def diagnosticar_st_c100(arquivo: str | Path | bytes) -> pd.DataFrame:
         livro.close()
 
 
-def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | None = None) -> pd.DataFrame:
+def diagnosticar_vendas_st_c175(
+    arquivo: str | Path | bytes, cfops: set[str] | None = None, coletor_nfe=None,
+    aliquotas_informadas: dict[tuple[str, str, float | None, float | None], tuple[float, float]] | None = None,
+) -> pd.DataFrame:
     """Resume vendas com CFOP de ST no C175, sem atribuir ICMS-ST não informado."""
     cfops = cfops or {"5405"}
     fonte = BytesIO(arquivo) if isinstance(arquivo, bytes) else Path(arquivo)
@@ -259,8 +263,26 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
                     raise ValueError(f"Identificação incompleta em {nome}, linha {numero_linha}.")
                 cst_pis = str(linha[cst_pis_i] or "").strip().zfill(2)
                 cst_cofins = str(linha[cst_cofins_i] or "").strip().zfill(2)
+                pis_presente = linha[aliquota_pis_i] is not None and str(linha[aliquota_pis_i]).strip() != ""
+                cofins_presente = linha[aliquota_cofins_i] is not None and str(linha[aliquota_cofins_i]).strip() != ""
                 aliquota_pis = _decimal(linha[aliquota_pis_i])
                 aliquota_cofins = _decimal(linha[aliquota_cofins_i])
+                if cst_pis == "01" and cst_cofins == "01" and cfop == "5405" and (not pis_presente or not cofins_presente):
+                    chave_escolha = (
+                        periodo, cnpj,
+                        float(aliquota_pis) if pis_presente else None,
+                        float(aliquota_cofins) if cofins_presente else None,
+                    )
+                    escolha = (aliquotas_informadas or {}).get(chave_escolha)
+                    if escolha is not None:
+                        if not pis_presente:
+                            aliquota_pis = Decimal(str(escolha[0]))
+                        if not cofins_presente:
+                            aliquota_cofins = Decimal(str(escolha[1]))
+                        if aliquota_pis <= 0 or aliquota_cofins <= 0:
+                            raise ValueError(f"Alíquota informada inválida para {periodo}, estabelecimento {cnpj}.")
+                fonte_pis = "C175" if pis_presente else "Informada pelo usuário" if aliquota_pis > 0 else "Ausente"
+                fonte_cofins = "C175" if cofins_presente else "Informada pelo usuário" if aliquota_cofins > 0 else "Ausente"
                 chave = re.sub(r"\D", "", str(linha[chave_i] or "")) if chave_i is not None else ""
                 chave_valida = (
                     len(chave) == 44 and chave[:2] in CODIGOS_UF and chave[6:20] == cnpj
@@ -269,12 +291,23 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
                 # A UF da chave é preservada mesmo quando a validação completa falha.
                 uf_nfe = chave[:2] if len(chave) == 44 else ""
                 grupo = grupos[(periodo, cnpj, uf_nfe, chave_valida, regimes.get(periodo, ""),
-                                 cfop, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins)]
+                                 cfop, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins, fonte_pis, fonte_cofins)]
                 if cst_pis == "01" and cst_cofins == "01" and len(abas) > 1:
                     assinatura = blake2b(repr(tuple(linha)).encode("utf-8"), digest_size=16).digest()
                     primeira_aba = assinaturas_primeira_aba.setdefault(assinatura, nome)
                     if primeira_aba != nome:
                         grupo["duplicados"] += 1
+                        if coletor_nfe is not None and cfop == "5405":
+                            coletor_nfe.adicionar(
+                                competencia=periodo, cnpj=cnpj, chave=chave, chave_ok=chave_valida,
+                                uf=uf_nfe, regime=regimes.get(periodo, ""),
+                                aliquota_pis=aliquota_pis, aliquota_cofins=aliquota_cofins,
+                                operacao=Decimal("0"), desconto=Decimal("0"),
+                                base_pis=Decimal("0"), pis=Decimal("0"),
+                                base_cofins=Decimal("0"), cofins=Decimal("0"),
+                                base_ok=True, duplicado=True, aba=nome, linha=numero_linha,
+                                fonte_pis=fonte_pis, fonte_cofins=fonte_cofins,
+                            )
                         continue
                 grupo["registros"] += 1
                 operacao = _decimal(linha[operacao_i])
@@ -289,11 +322,12 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
                 grupo["pis"] += pis
                 grupo["base_cofins"] += base_cofins
                 grupo["cofins"] += cofins
-                if (
+                base_ok = (
                     desconto_i is not None
                     and abs(operacao - desconto - base_pis) <= Decimal("0.01")
                     and abs(base_pis - base_cofins) <= Decimal("0.01")
-                ):
+                )
+                if base_ok:
                     grupo["conferidos"] += 1
                     grupo["base_pis_ok"] += base_pis
                     grupo["base_cofins_ok"] += base_cofins
@@ -303,6 +337,16 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
                     grupo["divergentes"] += 1
                 if not chave_valida:
                     grupo["chaves_invalidas"] += 1
+                if coletor_nfe is not None and cst_pis == "01" and cst_cofins == "01" and cfop == "5405":
+                    coletor_nfe.adicionar(
+                        competencia=periodo, cnpj=cnpj, chave=chave, chave_ok=chave_valida,
+                        uf=uf_nfe, regime=regimes.get(periodo, ""),
+                        aliquota_pis=aliquota_pis, aliquota_cofins=aliquota_cofins,
+                        operacao=operacao, desconto=desconto, base_pis=base_pis, pis=pis,
+                        base_cofins=base_cofins, cofins=cofins,
+                        base_ok=base_ok, duplicado=False, aba=nome, linha=numero_linha,
+                        fonte_pis=fonte_pis, fonte_cofins=fonte_cofins,
+                    )
                 if grupo["primeira_linha"] is None:
                     grupo["primeira_aba"], grupo["primeira_linha"] = nome, numero_linha
         saida = [
@@ -312,6 +356,7 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
                 "regime_0110": regime, "cfop": cfop,
                 "cst_pis": cst_pis, "cst_cofins": cst_cofins,
                 "aliquota_pis": float(aliquota_pis), "aliquota_cofins": float(aliquota_cofins),
+                "fonte_aliquota_pis": fonte_pis, "fonte_aliquota_cofins": fonte_cofins,
                 "registros_c175": dados["registros"],
                 "valor_operacao": float(dados["operacao"].quantize(Decimal("0.01"))),
                 "valor_desconto": float(dados["desconto"].quantize(Decimal("0.01"))),
@@ -329,7 +374,7 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
                 "registros_duplicados_entre_abas": dados["duplicados"],
                 "primeira_aba": dados["primeira_aba"], "primeira_linha_c175": dados["primeira_linha"],
             }
-            for (periodo, cnpj, uf_nfe, chave_valida, regime, cfop, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins), dados in grupos.items()
+            for (periodo, cnpj, uf_nfe, chave_valida, regime, cfop, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins, fonte_pis, fonte_cofins), dados in grupos.items()
         ]
         return pd.DataFrame(saida, columns=COLUNAS_C175).sort_values(
             ["competencia", "cnpj_estabelecimento", "cfop", "cst_pis", "cst_cofins"], ignore_index=True

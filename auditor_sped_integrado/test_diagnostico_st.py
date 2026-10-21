@@ -9,6 +9,7 @@ import pandas as pd
 from auditor_sped_integrado.diagnostico_st import (
     diagnosticar_st_c100, diagnosticar_st_c170, diagnosticar_st_c190, diagnosticar_vendas_st_c175,
 )
+from auditor_sped_integrado.conferencia_nfe import ConferenciaNFe
 
 
 class DiagnosticoSTTest(unittest.TestCase):
@@ -29,6 +30,8 @@ class DiagnosticoSTTest(unittest.TestCase):
             base = {
                 "Mês": "Agosto", "Ano": 2023, "CNPJ Estabelecimento(C010)": "10693312000181",
                 "Situação(C100)": "00", "CFOP": 5405, "Valor da Operação": 100,
+                "Chave(C100)": "51230810693312000181550010000000011000000000",
+                "Valor do Desconto": 0,
                 "CST PIS": "01", "Valor BC PIS": 100, "Aliquota PIS perc.": 1.65, "Valor PIS": 1.65,
                 "CST COFINS": "01", "Valor BC COFINS": 100, "Aliquota COFINS perc.": 7.6, "Valor COFINS": 7.6,
             }
@@ -37,11 +40,16 @@ class DiagnosticoSTTest(unittest.TestCase):
                 pd.DataFrame([{**base, "CST PIS": "04", "CST COFINS": "04", "Valor PIS": 0,
                                "Valor COFINS": 0}, {**base, "CFOP": 5102}, base]).to_excel(
                                    livro, sheet_name="C175 - Analítico--2", index=False)
-            resultado = diagnosticar_vendas_st_c175(arquivo)
+            with ConferenciaNFe() as conferencia:
+                resultado = diagnosticar_vendas_st_c175(arquivo, coletor_nfe=conferencia)
+                notas = list(conferencia.linhas())
             self.assertEqual(resultado["registros_c175"].sum(), 2)
             self.assertEqual(set(resultado["cst_pis"]), {"01", "04"})
             self.assertAlmostEqual(resultado["valor_pis"].sum(), 1.65)
             self.assertEqual(resultado["registros_duplicados_entre_abas"].sum(), 1)
+            self.assertEqual(len(notas), 1)
+            self.assertEqual(notas[0][10], 1)  # Uma linha válida; a cópia não aumenta o valor.
+            self.assertEqual(notas[0][18], 1)
 
     def test_c100_le_aba_de_continuacao(self):
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as pasta:
@@ -57,6 +65,32 @@ class DiagnosticoSTTest(unittest.TestCase):
             self.assertEqual(resultado["documentos_com_st"].sum(), 1)
             self.assertAlmostEqual(resultado["valor_icms_st_destacado"].sum(), 12.34)
             self.assertEqual(resultado.iloc[0]["aba"], "C100 - Nota Fiscal--2")
+
+    def test_aliquota_ausente_so_recebe_valor_informado(self):
+        with TemporaryDirectory(dir=Path(__file__).resolve().parent) as pasta:
+            arquivo = Path(pasta) / "sem_cofins.xlsx"
+            pd.DataFrame([{
+                "Mês": "Janeiro", "Ano": 2025, "CNPJ Estabelecimento(C010)": "10693312000181",
+                "Situação(C100)": "00", "CFOP": 5405,
+                "Chave(C100)": "51250110693312000181550010000000011000000000",
+                "Valor da Operação": 100, "Valor do Desconto": 0,
+                "CST PIS": "01", "Valor BC PIS": 100, "Aliquota PIS perc.": 1.65,
+                "Valor PIS": 1.65, "CST COFINS": "01", "Valor BC COFINS": 100,
+                "Aliquota COFINS perc.": None, "Valor COFINS": 7.6,
+            }]).to_excel(arquivo, sheet_name="C175", index=False)
+            pendente = diagnosticar_vendas_st_c175(arquivo).iloc[0]
+            self.assertEqual(pendente["fonte_aliquota_cofins"], "Ausente")
+            with ConferenciaNFe() as conferencia:
+                preenchido = diagnosticar_vendas_st_c175(
+                    arquivo, coletor_nfe=conferencia,
+                    aliquotas_informadas={("2025-01", "10693312000181", 1.65, None): (0.65, 7.6)},
+                ).iloc[0]
+                nota = list(conferencia.linhas())[0]
+            self.assertEqual(preenchido["aliquota_pis"], 1.65)
+            self.assertEqual(preenchido["aliquota_cofins"], 7.6)
+            self.assertEqual(preenchido["fonte_aliquota_pis"], "C175")
+            self.assertEqual(preenchido["fonte_aliquota_cofins"], "Informada pelo usuário")
+            self.assertEqual(nota[-1], "Informada pelo usuário")
 
     def test_soma_entradas_e_separa_transferencias(self):
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as pasta:
