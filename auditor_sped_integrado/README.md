@@ -1,0 +1,41 @@
+# Auditor SPED integrado — versão inicial
+
+Projeto local para organizar análises de possíveis recuperações tributárias com trilha de evidências. Reaproveita o formato dos Excel C170 usado em `projeto_icms_piscofins` e substitui o cruzamento por chave da nota por **chave da NF-e + item**, com bloqueio de pares ambíguos.
+
+## Entradas
+
+- TXT originais de EFD ICMS/IPI, EFD-Contribuições, ECD e ECF: leitura em streaming, SHA-256 e contagem de registros;
+- Excel C170 convertido de EFD ICMS/IPI e EFD-Contribuições: triagem fiscal em nível de item.
+
+Os TXT são inventariados. A triagem C170 ainda usa os Excel convertidos, pois os leiautes dos quatro SPED variam por tipo e ano. O programa **não** transforma o TXT original em C170 normalizado nesta versão.
+
+## Saídas e segurança jurídica
+
+- Indício de possível ICMS próprio não excluído da base de PIS/COFINS (Tema 69);
+- Item com ICMS-ST sinalizado para verificar a situação do substituído e o Tema 1125;
+- Conciliação ambígua quando há mais de uma linha para a mesma NF-e e item;
+- Hashes e linhas das planilhas de origem; decisão e justificativa do analista exportáveis em CSV;
+- Catálogo de hipóteses futuras com fontes oficiais e tratamento ainda pendente.
+
+Nenhuma linha é declarada crédito validado pelo motor. Base de ICMS igual à base de PIS/COFINS é apenas um **sinal de revisão**: a base de ICMS não é necessariamente a receita tributável. É obrigatório confrontar documentos, apuração e valores pagos, além de verificar período, condição do contribuinte e uso prévio do crédito. O catálogo foi pesquisado em 21/10/2026 e deve ser versionado quando as regras mudarem.
+
+O modelo de `sped_credito_app/calculos.py` não foi incorporado como cálculo de crédito porque subtrai ICMS-ST/DIFAL e estima PIS/COFINS por dentro sem verificar, por operação, o direito, a apuração nem o pagamento. Ele permanece referência para futuros cenários, sujeitos a validação jurídica.
+
+## Executar
+
+```powershell
+python -m pip install -r auditor_sped_integrado/requirements.txt
+streamlit run auditor_sped_integrado/app.py
+```
+
+Não coloque TXT, planilhas de clientes ou relatórios com dados fiscais sob controle de versão. A aplicação lê caminhos locais, não envia dados para serviços externos e só exporta arquivos quando o usuário aciona o botão de download.
+
+## Próximas integrações
+
+1. Interpretadores versionados por ano para os quatro TXT, com validação por leiaute oficial.
+2. Conciliação EFD-Contribuições × EFD ICMS/IPI × ECD × ECF e apurações declaradas.
+3. Pacotes de regras separados para União e cada UF, com vigência, precedentes, exceções e testes de regressão.
+4. Cálculo condicionado à evidência de recolhimento e à inexistência de aproveitamento anterior.
+
+Fontes: [jurisprudência vinculante RFB](https://www.gov.br/receitafederal/pt-br/acesso-a-informacao/legislacao/jurisprudencia-vinculante/pis-cofins), [LC 87/1996](https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp87.htm), [orientações RFB sobre créditos de PIS/COFINS](https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/restituicao-ressarcimento-reembolso-e-compensacao/conformidade-tributaria/Creditos-Indevidos-de-PIS-Pasep-Cofins-Setor-Supermercadista), [IPI](https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/restituicao-ressarcimento-reembolso-e-compensacao/creditos/ipi/conceito%20e%20prazos) e [IRPJ/CSLL](https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/restituicao-ressarcimento-reembolso-e-compensacao/creditos/sneg).
+
