@@ -57,10 +57,11 @@ with aba_entrada:
         try:
             if not any(entrada is not None for entrada in entradas.values()):
                 raise ValueError("Informe ao menos um arquivo Excel.")
-            inventario = [
-                inventariar_excel(entrada[0], tipo, entrada[1])
-                for tipo, entrada in entradas.items() if entrada is not None
-            ]
+            with st.spinner("Contando as linhas de todas as abas; arquivos grandes podem levar alguns instantes..."):
+                inventario = [
+                    inventariar_excel(entrada[0], tipo, entrada[1])
+                    for tipo, entrada in entradas.items() if entrada is not None
+                ]
             st.session_state["inventario"] = inventario
         except Exception as erro:
             st.error(str(erro))

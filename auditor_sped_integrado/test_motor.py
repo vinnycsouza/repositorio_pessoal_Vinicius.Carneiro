@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 
-from auditor_sped_integrado.motor import inventariar_excel, triagem_c170
+from auditor_sped_integrado.motor import _contar_linhas_aba, inventariar_excel, triagem_c170
 
 
 CHAVE = "1" * 44
@@ -80,6 +81,29 @@ class MotorTest(unittest.TestCase):
             self.assertEqual(inventario["abas"], {"C100": 2, "C170": 1})
             self.assertEqual(inventario["linhas"], 3)
             self.assertEqual(len(inventario["sha256"]), 64)
+
+    def test_inventario_ignora_dimensao_incorreta_da_aba(self):
+        with pasta_temporaria() as tmp:
+            pasta = Path(tmp)
+            original = pasta / "original.xlsx"
+            corrigido = pasta / "dimensao_incorreta.xlsx"
+            pd.DataFrame({"Item": [1, 2]}).to_excel(original, sheet_name="C170", index=False)
+            with ZipFile(original) as origem, ZipFile(corrigido, "w") as destino:
+                for membro in origem.infolist():
+                    conteudo = origem.read(membro.filename)
+                    if membro.filename == "xl/worksheets/sheet1.xml":
+                        conteudo = conteudo.replace(b'<dimension ref="A1:A3"/>', b'<dimension ref="A1"/>')
+                    destino.writestr(membro, conteudo)
+            self.assertEqual(inventariar_excel(corrigido, "EFD ICMS/IPI")["abas"], {"C170": 2})
+
+    def test_contagem_preserva_linha_na_divisa_de_blocos(self):
+        with pasta_temporaria() as tmp:
+            arquivo = Path(tmp) / "linhas.zip"
+            xml = b" " * (4 * 1024 * 1024 - 2) + b"<row r='1'></row><row r='2'></row>"
+            with ZipFile(arquivo, "w", compression=ZIP_DEFLATED) as pacote:
+                pacote.writestr("aba.xml", xml)
+            with ZipFile(arquivo) as pacote:
+                self.assertEqual(_contar_linhas_aba(pacote, "aba.xml"), 1)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ Projeto local para organizar análises de possíveis recuperações tributárias
 - Excel `.xlsx` ou `.xlsm` do Sysconv para EFD ICMS/IPI, EFD-Contribuições, ECD e ECF: hash SHA-256 e contagem de linhas por aba;
 - Abas C170 dos Excel de EFD ICMS/IPI e EFD-Contribuições: triagem fiscal em nível de item.
 
-Cada Excel pode ser selecionado pelo navegador ou informado por caminho local completo. Os arquivos selecionados são processados em memória; os arquivos indicados por caminho são lidos diretamente do disco. A triagem usa as abas C170 dos dois primeiros. ECD e ECF ainda não têm interpretação contábil automática nesta versão. A contagem do inventário considera a primeira linha preenchida de cada aba como cabeçalho.
+Cada Excel pode ser selecionado pelo navegador ou informado por caminho local completo. Os arquivos selecionados são processados em memória; os arquivos indicados por caminho são lidos diretamente do disco. A triagem usa as abas C170 dos dois primeiros. ECD e ECF ainda não têm interpretação contábil automática nesta versão. O inventário conta as linhas registradas no XML de cada aba, ignorando a dimensão declarada pelo Excel, e desconta a primeira linha como cabeçalho. Linhas vazias que tenham um elemento de linha no arquivo também entram nessa contagem.
 
 ## Saídas e segurança jurídica
 

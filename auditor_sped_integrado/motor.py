@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 import re
 import sys
+from zipfile import ZipFile
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -24,6 +25,21 @@ COLUNAS = (
     "base_icms", "valor_icms", "valor_icms_st", "base_pis", "base_cofins",
     "diferenca_pis", "diferenca_cofins", "arquivo_pis_sha256", "arquivo_icms_sha256",
 )
+_ROW_START_RE = re.compile(rb"<row(?:\s|>)")
+
+
+def _contar_linhas_aba(pacote: ZipFile, caminho_aba: str) -> int:
+    """Conta elementos de linha no XML, sem confiar na dimensão declarada da aba."""
+    total = 0
+    pendente = b""
+    with pacote.open(caminho_aba) as xml:
+        for bloco in iter(lambda: xml.read(4 * 1024 * 1024), b""):
+            dados = pendente + bloco
+            limite = max(len(dados) - 4, 0)
+            total += sum(1 for ocorrencia in _ROW_START_RE.finditer(dados) if ocorrencia.start() < limite)
+            pendente = dados[limite:]
+    total += sum(1 for _ in _ROW_START_RE.finditer(pendente))
+    return max(total - 1, 0)  # Primeira linha: cabeçalho.
 
 
 def inventariar_excel(arquivo: str | Path | bytes, tipo: str, nome_arquivo: str | None = None) -> dict:
@@ -41,15 +57,15 @@ def inventariar_excel(arquivo: str | Path | bytes, tipo: str, nome_arquivo: str 
         fonte = Path(arquivo)
         if not fonte.is_file():
             raise FileNotFoundError(f"Arquivo Excel não encontrado: {fonte}")
-    abas = {}
     livro = load_workbook(fonte, read_only=True, data_only=True)
     try:
-        for aba in livro.worksheets:
-            linhas = (linha for linha in aba.iter_rows(values_only=True) if any(valor is not None and str(valor).strip() for valor in linha))
-            next(linhas, None)  # Primeira linha preenchida: cabeçalho.
-            abas[aba.title] = sum(1 for _ in linhas)
+        planilhas = [(aba.title, aba._worksheet_path) for aba in livro.worksheets]
     finally:
         livro.close()
+    abas = {}
+    with ZipFile(BytesIO(arquivo) if isinstance(arquivo, bytes) else fonte) as pacote:
+        for titulo, caminho_aba in planilhas:
+            abas[titulo] = _contar_linhas_aba(pacote, caminho_aba)
     return {
         "tipo": tipo,
         "arquivo": nome,
