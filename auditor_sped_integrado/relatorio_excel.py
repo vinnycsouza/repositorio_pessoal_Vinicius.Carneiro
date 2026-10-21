@@ -16,7 +16,7 @@ COR_CABECALHO = "DCE6F1"
 FORMATO_MOEDA = '#,##0.00'
 COLUNAS_VALOR = {
     "valor_operacao", "base_pis", "valor_pis", "base_cofins", "valor_cofins",
-    "pis_escriturado", "cofins_escriturada", "icms_st_vinculado",
+    "pis_escriturado", "cofins_escriturada", "contribuicoes_sob_analise", "icms_st_vinculado",
     "exclusao_calculada", "credito_pis_calculado", "credito_cofins_calculado",
     "valor_icms_st_destacado", "base_icms", "valor_icms", "valor_icms_st",
     "diferenca_pis", "diferenca_cofins",
@@ -53,6 +53,7 @@ def resumir_candidatos(c175: pd.DataFrame) -> pd.DataFrame:
     colunas = [
         "competencia", "cnpj_estabelecimento", "registros_c175", "valor_operacao",
         "base_pis", "pis_escriturado", "base_cofins", "cofins_escriturada",
+        "contribuicoes_sob_analise",
         "icms_st_vinculado", "exclusao_calculada", "credito_pis_calculado",
         "credito_cofins_calculado", "estado", "pendencia",
     ]
@@ -73,10 +74,13 @@ def resumir_candidatos(c175: pd.DataFrame) -> pd.DataFrame:
         base_cofins=("base_cofins", "sum"),
         cofins_escriturada=("valor_cofins", "sum"),
     )
+    grupos["contribuicoes_sob_analise"] = (
+        grupos["pis_escriturado"] + grupos["cofins_escriturada"]
+    ).round(2)
     for coluna in ("icms_st_vinculado", "exclusao_calculada", "credito_pis_calculado", "credito_cofins_calculado"):
         grupos[coluna] = None
-    grupos["estado"] = "Receita escriturada sob revisão"
-    grupos["pendencia"] = "Comprovar ICMS-ST da aquisição e vínculo com a receita tributada"
+    grupos["estado"] = "Possível recuperação em análise"
+    grupos["pendencia"] = "Obter NF de aquisição e vincular ICMS-ST à receita para quantificar a exclusão"
     return grupos[colunas]
 
 
@@ -94,18 +98,18 @@ def gerar_relatorio_excel(
     livro = Workbook()
     resumo = livro.active
     resumo.title = "Resumo"
-    resumo["A1"] = "Auditoria SPED — possíveis exclusões de ICMS-ST"
+    resumo["A1"] = "Auditoria SPED — análise preliminar de possível recuperação"
     resumo["A1"].font = Font(size=16, bold=True, color="FFFFFF")
     resumo["A1"].fill = PatternFill("solid", fgColor=COR_TITULO)
-    resumo.merge_cells("A1:N1")
+    resumo.merge_cells("A1:O1")
     resumo["A2"] = "Gerado em"
     resumo["B2"] = (gerado_em or datetime.now()).strftime("%d/%m/%Y %H:%M")
     resumo["D2"] = "Regime informado"
     resumo["E2"] = regime
     resumo["A3"] = "Filtro principal: C175, CFOP 5405, CST PIS 01 e CST COFINS 01."
-    resumo.merge_cells("A3:N3")
-    resumo["A4"] = "Contribuições escrituradas não equivalem a crédito; campos de crédito ficam vazios sem ICMS-ST comprovado e vinculado."
-    resumo.merge_cells("A4:N4")
+    resumo.merge_cells("A3:O3")
+    resumo["A4"] = "PIS/COFINS sob análise são valores escriturados nas receitas selecionadas; a possível recuperação ainda depende da medida de ICMS-ST excluível."
+    resumo.merge_cells("A4:O4")
     resumo["A4"].alignment = Alignment(wrap_text=True, vertical="center")
     resumo.row_dimensions[4].height = 32
     candidatos = resumir_candidatos(vendas_c175)
@@ -121,10 +125,10 @@ def gerar_relatorio_excel(
     if candidatos.empty:
         resumo["A7"] = "Nenhuma receita no filtro principal foi encontrada."
     resumo.freeze_panes = "C7"
-    resumo.auto_filter.ref = f"A6:N{max(7, 6 + len(candidatos))}"
+    resumo.auto_filter.ref = f"A6:O{max(7, 6 + len(candidatos))}"
     for indice, nome in enumerate(candidatos.columns, start=1):
         resumo.column_dimensions[get_column_letter(indice)].width = min(max(len(nome) + 3, 16), 35)
-    resumo.column_dimensions["N"].width = 65
+    resumo.column_dimensions["O"].width = 70
 
     _aba_quadro(livro, "C175_5405", vendas_c175)
     _aba_quadro(livro, "ST_C170", st_c170)
@@ -142,7 +146,7 @@ def gerar_relatorio_excel(
     metodo = pd.DataFrame([
         ("Escopo", "Triagem e documentação de possível exclusão de ICMS-ST da base de PIS/COFINS."),
         ("Filtro principal", "C175, CFOP 5405, CST 01 de PIS e de COFINS."),
-        ("Resultado", "PIS/COFINS escriturados são observações; crédito calculado permanece vazio sem ST vinculado."),
+        ("Resultado preliminar", "PIS/COFINS sob análise soma os valores escriturados nas receitas selecionadas; não é o valor a recuperar."),
         ("C175", "Registro analítico; não comprova por si só item, quantidade nem ICMS-ST da aquisição."),
         ("C100/C170/C190", "Níveis distintos; não somar os valores entre si."),
         ("Responsabilidade", "O auditor não altera nem retifica SPED ou declarações."),

@@ -31,6 +31,7 @@ class RelatorioExcelTest(unittest.TestCase):
         candidatos = resumir_candidatos(vendas)
         self.assertEqual(len(candidatos), 1)
         self.assertEqual(candidatos.iloc[0]["pis_escriturado"], 1.32)
+        self.assertEqual(candidatos.iloc[0]["contribuicoes_sob_analise"], 7.4)
         self.assertIsNone(candidatos.iloc[0]["credito_pis_calculado"])
         vazio = pd.DataFrame()
         dados = gerar_relatorio_excel(
@@ -45,7 +46,8 @@ class RelatorioExcelTest(unittest.TestCase):
         ])
         resumo = livro["Resumo"]
         self.assertEqual(resumo["F7"].value, 1.32)
-        self.assertIsNone(resumo["K7"].value)
-        self.assertEqual(resumo["M7"].value, "Receita escriturada sob revisão")
+        self.assertEqual(resumo["I7"].value, 7.4)
+        self.assertIsNone(resumo["L7"].value)
+        self.assertEqual(resumo["N7"].value, "Possível recuperação em análise")
         self.assertEqual(livro["Inventario"]["B2"].value, "origem.xlsx")
         livro.close()

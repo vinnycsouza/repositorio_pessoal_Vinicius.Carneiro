@@ -107,13 +107,14 @@ with aba_entrada:
         candidatos = resumir_candidatos(resultado["vendas_c175"])
         st.subheader("Resultado")
         st.info(
-            "As contribuições escrituradas mostram o universo sob revisão. "
-            "O campo de crédito calculado permanece vazio quando não há ICMS-ST documental vinculado às receitas."
+            "Resultado preliminar: o filtro identifica receitas e PIS/COFINS escriturados sob análise. "
+            "A parcela possivelmente recuperável será quantificada após comprovar o ICMS-ST e seu vínculo com essas receitas."
         )
-        a, b, c = st.columns(3)
+        a, b, c, d = st.columns(4)
         a.metric("Grupos C175 / CFOP 5405 / CST 01", len(candidatos))
         b.metric("PIS escriturado nesses grupos", moeda_br(candidatos["pis_escriturado"].sum()))
         c.metric("COFINS escriturada nesses grupos", moeda_br(candidatos["cofins_escriturada"].sum()))
+        d.metric("Contribuições sob análise", moeda_br(candidatos["contribuicoes_sob_analise"].sum()))
         if candidatos.empty:
             st.warning("Nenhum registro foi localizado no filtro principal.")
         else:
