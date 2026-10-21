@@ -16,12 +16,15 @@ Cada Excel pode ser selecionado pelo navegador ou informado por caminho local co
 - Item com ICMS-ST sinalizado para verificar a situação do substituído e o Tema 1125;
 - Conciliação ambígua quando há mais de uma saída para a mesma NF-e, item, estabelecimento e competência;
 - Diagnóstico de estabelecimento/competência sem cobertura no ICMS/IPI fornecido, operação diferente ou contexto diferente;
+- Diagnóstico do ICMS-ST positivo escriturado em entradas C170, notas C100 e agregados C190 do ICMS/IPI, além de resumo das vendas C175 com CFOP 5405 por CST e alíquota;
 - Hashes, linhas, CNPJs, competências e CFOPs das planilhas de origem; decisão e justificativa do analista exportáveis em CSV;
 - Catálogo de hipóteses futuras com fontes oficiais e tratamento ainda pendente.
 
 Nenhuma linha é declarada crédito validado pelo motor. Base de ICMS igual à base de PIS/COFINS é apenas um **sinal de revisão**: a base de ICMS não é necessariamente a receita tributável. É obrigatório confrontar documentos, apuração e valores pagos, além de verificar período, condição do contribuinte e uso prévio do crédito. O catálogo foi pesquisado em 21/10/2026 e deve ser versionado quando as regras mudarem.
 
 A triagem ainda é limitada aos itens C170 que possuem chave de NF-e e número de item presentes nas duas bases. A ausência da chave ou do item no ICMS/IPI não gera, nesta etapa, um diagnóstico de documento ausente. C100, C175, abas divididas e versões retificadoras ainda precisam de fluxo próprio. A falta da aba 0000 ou de identificadores suficientes bloqueia a comparação de valores e aparece como cobertura indeterminada.
+
+O diagnóstico de ICMS-ST localiza valores informados sem aplicar alíquotas de PIS/COFINS ou declarar crédito. A coluna `regime_0110` preserva o código do período (1: não cumulativo; 2: cumulativo; 3: ambos). O resumo C175 mostra valores de vendas CFOP 5405, bases e contribuições escrituradas, mas não contém o ICMS-ST retido na aquisição. As grandezas de C100, C170 e C190 representam níveis diferentes e não devem ser somadas entre si. Elas ainda precisam de conciliação com notas fiscais do substituto, saídas tributadas, bloco M e possíveis retificações. Transferências são exibidas à parte e não entram automaticamente em hipótese de exclusão.
 
 O modelo de `sped_credito_app/calculos.py` não foi incorporado como cálculo de crédito porque subtrai ICMS-ST/DIFAL e estima PIS/COFINS por dentro sem verificar, por operação, o direito, a apuração nem o pagamento. Ele permanece referência para futuros cenários, sujeitos a validação jurídica.
 

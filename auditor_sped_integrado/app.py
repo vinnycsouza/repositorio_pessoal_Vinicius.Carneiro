@@ -13,12 +13,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from auditor_sped_integrado.catalogo import REGRAS
+from auditor_sped_integrado.diagnostico_st import (
+    diagnosticar_st_c100, diagnosticar_st_c170, diagnosticar_st_c190, diagnosticar_vendas_st_c175,
+)
 from auditor_sped_integrado.motor import TIPOS, inventariar_excel, triagem_c170
 
 
 def limpar_analises():
     st.session_state.pop("inventario", None)
     st.session_state.pop("achados", None)
+    st.session_state.pop("diagnostico_st", None)
+    st.session_state.pop("diagnostico_st_c100", None)
+    st.session_state.pop("diagnostico_st_c175", None)
+    st.session_state.pop("diagnostico_st_c190", None)
 
 
 st.set_page_config(page_title="Auditor SPED integrado", layout="wide")
@@ -119,6 +126,97 @@ with aba_entrada:
                 "Baixar achados revisados CSV",
                 data=revisado.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig"),
                 file_name="achados_sped_revisados.csv", mime="text/csv",
+            )
+
+    st.subheader("3. ICMS-ST escriturado")
+    st.write("Verifica separadamente os itens C170 e as notas C100 de Contribuições, inclusive abas divididas. Transferências aparecem separadas nos itens. Estes valores ainda não são crédito recuperável.")
+    if st.button("Diagnosticar ICMS-ST nos itens C170"):
+        try:
+            if arquivo_pis is None:
+                raise ValueError("Informe o Excel de EFD-Contribuições.")
+            with st.spinner("Lendo itens C170 e somando o ICMS-ST destacado..."):
+                st.session_state["diagnostico_st"] = diagnosticar_st_c170(arquivo_pis[0])
+        except Exception as erro:
+            st.error(str(erro))
+    if "diagnostico_st" in st.session_state:
+        quadro_st = st.session_state["diagnostico_st"]
+        if quadro_st.empty:
+            st.info("Não foram encontrados itens de entrada com ICMS-ST positivo no C170. Isso não prova ausência de ST; confira a nota de aquisição emitida pelo substituto.")
+        else:
+            resumo_st = quadro_st.groupby("tipo_operacao", as_index=False).agg(
+                itens_com_st=("itens_com_st", "sum"),
+                valor_icms_st_destacado=("valor_icms_st_destacado", "sum"),
+            )
+            st.dataframe(resumo_st, use_container_width=True, hide_index=True)
+            st.dataframe(quadro_st, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Baixar diagnóstico de ICMS-ST CSV",
+                data=quadro_st.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="diagnostico_icms_st_c170.csv", mime="text/csv",
+            )
+    if st.button("Diagnosticar ICMS-ST nas notas C100"):
+        try:
+            if arquivo_pis is None:
+                raise ValueError("Informe o Excel de EFD-Contribuições.")
+            with st.spinner("Lendo todas as abas C100 e somando o ICMS-ST destacado..."):
+                st.session_state["diagnostico_st_c100"] = diagnosticar_st_c100(arquivo_pis[0])
+        except Exception as erro:
+            st.error(str(erro))
+    if "diagnostico_st_c100" in st.session_state:
+        quadro_c100 = st.session_state["diagnostico_st_c100"]
+        if quadro_c100.empty:
+            st.info("Não foram encontradas notas C100 com ICMS-ST positivo no arquivo informado. Isso não prova ausência de ST nas aquisições.")
+        else:
+            st.dataframe(quadro_c100, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Baixar diagnóstico de ICMS-ST em C100 CSV",
+                data=quadro_c100.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="diagnostico_icms_st_c100.csv", mime="text/csv",
+            )
+    st.write("As vendas com CFOP 5405 são resumidas à parte pelo C175. O registro informa PIS/COFINS, mas não o valor de ICMS-ST retido na aquisição.")
+    if st.button("Resumir vendas CFOP 5405 no C175"):
+        try:
+            if arquivo_pis is None:
+                raise ValueError("Informe o Excel de EFD-Contribuições.")
+            with st.spinner("Lendo todas as abas C175 e separando CST e alíquotas..."):
+                st.session_state["diagnostico_st_c175"] = diagnosticar_vendas_st_c175(arquivo_pis[0])
+        except Exception as erro:
+            st.error(str(erro))
+    if "diagnostico_st_c175" in st.session_state:
+        quadro_c175 = st.session_state["diagnostico_st_c175"]
+        if quadro_c175.empty:
+            st.info("Não foram encontrados registros C175 com CFOP 5405.")
+        else:
+            resumo_c175 = quadro_c175.groupby(["cst_pis", "cst_cofins"], as_index=False).agg(
+                registros_c175=("registros_c175", "sum"), valor_operacao=("valor_operacao", "sum"),
+                valor_pis=("valor_pis", "sum"), valor_cofins=("valor_cofins", "sum"),
+            )
+            st.dataframe(resumo_c175, use_container_width=True, hide_index=True)
+            st.dataframe(quadro_c175, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Baixar resumo de vendas CFOP 5405 CSV",
+                data=quadro_c175.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="vendas_cfop_5405_c175.csv", mime="text/csv",
+            )
+    if st.button("Verificar ICMS-ST agregado C190 no ICMS/IPI"):
+        try:
+            if arquivo_icms is None:
+                raise ValueError("Informe o Excel de EFD ICMS/IPI.")
+            with st.spinner("Lendo C190 do ICMS/IPI..."):
+                st.session_state["diagnostico_st_c190"] = diagnosticar_st_c190(arquivo_icms[0])
+        except Exception as erro:
+            st.error(str(erro))
+    if "diagnostico_st_c190" in st.session_state:
+        quadro_c190 = st.session_state["diagnostico_st_c190"]
+        st.caption("O C190 é agregado por documento e CFOP. Seus valores não devem ser somados aos de C100/C170 nem presumidos como ST da aquisição.")
+        if quadro_c190.empty:
+            st.info("Não foram encontrados valores positivos de ICMS-ST no C190 informado.")
+        else:
+            st.dataframe(quadro_c190, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Baixar diagnóstico C190 CSV",
+                data=quadro_c190.to_csv(index=False, sep=";", decimal=",", encoding="utf-8-sig").encode("utf-8-sig"),
+                file_name="diagnostico_icms_st_c190.csv", mime="text/csv",
             )
 
 with aba_regras:
