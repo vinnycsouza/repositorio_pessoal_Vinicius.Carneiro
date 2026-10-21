@@ -4,6 +4,8 @@
 
 O auditor deve separar três grandezas: imposto destacado/escriturado, diferença teórica de apuração e valor efetivamente passível de recuperação. Nenhuma soma de ICMS-ST em entradas é, por si, crédito de PIS/COFINS ou restituição estadual de ICMS-ST.
 
+O auditor apenas analisa e documenta possíveis exclusões; qualquer retificação do SPED ou de declarações é responsabilidade da contabilidade da empresa. O filtro manual C175 + CFOP 5405 + CST PIS/COFINS 01 é a triagem inicial das receitas escrituradas, não a medida isolada do ICMS-ST excluível. A [leitura crítica do PDF recebido](referencias/LEITURA_CRITICA_PADRAO_ICMS_ST.md) registra as condições para transformar esse indício em cálculo.
+
 ## Fontes já disponíveis
 
 - EFD-Contribuições: 0000, C010, 0110, C100 (duas abas), C170, C175 (duas abas), M100/M500, M200/M600 e M210/M610.
