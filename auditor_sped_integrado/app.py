@@ -35,18 +35,31 @@ aba_entrada, aba_regras, aba_metodo = st.tabs(["Análise", "Catálogo de regras"
 
 with aba_entrada:
     st.subheader("1. Arquivos Excel convertidos pelo Sysconv")
-    st.write("Selecione os Excel baixados em seu computador. O inventário registra nome, hash SHA-256 e quantidade de linhas por aba.")
-    arquivos = {
-        tipo: st.file_uploader(f"Excel {tipo}", type=["xlsx", "xlsm"], key=f"excel_{i}", on_change=limpar_analises)
-        for i, tipo in enumerate(TIPOS)
-    }
+    st.write("Para cada escrituração, selecione o Excel ou informe seu caminho completo. O inventário registra nome, hash SHA-256 e quantidade de linhas por aba.")
+    entradas = {}
+    for i, tipo in enumerate(TIPOS):
+        modo = st.radio(
+            f"Entrada {tipo}", ["Selecionar arquivo", "Informar caminho"],
+            key=f"modo_excel_{i}", horizontal=True, on_change=limpar_analises,
+        )
+        if modo == "Selecionar arquivo":
+            arquivo = st.file_uploader(
+                f"Excel {tipo}", type=["xlsx", "xlsm"], key=f"excel_{i}", on_change=limpar_analises,
+            )
+            entradas[tipo] = (arquivo.getvalue(), arquivo.name) if arquivo is not None else None
+        else:
+            caminho = st.text_input(
+                f"Caminho do Excel {tipo}", key=f"caminho_excel_{i}",
+                placeholder=r"C:\Users\usuario\Downloads\arquivo.xlsx", on_change=limpar_analises,
+            ).strip().strip('"')
+            entradas[tipo] = (caminho, Path(caminho).name) if caminho else None
     if st.button("Inventariar Excel"):
         try:
-            if not any(arquivo is not None for arquivo in arquivos.values()):
+            if not any(entrada is not None for entrada in entradas.values()):
                 raise ValueError("Informe ao menos um arquivo Excel.")
             inventario = [
-                inventariar_excel(arquivo.getvalue(), tipo, arquivo.name)
-                for tipo, arquivo in arquivos.items() if arquivo is not None
+                inventariar_excel(entrada[0], tipo, entrada[1])
+                for tipo, entrada in entradas.items() if entrada is not None
             ]
             st.session_state["inventario"] = inventario
         except Exception as erro:
@@ -64,16 +77,16 @@ with aba_entrada:
         )
 
     st.subheader("2. Triagem dos itens C170")
-    st.write("A triagem usa os Excel de ICMS/IPI e Contribuições selecionados acima. O cruzamento exige chave de NF-e de 44 dígitos e número do item únicos em cada base.")
-    arquivo_icms = arquivos["EFD ICMS/IPI"]
-    arquivo_pis = arquivos["EFD-Contribuições"]
+    st.write("A triagem usa os Excel de ICMS/IPI e Contribuições informados acima. O cruzamento exige chave de NF-e de 44 dígitos e número do item únicos em cada base.")
+    arquivo_icms = entradas["EFD ICMS/IPI"]
+    arquivo_pis = entradas["EFD-Contribuições"]
     if st.button("Executar triagem", type="primary"):
         try:
             if arquivo_icms is None or arquivo_pis is None:
-                raise ValueError("Selecione os Excel de ICMS/IPI e EFD-Contribuições.")
+                raise ValueError("Informe os Excel de ICMS/IPI e EFD-Contribuições.")
             st.session_state["achados"] = triagem_c170(
-                arquivo_icms.getvalue(), arquivo_pis.getvalue(), tolerancia,
-                nome_icms=arquivo_icms.name, nome_pis=arquivo_pis.name,
+                arquivo_icms[0], arquivo_pis[0], tolerancia,
+                nome_icms=arquivo_icms[1], nome_pis=arquivo_pis[1],
             )
         except Exception as erro:
             st.error(str(erro))
