@@ -41,13 +41,16 @@ class RelatorioExcelTest(unittest.TestCase):
         )
         livro = load_workbook(BytesIO(dados), read_only=True, data_only=True)
         self.assertEqual(livro.sheetnames, [
-            "Resumo", "C175_5405", "ST_C170", "ST_C100", "ST_C190",
+            "Resumo", "C175_5405", "Simulacao_UF", "Premissas_UF", "Historico_Regime",
+            "ST_C170", "ST_C100", "ST_C190",
             "Triagem_C170", "Inventario", "Metodo",
         ])
         resumo = livro["Resumo"]
+        colunas = {celula.value: celula.column_letter for celula in resumo[6]}
         self.assertEqual(resumo["F7"].value, 1.32)
-        self.assertEqual(resumo["I7"].value, 7.4)
-        self.assertIsNone(resumo["L7"].value)
-        self.assertEqual(resumo["N7"].value, "Possível recuperação em análise")
+        self.assertEqual(resumo[f"{colunas['contribuicoes_sob_analise']}7"].value, 7.4)
+        self.assertIsNone(resumo[f"{colunas['simulacao_pis_cofins_uf']}7"].value)
+        self.assertIsNone(resumo[f"{colunas['credito_pis_calculado']}7"].value)
+        self.assertEqual(resumo[f"{colunas['estado']}7"].value, "Possível recuperação em análise")
         self.assertEqual(livro["Inventario"]["B2"].value, "origem.xlsx")
         livro.close()

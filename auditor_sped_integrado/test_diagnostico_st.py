@@ -35,12 +35,13 @@ class DiagnosticoSTTest(unittest.TestCase):
             with pd.ExcelWriter(arquivo) as livro:
                 pd.DataFrame([base]).to_excel(livro, sheet_name="C175 - Analítico", index=False)
                 pd.DataFrame([{**base, "CST PIS": "04", "CST COFINS": "04", "Valor PIS": 0,
-                               "Valor COFINS": 0}, {**base, "CFOP": 5102}]).to_excel(
+                               "Valor COFINS": 0}, {**base, "CFOP": 5102}, base]).to_excel(
                                    livro, sheet_name="C175 - Analítico--2", index=False)
             resultado = diagnosticar_vendas_st_c175(arquivo)
             self.assertEqual(resultado["registros_c175"].sum(), 2)
             self.assertEqual(set(resultado["cst_pis"]), {"01", "04"})
             self.assertAlmostEqual(resultado["valor_pis"].sum(), 1.65)
+            self.assertEqual(resultado["registros_duplicados_entre_abas"].sum(), 1)
 
     def test_c100_le_aba_de_continuacao(self):
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as pasta:

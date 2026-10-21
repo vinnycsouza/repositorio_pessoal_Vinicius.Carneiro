@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
+from hashlib import blake2b
 from io import BytesIO
 from pathlib import Path
 import re
@@ -27,15 +28,25 @@ COLUNAS_C100 = (
     "documentos_com_st", "valor_icms_st_destacado", "primeira_linha_c100",
 )
 COLUNAS_C175 = (
-    "competencia", "cnpj_estabelecimento", "cfop", "cst_pis", "cst_cofins",
+    "competencia", "cnpj_estabelecimento", "uf_nfe", "chave_conferida",
+    "regime_0110", "cfop", "cst_pis", "cst_cofins",
     "aliquota_pis", "aliquota_cofins", "registros_c175", "valor_operacao",
-    "base_pis", "valor_pis", "base_cofins", "valor_cofins", "primeira_aba", "primeira_linha_c175",
+    "valor_desconto", "base_pis", "valor_pis", "base_cofins", "valor_cofins",
+    "registros_base_conferida", "base_pis_conferida", "base_cofins_conferida",
+    "valor_pis_conferido", "valor_cofins_conferido", "registros_base_divergente",
+    "registros_chave_invalida", "registros_duplicados_entre_abas",
+    "primeira_aba", "primeira_linha_c175",
 )
 COLUNAS_C190 = (
     "competencia", "cnpj_estabelecimento", "cfop", "indicador_operacao",
     "registros_c190", "valor_icms_st_destacado", "primeira_linha_c190",
 )
 TRANSFERENCIAS = {"1152", "1409", "2152", "2409", "5152", "5409", "6152", "6409"}
+CODIGOS_UF = {
+    "11", "12", "13", "14", "15", "16", "17", "21", "22", "23", "24", "25",
+    "26", "27", "28", "29", "31", "32", "33", "35", "41", "42", "43",
+    "50", "51", "52", "53",
+}
 
 
 def _slug(valor: object) -> str:
@@ -60,24 +71,35 @@ def _decimal(valor: object) -> Decimal:
         raise ValueError(f"Valor de ICMS-ST inválido: {valor}") from erro
 
 
+def _regimes_0110(livro) -> dict[str, str]:
+    if "0110" not in livro.sheetnames:
+        return {}
+    aba = livro["0110"]
+    aba.reset_dimensions()
+    linhas = aba.iter_rows(values_only=True)
+    cabecalho = next(linhas)
+    mes_i, ano_i = _indice(cabecalho, "Mês"), _indice(cabecalho, "Ano")
+    regime_i = _indice(cabecalho, "COD_INC_TRIB")
+    regimes = {}
+    for linha in linhas:
+        periodo = _competencia(linha[mes_i], linha[ano_i])
+        if not periodo:
+            continue
+        codigo = str(linha[regime_i] or "").strip().removesuffix(".0")
+        if codigo not in {"1", "2", "3"}:
+            raise ValueError(f"Regime 0110 inválido em {periodo}: {codigo}")
+        if periodo in regimes and regimes[periodo] != codigo:
+            raise ValueError(f"Regimes 0110 conflitantes em {periodo}.")
+        regimes[periodo] = codigo
+    return regimes
+
+
 def diagnosticar_st_c170(arquivo: str | Path | bytes) -> pd.DataFrame:
     """Soma ICMS-ST positivo em entradas C170, sem inferir direito a crédito."""
     fonte = BytesIO(arquivo) if isinstance(arquivo, bytes) else Path(arquivo)
     livro = load_workbook(fonte, read_only=True, data_only=True)
     try:
-        aba_0110 = next((nome for nome in livro.sheetnames if nome == "0110"), None)
-        regimes = {}
-        if aba_0110:
-            aba = livro[aba_0110]
-            aba.reset_dimensions()
-            linhas = aba.iter_rows(values_only=True)
-            cabecalho = next(linhas)
-            mes_i, ano_i = _indice(cabecalho, "Mês"), _indice(cabecalho, "Ano")
-            regime_i = _indice(cabecalho, "COD_INC_TRIB")
-            for linha in linhas:
-                periodo = _competencia(linha[mes_i], linha[ano_i])
-                if periodo:
-                    regimes[periodo] = str(linha[regime_i] or "").strip()
+        regimes = _regimes_0110(livro)
 
         nome_c170 = next((nome for nome in livro.sheetnames if _slug(nome).startswith("c170")), None)
         if not nome_c170:
@@ -192,8 +214,15 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
         abas = [nome for nome in livro.sheetnames if _slug(nome).startswith("c175")]
         if not abas:
             raise ValueError("Aba C175 não encontrada na EFD-Contribuições.")
+        regimes = _regimes_0110(livro)
+        assinaturas_primeira_aba = {}
         grupos = defaultdict(lambda: {"registros": 0, "operacao": Decimal("0"), "base_pis": Decimal("0"),
                                      "pis": Decimal("0"), "base_cofins": Decimal("0"), "cofins": Decimal("0"),
+                                     "desconto": Decimal("0"), "conferidos": 0, "divergentes": 0,
+                                     "chaves_invalidas": 0, "duplicados": 0,
+                                     "base_pis_ok": Decimal("0"),
+                                     "base_cofins_ok": Decimal("0"), "pis_ok": Decimal("0"),
+                                     "cofins_ok": Decimal("0"),
                                      "primeira_aba": None, "primeira_linha": None})
         for nome in abas:
             aba = livro[nome]
@@ -208,6 +237,14 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
             aliquota_pis_i = _indice(cabecalho, "Aliquota PIS perc.")
             aliquota_cofins_i = _indice(cabecalho, "Aliquota COFINS perc.")
             operacao_i = _indice(cabecalho, "Valor da Operação")
+            try:
+                desconto_i = _indice(cabecalho, "Valor do Desconto")
+            except ValueError:
+                desconto_i = None
+            try:
+                chave_i = _indice(cabecalho, "Chave(C100)", "Chave", "CHV_NFE")
+            except ValueError:
+                chave_i = None
             base_pis_i, pis_i = _indice(cabecalho, "Valor BC PIS"), _indice(cabecalho, "Valor PIS")
             base_cofins_i, cofins_i = _indice(cabecalho, "Valor BC COFINS"), _indice(cabecalho, "Valor COFINS")
             for numero_linha, linha in enumerate(linhas, start=2):
@@ -224,29 +261,75 @@ def diagnosticar_vendas_st_c175(arquivo: str | Path | bytes, cfops: set[str] | N
                 cst_cofins = str(linha[cst_cofins_i] or "").strip().zfill(2)
                 aliquota_pis = _decimal(linha[aliquota_pis_i])
                 aliquota_cofins = _decimal(linha[aliquota_cofins_i])
-                grupo = grupos[(periodo, cnpj, cfop, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins)]
+                chave = re.sub(r"\D", "", str(linha[chave_i] or "")) if chave_i is not None else ""
+                chave_valida = (
+                    len(chave) == 44 and chave[:2] in CODIGOS_UF and chave[6:20] == cnpj
+                    and chave[2:6] == periodo[2:4] + periodo[5:7]
+                )
+                # A UF da chave é preservada mesmo quando a validação completa falha.
+                uf_nfe = chave[:2] if len(chave) == 44 else ""
+                grupo = grupos[(periodo, cnpj, uf_nfe, chave_valida, regimes.get(periodo, ""),
+                                 cfop, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins)]
+                if cst_pis == "01" and cst_cofins == "01" and len(abas) > 1:
+                    assinatura = blake2b(repr(tuple(linha)).encode("utf-8"), digest_size=16).digest()
+                    primeira_aba = assinaturas_primeira_aba.setdefault(assinatura, nome)
+                    if primeira_aba != nome:
+                        grupo["duplicados"] += 1
+                        continue
                 grupo["registros"] += 1
-                grupo["operacao"] += _decimal(linha[operacao_i])
-                grupo["base_pis"] += _decimal(linha[base_pis_i])
-                grupo["pis"] += _decimal(linha[pis_i])
-                grupo["base_cofins"] += _decimal(linha[base_cofins_i])
-                grupo["cofins"] += _decimal(linha[cofins_i])
+                operacao = _decimal(linha[operacao_i])
+                desconto = _decimal(linha[desconto_i]) if desconto_i is not None else Decimal("0")
+                base_pis = _decimal(linha[base_pis_i])
+                pis = _decimal(linha[pis_i])
+                base_cofins = _decimal(linha[base_cofins_i])
+                cofins = _decimal(linha[cofins_i])
+                grupo["operacao"] += operacao
+                grupo["desconto"] += desconto
+                grupo["base_pis"] += base_pis
+                grupo["pis"] += pis
+                grupo["base_cofins"] += base_cofins
+                grupo["cofins"] += cofins
+                if (
+                    desconto_i is not None
+                    and abs(operacao - desconto - base_pis) <= Decimal("0.01")
+                    and abs(base_pis - base_cofins) <= Decimal("0.01")
+                ):
+                    grupo["conferidos"] += 1
+                    grupo["base_pis_ok"] += base_pis
+                    grupo["base_cofins_ok"] += base_cofins
+                    grupo["pis_ok"] += pis
+                    grupo["cofins_ok"] += cofins
+                else:
+                    grupo["divergentes"] += 1
+                if not chave_valida:
+                    grupo["chaves_invalidas"] += 1
                 if grupo["primeira_linha"] is None:
                     grupo["primeira_aba"], grupo["primeira_linha"] = nome, numero_linha
         saida = [
             {
-                "competencia": periodo, "cnpj_estabelecimento": cnpj, "cfop": cfop,
+                "competencia": periodo, "cnpj_estabelecimento": cnpj, "uf_nfe": uf_nfe,
+                "chave_conferida": chave_valida,
+                "regime_0110": regime, "cfop": cfop,
                 "cst_pis": cst_pis, "cst_cofins": cst_cofins,
                 "aliquota_pis": float(aliquota_pis), "aliquota_cofins": float(aliquota_cofins),
                 "registros_c175": dados["registros"],
                 "valor_operacao": float(dados["operacao"].quantize(Decimal("0.01"))),
+                "valor_desconto": float(dados["desconto"].quantize(Decimal("0.01"))),
                 "base_pis": float(dados["base_pis"].quantize(Decimal("0.01"))),
                 "valor_pis": float(dados["pis"].quantize(Decimal("0.01"))),
                 "base_cofins": float(dados["base_cofins"].quantize(Decimal("0.01"))),
                 "valor_cofins": float(dados["cofins"].quantize(Decimal("0.01"))),
+                "registros_base_conferida": dados["conferidos"],
+                "base_pis_conferida": float(dados["base_pis_ok"].quantize(Decimal("0.01"))),
+                "base_cofins_conferida": float(dados["base_cofins_ok"].quantize(Decimal("0.01"))),
+                "valor_pis_conferido": float(dados["pis_ok"].quantize(Decimal("0.01"))),
+                "valor_cofins_conferido": float(dados["cofins_ok"].quantize(Decimal("0.01"))),
+                "registros_base_divergente": dados["divergentes"],
+                "registros_chave_invalida": dados["chaves_invalidas"],
+                "registros_duplicados_entre_abas": dados["duplicados"],
                 "primeira_aba": dados["primeira_aba"], "primeira_linha_c175": dados["primeira_linha"],
             }
-            for (periodo, cnpj, cfop, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins), dados in grupos.items()
+            for (periodo, cnpj, uf_nfe, chave_valida, regime, cfop, cst_pis, cst_cofins, aliquota_pis, aliquota_cofins), dados in grupos.items()
         ]
         return pd.DataFrame(saida, columns=COLUNAS_C175).sort_values(
             ["competencia", "cnpj_estabelecimento", "cfop", "cst_pis", "cst_cofins"], ignore_index=True

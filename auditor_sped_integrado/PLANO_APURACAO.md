@@ -6,6 +6,8 @@ O auditor deve separar três grandezas: imposto destacado/escriturado, diferenç
 
 O auditor apenas analisa e documenta possíveis exclusões; qualquer retificação do SPED ou de declarações é responsabilidade da contabilidade da empresa. O filtro manual C175 + CFOP 5405 + CST PIS/COFINS 01 é a triagem inicial das receitas escrituradas, não a medida isolada do ICMS-ST excluível. A [leitura crítica do PDF recebido](referencias/LEITURA_CRITICA_PADRAO_ICMS_ST.md) registra as condições para transformar esse indício em cálculo.
 
+A simulação preliminar pela alíquota interna geral da UF fica em coluna própria, distinta do ST documentado e do crédito calculado. O piloto histórico inclui PE, conforme a [Lei 15.730/2016, art. 15](https://www.sefaz.pe.gov.br/Legislacao/Tributaria/Documents/Legislacao/Leis_Tributarias/2016/Lei15730_2016.htm), e MT, conforme a [Lei 7.098/1998, art. 14](https://app1.sefaz.mt.gov.br/Sistema/legislacao/legislacaotribut.nsf/c83fc8b160f5810b032567550064fd41/cc9c3b9886404baa0325678b0043a842). O regime PIS/COFINS vem do 0110 por competência, ou de histórico informado quando ausente, e a alíquota efetiva da linha C175. Sem essas evidências ou com duplicação entre abas, não há simulação numérica. A alíquota geral não substitui as regras específicas da mercadoria nem o ST comprovado na nota.
+
 ## Fontes já disponíveis
 
 - EFD-Contribuições: 0000, C010, 0110, C100 (duas abas), C170, C175 (duas abas), M100/M500, M200/M600 e M210/M610.
