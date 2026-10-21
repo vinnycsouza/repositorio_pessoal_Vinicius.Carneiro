@@ -6,7 +6,8 @@ import pandas as pd
 
 from auditor_sped_integrado.diagnostico_st import diagnosticar_vendas_st_c175
 from auditor_sped_integrado.premissas_icms import (
-    buscar_premissa, simular_potencial, validar_historico_regime,
+    buscar_premissa, simular_potencial, tabela_panorama_anual,
+    validar_historico_regime,
 )
 
 
@@ -34,6 +35,12 @@ class PremissasICMSTest(unittest.TestCase):
         self.assertEqual(estimativa["fonte_regime"], "Histórico informado")
         self.assertEqual(estimativa["codigo_regime_calculo"], "2")
         self.assertAlmostEqual(estimativa["total_simulado"], 0.66)
+        self.assertAlmostEqual(simular_potencial(base, historico, "PE").iloc[0]["total_simulado"], 0.66)
+        uf_divergente = simular_potencial(base, historico, "MT").iloc[0]
+        self.assertIsNone(uf_divergente["total_simulado"])
+        self.assertIn("difere da UF selecionada", uf_divergente["estado_simulacao"])
+        with self.assertRaisesRegex(ValueError, "UF selecionada inválida"):
+            simular_potencial(base, historico, "ZZ")
         base["regime_0110"] = float("nan")
         self.assertAlmostEqual(simular_potencial(base, historico).iloc[0]["total_simulado"], 0.66)
         base["regime_0110"] = "1"
@@ -54,6 +61,16 @@ class PremissasICMSTest(unittest.TestCase):
         self.assertEqual(buscar_premissa("26", "2024-01").aliquota_geral, 20.5)
         self.assertEqual(buscar_premissa("51", "2024-01").aliquota_geral, 17)
         self.assertIsNone(buscar_premissa("35", "2024-01"))
+        panorama = tabela_panorama_anual()
+        self.assertEqual(len(panorama), 27 * 9)
+        self.assertEqual(
+            panorama.loc[(panorama["uf"] == "SP") & (panorama["ano"] == 2024),
+                         "aliquota_geral_referencia"].iloc[0], 18,
+        )
+        self.assertTrue(pd.isna(
+            panorama.loc[(panorama["uf"] == "SP") & (panorama["ano"] == 2018),
+                         "aliquota_geral_referencia"].iloc[0]
+        ))
 
     def test_regime_e_aliquotas_por_competencia_com_bloqueios(self):
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as pasta:

@@ -41,7 +41,7 @@ class RelatorioExcelTest(unittest.TestCase):
         )
         livro = load_workbook(BytesIO(dados), read_only=True, data_only=True)
         self.assertEqual(livro.sheetnames, [
-            "Resumo", "C175_5405", "Simulacao_UF", "Premissas_UF", "Historico_Regime",
+            "Resumo", "C175_5405", "Simulacao_UF", "Premissas_UF", "Panorama_UF", "Historico_Regime",
             "ST_C170", "ST_C100", "ST_C190",
             "Triagem_C170", "Inventario", "Metodo",
         ])

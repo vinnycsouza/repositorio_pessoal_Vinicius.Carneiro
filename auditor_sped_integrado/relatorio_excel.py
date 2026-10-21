@@ -10,7 +10,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from auditor_sped_integrado.premissas_icms import COLUNAS_SIMULACAO, PeriodoRegime, tabela_premissas
+from auditor_sped_integrado.premissas_icms import (
+    COLUNAS_SIMULACAO, PeriodoRegime, tabela_panorama_anual, tabela_premissas,
+)
 
 
 COR_TITULO = "17365D"
@@ -123,6 +125,7 @@ def gerar_relatorio_excel(
     gerado_em: datetime | None = None,
     simulacao: pd.DataFrame | None = None,
     historico_regime: tuple[PeriodoRegime, ...] = (),
+    uf_selecionada: str | None = None,
 ) -> bytes:
     """Gera livro com resumo de candidatos e abas de evidência rastreável."""
     livro = Workbook()
@@ -136,6 +139,8 @@ def gerar_relatorio_excel(
     resumo["B2"] = (gerado_em or datetime.now()).strftime("%d/%m/%Y %H:%M")
     resumo["D2"] = "IRPJ/CSLL declarado"
     resumo["E2"] = regime
+    resumo["G2"] = "UF da simulação"
+    resumo["H2"] = uf_selecionada or "Automática pela NF-e"
     resumo["A3"] = "Filtro principal: C175, CFOP 5405, CST PIS 01 e CST COFINS 01."
     resumo.merge_cells("A3:S3")
     resumo["A4"] = "A simulação pela alíquota geral da UF é exploratória e distinta do ICMS-ST da nota; crédito calculado exige vínculo documental."
@@ -167,6 +172,7 @@ def gerar_relatorio_excel(
     _aba_quadro(livro, "C175_5405", vendas_c175)
     _aba_quadro(livro, "Simulacao_UF", simulacao if simulacao is not None else pd.DataFrame(columns=COLUNAS_SIMULACAO))
     _aba_quadro(livro, "Premissas_UF", tabela_premissas())
+    _aba_quadro(livro, "Panorama_UF", tabela_panorama_anual())
     _aba_quadro(livro, "Historico_Regime", pd.DataFrame(
         [{"inicio": p.inicio, "fim": p.fim, "regime": p.regime} for p in historico_regime],
         columns=["inicio", "fim", "regime"],

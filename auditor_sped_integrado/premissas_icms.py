@@ -20,6 +20,52 @@ FONTE_MT = (
     "c83fc8b160f5810b032567550064fd41/cc9c3b9886404baa0325678b0043a842"
 )
 
+UFS = {
+    "11": "RO", "12": "AC", "13": "AM", "14": "RR", "15": "PA", "16": "AP", "17": "TO",
+    "21": "MA", "22": "PI", "23": "CE", "24": "RN", "25": "PB", "26": "PE", "27": "AL",
+    "28": "SE", "29": "BA", "31": "MG", "32": "ES", "33": "RJ", "35": "SP", "41": "PR",
+    "42": "SC", "43": "RS", "50": "MS", "51": "MT", "52": "GO", "53": "DF",
+}
+CODIGOS_POR_UF = {uf: codigo for codigo, uf in UFS.items()}
+
+# Panorama anual publicado pelo Comsefaz (Tabela 21, 2022–2025).
+# O quadro não fornece o dia de início de cada mudança: serve para pesquisa,
+# nunca como fonte de uma premissa mensal aplicada ao cálculo.
+FONTE_PANORAMA = (
+    "https://comsefaz.org.br/novo/wp-content/uploads/2025/06/"
+    "boletim_fiscal_dos_estados_2_edicao_v2.pdf"
+)
+PANORAMA_2022_2025 = {
+    "AC": (17, 19, 19, 19), "AL": (18, 19, 19, 19),
+    "AM": (18, 20, 20, 20), "AP": (18, 18, 18, 18),
+    "BA": (18, 19, 20.5, 20.5), "CE": (18, 18, 20, 20),
+    "DF": (18, 18, 20, 20), "ES": (17, 17, 17, 17),
+    "GO": (17, 17, 19, 19), "MA": (18, 20, 22, 23),
+    "MG": (18, 18, 18, 18), "MS": (17, 17, 17, 17),
+    "MT": (17, 17, 17, 17), "PA": (17, 19, 19, 19),
+    "PB": (18, 18, 20, 20), "PE": (18, 18, 20.5, 20.5),
+    "PI": (18, 21, 21, 22.5), "PR": (18, 19, 19.5, 19.5),
+    "RJ": (18, 20, 20, 20), "RN": (18, 20, 18, 20),
+    "RO": (17.5, 17.5, 19.5, 19.5), "RR": (17, 20, 20, 20),
+    "RS": (17, 17, 17, 17), "SC": (17, 17, 17, 17),
+    "SE": (18, 19, 19, 19), "SP": (18, 18, 18, 18),
+    "TO": (18, 18, 20, 20),
+}
+
+
+def tabela_panorama_anual() -> pd.DataFrame:
+    """Matriz de consulta; números anuais sem vigência exata não entram na simulação."""
+    return pd.DataFrame([
+        {
+            "uf": uf, "ano": ano,
+            "aliquota_geral_referencia": PANORAMA_2022_2025.get(uf, (None,) * 4)[ano - 2022]
+            if 2022 <= ano <= 2025 else None,
+            "uso_no_calculo": "Não: requer vigência por data e fonte estadual",
+            "fonte": FONTE_PANORAMA if 2022 <= ano <= 2025 else "Pesquisa pendente",
+        }
+        for uf in sorted(CODIGOS_POR_UF) for ano in range(2018, 2027)
+    ])
+
 
 @dataclass(frozen=True)
 class PremissaICMS:
@@ -130,8 +176,11 @@ def _texto(valor: object) -> str:
 
 def simular_potencial(
     c175: pd.DataFrame, historico_regime: tuple[PeriodoRegime, ...] = (),
+    uf_selecionada: str | None = None,
 ) -> pd.DataFrame:
     """Cenário por alíquota geral da UF, separado do ICMS-ST documental."""
+    if uf_selecionada is not None and uf_selecionada not in CODIGOS_POR_UF:
+        raise ValueError(f"UF selecionada inválida: {uf_selecionada}")
     if c175.empty:
         return pd.DataFrame(columns=COLUNAS_SIMULACAO)
     linhas = []
@@ -157,12 +206,15 @@ def simular_potencial(
         aliquotas_compativeis = aliquotas in pares_permitidos
         codigo_uf = _texto(item.get("uf_nfe"))
         regra = buscar_premissa(codigo_uf, str(item["competencia"]))
+        uf_nfe = UFS.get(codigo_uf, "")
         conferidos = int(item.get("registros_base_conferida", 0))
         divergentes = int(item.get("registros_base_divergente", 0))
         chaves_invalidas = int(item.get("registros_chave_invalida", 0))
         duplicados = int(item.get("registros_duplicados_entre_abas", 0))
         estado = ""
-        if not regra:
+        if uf_selecionada and uf_nfe != uf_selecionada:
+            estado = f"UF da NF-e ({uf_nfe or '?'}) difere da UF selecionada ({uf_selecionada})"
+        elif not regra:
             estado = f"Sem premissa histórica verificada para UF {codigo_uf or '?'} / {item['competencia']}"
         elif duplicados:
             estado = "Registros repetidos entre abas; simulação bloqueada"
@@ -181,7 +233,8 @@ def simular_potencial(
         else:
             estado = "Simulação preliminar; ICMS-ST documental pendente"
         pode_simular = (
-            regra is not None and not duplicados and not chaves_invalidas
+            regra is not None and (not uf_selecionada or uf_nfe == uf_selecionada)
+            and not duplicados and not chaves_invalidas
             and not conflito_regime and codigo_calculo in REGIMES_0110
             and aliquotas_compativeis and conferidos > 0
         )
@@ -202,7 +255,7 @@ def simular_potencial(
             "competencia": item["competencia"],
             "cnpj_estabelecimento": item["cnpj_estabelecimento"],
             "codigo_uf_nfe": codigo_uf,
-            "uf": regra.uf if regra else "",
+            "uf": uf_nfe,
             "regime_0110": regime, "regime_declarado": declarado,
             "codigo_regime_calculo": codigo_calculo,
             "descricao_regime": REGIMES_0110.get(codigo_calculo, "Não informado"),

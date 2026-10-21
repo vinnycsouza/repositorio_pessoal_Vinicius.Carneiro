@@ -17,8 +17,13 @@ from auditor_sped_integrado.diagnostico_st import (
     diagnosticar_st_c100, diagnosticar_st_c170, diagnosticar_st_c190, diagnosticar_vendas_st_c175,
 )
 from auditor_sped_integrado.motor import COLUNAS as COLUNAS_TRIAGEM, TIPOS, inventariar_excel, triagem_c170
-from auditor_sped_integrado.premissas_icms import simular_potencial, validar_historico_regime
+from auditor_sped_integrado.premissas_icms import (
+    CODIGOS_POR_UF, simular_potencial, tabela_panorama_anual,
+    tabela_premissas, validar_historico_regime,
+)
 from auditor_sped_integrado.relatorio_excel import gerar_relatorio_excel, resumir_candidatos
+
+VERSAO_RESULTADO = 3
 
 
 def limpar_analises() -> None:
@@ -32,9 +37,36 @@ def moeda_br(valor: float) -> str:
 st.set_page_config(page_title="Auditor SPED integrado", layout="wide")
 st.title("Auditor SPED integrado")
 st.caption("Análise integrada dos Excel do Sysconv com relatório único de evidências.")
+resultado_guardado = st.session_state.get("resultado_auditoria")
+if resultado_guardado is not None and (
+    not isinstance(resultado_guardado, dict)
+    or resultado_guardado.get("versao") != VERSAO_RESULTADO
+):
+    limpar_analises()
+    st.info("O resultado em memória foi gerado por uma versão anterior. Execute novamente as análises com os arquivos já informados.")
 
 with st.sidebar:
     st.header("Contexto")
+    uf_escolha = st.selectbox(
+        "UF para a simulação", ["Automática pela chave da NF-e", *sorted(CODIGOS_POR_UF)],
+        on_change=limpar_analises,
+    )
+    uf_selecionada = None if uf_escolha.startswith("Automática") else uf_escolha
+    st.caption("A UF escolhida deve coincidir com a chave da NF-e. Premissas com vigência confirmada cobrem PE e MT. O relatório traz panorama anual das 27 UFs de 2022 a 2025 para consulta; ele não é usado no cálculo sem data de vigência.")
+    if uf_selecionada:
+        with st.expander("Alíquotas da UF selecionada"):
+            premissas_uf = tabela_premissas().loc[lambda q: q["uf"] == uf_selecionada]
+            if premissas_uf.empty:
+                st.warning("Ainda não há vigência estadual confirmada para simular esta UF.")
+            else:
+                st.dataframe(premissas_uf[["inicio", "fim", "aliquota_geral", "fonte"]], hide_index=True)
+            st.caption("Referência anual do Comsefaz; não aplicada automaticamente ao cálculo:")
+            st.dataframe(
+                tabela_panorama_anual().loc[
+                    lambda q: (q["uf"] == uf_selecionada) & q["ano"].between(2022, 2025),
+                    ["ano", "aliquota_geral_referencia"],
+                ], hide_index=True,
+            )
     regime = st.selectbox(
         "IRPJ/CSLL declarado", [
             "A confirmar por período", "Misto: real e presumido",
@@ -114,13 +146,15 @@ with aba_entrada:
                 st_c170 = diagnosticar_st_c170(arquivo_pis[0]) if tem_aba_pis("c170") else pd.DataFrame(columns=COLUNAS_ST_C170)
                 st_c100 = diagnosticar_st_c100(arquivo_pis[0]) if tem_aba_pis("c100") else pd.DataFrame(columns=COLUNAS_C100)
                 vendas_c175 = diagnosticar_vendas_st_c175(arquivo_pis[0])
-                simulacao = simular_potencial(vendas_c175, historico)
+                simulacao = simular_potencial(vendas_c175, historico, uf_selecionada)
                 st_c190 = diagnosticar_st_c190(arquivo_icms[0]) if arquivo_icms is not None and tem_aba_icms("c190") else pd.DataFrame(columns=COLUNAS_C190)
                 relatorio = gerar_relatorio_excel(
                     inventario, achados, st_c170, st_c100, vendas_c175, st_c190, regime,
                     simulacao=simulacao, historico_regime=historico,
+                    uf_selecionada=uf_selecionada,
                 )
                 st.session_state["resultado_auditoria"] = {
+                    "versao": VERSAO_RESULTADO,
                     "inventario": inventario,
                     "achados": achados,
                     "st_c170": st_c170,
