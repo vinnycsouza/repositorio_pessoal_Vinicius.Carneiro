@@ -4,10 +4,10 @@ Projeto local para organizar análises de possíveis recuperações tributárias
 
 ## Entradas
 
-- TXT originais de EFD ICMS/IPI, EFD-Contribuições, ECD e ECF: leitura em streaming, SHA-256 e contagem de registros;
-- Excel C170 convertido de EFD ICMS/IPI e EFD-Contribuições: triagem fiscal em nível de item.
+- Excel `.xlsx` ou `.xlsm` do Sysconv para EFD ICMS/IPI, EFD-Contribuições, ECD e ECF: hash SHA-256 e contagem de linhas por aba;
+- Abas C170 dos Excel de EFD ICMS/IPI e EFD-Contribuições: triagem fiscal em nível de item.
 
-Os TXT são inventariados. A triagem C170 ainda usa os Excel convertidos, pois os leiautes dos quatro SPED variam por tipo e ano. O programa **não** transforma o TXT original em C170 normalizado nesta versão.
+Os quatro Excel são inventariados. A triagem usa as abas C170 dos dois primeiros. ECD e ECF ainda não têm interpretação contábil automática nesta versão. A contagem do inventário considera a primeira linha preenchida de cada aba como cabeçalho.
 
 ## Saídas e segurança jurídica
 
@@ -28,11 +28,11 @@ python -m pip install -r auditor_sped_integrado/requirements.txt
 streamlit run auditor_sped_integrado/app.py
 ```
 
-Não coloque TXT, planilhas de clientes ou relatórios com dados fiscais sob controle de versão. A aplicação lê caminhos locais, não envia dados para serviços externos e só exporta arquivos quando o usuário aciona o botão de download.
+Não coloque planilhas de clientes ou relatórios com dados fiscais sob controle de versão. A aplicação lê caminhos locais, não envia dados para serviços externos e só exporta arquivos quando o usuário aciona o botão de download.
 
 ## Próximas integrações
 
-1. Interpretadores versionados por ano para os quatro TXT, com validação por leiaute oficial.
+1. Mapeamento versionado por ano das abas e colunas geradas pelo Sysconv para as quatro escriturações.
 2. Conciliação EFD-Contribuições × EFD ICMS/IPI × ECD × ECF e apurações declaradas.
 3. Pacotes de regras separados para União e cada UF, com vigência, precedentes, exceções e testes de regressão.
 4. Cálculo condicionado à evidência de recolhimento e à inexistência de aproveitamento anterior.

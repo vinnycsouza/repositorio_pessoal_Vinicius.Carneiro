@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from auditor_sped_integrado.catalogo import REGRAS
-from auditor_sped_integrado.motor import TIPOS, inventariar_sped, triagem_c170
+from auditor_sped_integrado.motor import TIPOS, inventariar_excel, triagem_c170
 
 
 st.set_page_config(page_title="Auditor SPED integrado", layout="wide")
@@ -29,36 +29,33 @@ with st.sidebar:
 aba_entrada, aba_regras, aba_metodo = st.tabs(["Análise", "Catálogo de regras", "Método e limites"])
 
 with aba_entrada:
-    st.subheader("1. Inventário dos TXT originais")
-    st.write("Informe os caminhos locais dos arquivos exportados pelo ReceitanetBX. O app lê os arquivos no computador e guarda no relatório somente nome, hash e contagem de registros.")
-    caminhos = {tipo: st.text_input(tipo, key=f"txt_{i}") for i, tipo in enumerate(TIPOS)}
-    if st.button("Inventariar TXT"):
+    st.subheader("1. Arquivos Excel convertidos pelo Sysconv")
+    st.write("Informe os caminhos dos Excel de cada escrituração. O inventário registra nome, hash SHA-256 e quantidade de linhas por aba.")
+    caminhos = {tipo: st.text_input(f"Excel {tipo}", key=f"excel_{i}") for i, tipo in enumerate(TIPOS)}
+    if st.button("Inventariar Excel"):
         try:
             if not any(caminhos.values()):
-                raise ValueError("Informe ao menos um TXT.")
-            inventario = [inventariar_sped(caminho, tipo) for tipo, caminho in caminhos.items() if caminho.strip()]
+                raise ValueError("Informe ao menos um arquivo Excel.")
+            inventario = [inventariar_excel(caminho, tipo) for tipo, caminho in caminhos.items() if caminho.strip()]
             st.session_state["inventario"] = inventario
         except Exception as erro:
             st.error(str(erro))
     if "inventario" in st.session_state:
         inventario = st.session_state["inventario"]
-        st.dataframe(pd.DataFrame([{k: v for k, v in item.items() if k != "registros"} for item in inventario]), use_container_width=True)
+        st.dataframe(pd.DataFrame([{k: v for k, v in item.items() if k != "abas"} for item in inventario]), use_container_width=True)
         for item in inventario:
-            with st.expander(f"Registros: {item['tipo']}"):
-                st.dataframe(pd.DataFrame(item["registros"].items(), columns=["Registro", "Ocorrências"]), use_container_width=True)
+            with st.expander(f"Abas: {item['tipo']}"):
+                st.dataframe(pd.DataFrame(item["abas"].items(), columns=["Aba", "Linhas de dados"]), use_container_width=True)
         st.download_button(
             "Baixar inventário JSON",
             data=json.dumps({"regime_informado": regime, "arquivos": inventario}, ensure_ascii=False, indent=2),
             file_name="inventario_sped.json", mime="application/json",
         )
 
-    st.subheader("2. Triagem de itens C170 convertidos em Excel")
-    st.write("Use os mesmos Excel dos projetos anteriores. O cruzamento exige chave de NF-e de 44 dígitos e número do item únicos em cada base.")
-    col1, col2 = st.columns(2)
-    with col1:
-        caminho_icms = st.text_input("Excel EFD ICMS/IPI")
-    with col2:
-        caminho_pis = st.text_input("Excel EFD-Contribuições")
+    st.subheader("2. Triagem dos itens C170")
+    st.write("A triagem usa os Excel de ICMS/IPI e Contribuições informados acima. O cruzamento exige chave de NF-e de 44 dígitos e número do item únicos em cada base.")
+    caminho_icms = caminhos["EFD ICMS/IPI"]
+    caminho_pis = caminhos["EFD-Contribuições"]
     if st.button("Executar triagem", type="primary"):
         try:
             if not caminho_icms or not caminho_pis:
@@ -106,12 +103,12 @@ with aba_metodo:
     st.markdown("""
 **Etapas de revisão**
 
-1. Preservar os quatro TXT originais e seus hashes SHA-256.
+1. Preservar os quatro Excel do Sysconv e seus hashes SHA-256.
 2. Conciliar as saídas por chave da NF-e e item, registrando linhas e arquivos de origem.
 3. Confirmar a hipótese jurídica, a condição do contribuinte e a regra vigente na competência.
 4. Conferir notas fiscais, apuração transmitida, recolhimentos, retificações e compensações anteriores.
 5. Somente após essa conferência, calcular e validar eventual valor recuperável.
 
-**Escopo implementado:** inventário dos quatro tipos de SPED e triagem de ICMS próprio e ICMS-ST em C170 convertido. ECD e ECF ainda são inventariados, sem interpretação contábil automática. O aplicativo não transmite arquivos, não retifica declarações e não gera pedido de compensação.
+**Escopo implementado:** inventário dos quatro tipos de Excel SPED e triagem de ICMS próprio e ICMS-ST em C170. ECD e ECF ainda são inventariados, sem interpretação contábil automática. O aplicativo não transmite arquivos, não retifica declarações e não gera pedido de compensação.
 """)
 

@@ -6,7 +6,7 @@ import unittest
 
 import pandas as pd
 
-from motor import inventariar_sped, triagem_c170
+from auditor_sped_integrado.motor import inventariar_excel, triagem_c170
 
 
 CHAVE = "1" * 44
@@ -54,12 +54,21 @@ class MotorTest(unittest.TestCase):
             self.assertEqual(achados["regra"].tolist(), ["CONCILIACAO_C170"])
             self.assertEqual(achados.iloc[0]["estado"], "Ambíguo")
 
-    def test_inventario_preserva_hash_e_contagem(self):
+    def test_planilha_sem_aba_c170_e_rejeitada(self):
         with pasta_temporaria() as tmp:
-            arquivo = Path(tmp) / "efd.txt"
-            arquivo.write_bytes(b"|0000|TESTE|\r\n|C100|1|\r\n|C100|2|\r\n")
-            inventario = inventariar_sped(arquivo, "EFD ICMS/IPI")
-            self.assertEqual(inventario["registros"], {"0000": 1, "C100": 2})
+            icms, pis = self._planilhas(Path(tmp))
+            pd.DataFrame({"Chave": [CHAVE]}).to_excel(icms, sheet_name="Resumo", index=False)
+            with self.assertRaisesRegex(ValueError, "Aba C170 não encontrada"):
+                triagem_c170(icms, pis)
+
+    def test_inventario_excel_preserva_hash_e_contagem_por_aba(self):
+        with pasta_temporaria() as tmp:
+            arquivo = Path(tmp) / "efd.xlsx"
+            with pd.ExcelWriter(arquivo) as livro:
+                pd.DataFrame({"Chave": [CHAVE, CHAVE]}).to_excel(livro, sheet_name="C100", index=False)
+                pd.DataFrame({"Item": [1]}).to_excel(livro, sheet_name="C170", index=False)
+            inventario = inventariar_excel(arquivo, "EFD ICMS/IPI")
+            self.assertEqual(inventario["abas"], {"C100": 2, "C170": 1})
             self.assertEqual(inventario["linhas"], 3)
             self.assertEqual(len(inventario["sha256"]), 64)
 

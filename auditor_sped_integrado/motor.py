@@ -1,21 +1,20 @@
-"""Inventário dos quatro SPEDs e triagem conservadora de C170 convertido."""
+"""Inventário dos Excel Sysconv e triagem conservadora de C170."""
 
 from __future__ import annotations
 
-from collections import Counter
 from hashlib import sha256
 from pathlib import Path
 import re
 import sys
 
 import pandas as pd
+from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from projeto_icms_piscofins.core.normalize import normalize_icms_items, normalize_piscofins_items
-from projeto_icms_piscofins.core.utils import choose_sheet
 
 
 TIPOS = ("EFD ICMS/IPI", "EFD-Contribuições", "ECD", "ECF")
@@ -26,34 +25,28 @@ COLUNAS = (
 )
 
 
-def inventariar_sped(caminho: str | Path, tipo: str) -> dict:
-    """Lê TXT local em streaming; não interpreta campos dependentes do leiaute/ano."""
+def inventariar_excel(caminho: str | Path, tipo: str) -> dict:
+    """Conta linhas de dados por aba do Excel convertido e registra seu hash."""
     if tipo not in TIPOS:
         raise ValueError(f"Tipo de escrituração inválido: {tipo}")
     caminho = Path(caminho)
-    if not caminho.is_file() or caminho.suffix.lower() != ".txt":
-        raise ValueError("Informe um arquivo TXT existente exportado da escrituração.")
-    resumo = Counter()
-    digest = sha256()
-    primeiro_registro = ""
-    with caminho.open("rb") as arquivo:
-        for linha in arquivo:
-            digest.update(linha)
-            campos = linha.strip().split(b"|")
-            if len(campos) < 3 or campos[0] != b"":
-                raise ValueError(f"Formato SPED inesperado na linha {sum(resumo.values()) + 1} de {caminho.name}.")
-            registro = campos[1].decode("ascii", errors="replace")
-            resumo[registro] += 1
-            if not primeiro_registro:
-                primeiro_registro = registro
-    if not resumo or primeiro_registro != "0000":
-        raise ValueError(f"{caminho.name}: registro inicial 0000 não encontrado.")
+    if not caminho.is_file() or caminho.suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise ValueError("Informe um arquivo Excel existente (.xlsx ou .xlsm) gerado pelo Sysconv.")
+    abas = {}
+    livro = load_workbook(caminho, read_only=True, data_only=True)
+    try:
+        for aba in livro.worksheets:
+            linhas = (linha for linha in aba.iter_rows(values_only=True) if any(valor is not None and str(valor).strip() for valor in linha))
+            next(linhas, None)  # Primeira linha preenchida: cabeçalho.
+            abas[aba.title] = sum(1 for _ in linhas)
+    finally:
+        livro.close()
     return {
         "tipo": tipo,
         "arquivo": caminho.name,
-        "sha256": digest.hexdigest(),
-        "linhas": sum(resumo.values()),
-        "registros": dict(sorted(resumo.items())),
+        "sha256": hash_arquivo(caminho),
+        "linhas": sum(abas.values()),
+        "abas": abas,
     }
 
 
@@ -80,7 +73,7 @@ def _numero(linha: pd.Series, campo: str) -> float:
 
 def _ler_c170(caminho: Path) -> pd.DataFrame:
     with pd.ExcelFile(caminho) as livro:
-        aba = choose_sheet(livro.sheet_names, "c170")
+        aba = next((nome for nome in livro.sheet_names if "c170" in nome.casefold()), None)
         if not aba:
             raise ValueError(f"Aba C170 não encontrada em {caminho.name}.")
         return pd.read_excel(livro, sheet_name=aba)
