@@ -64,3 +64,11 @@ REGRAS = (
     ),
 )
 
+
+# Cada regra aparece como oportunidade no painel. Apenas os módulos abaixo
+# possuem cálculo e relatório implementados; os demais ficam visíveis, sem ação.
+MODULOS_IMPLEMENTADOS = frozenset({
+    "PISCOFINS_ICMS_ST_1125",
+    "PISCOFINS_ICMS_69",
+})
+

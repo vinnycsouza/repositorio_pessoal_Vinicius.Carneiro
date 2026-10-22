@@ -10,8 +10,19 @@ aplicativo já calcula do que ainda depende de fonte ou conferência adicional.
    EFD-Contribuições e CFOP das saídas C190 do ICMS/IPI. C190 não contém CST
    de PIS/COFINS e não entra sozinho no filtro do Tema 1125.
 3. O usuário confere regime, alíquotas ausentes e UF de referência do Tema 1125.
-4. Um comando executa os dois módulos. O resultado tem abas e arquivos Excel
-   separados. Mudar de aba não recalcula nem mistura valores entre os temas.
+4. Após a pré-análise única, cada regra do catálogo aparece como bloco de
+   investigação. Os Temas 1125 e 69 têm execução e Excel independentes; os
+   outros quatro blocos mostram "Em preparação" e não oferecem cálculo.
+5. Executar um tema não apaga o resultado do outro. Os resultados detalhados
+   permanecem em duas abas dentro de Análise. Mudar de aba não recalcula.
+6. A barra de progresso mostra etapas concluídas na leitura e em cada módulo.
+   Ela não estima tempo restante: arquivos grandes podem demorar mais em uma
+   única etapa. O botão "Nova análise · limpar tudo" reinicia entradas,
+   contexto, pré-análise e resultados da sessão para outro levantamento.
+
+Cada bloco representa uma possível linha de investigação, não um crédito
+automaticamente devido. Para ativar outro bloco no futuro, será preciso
+implementar critérios, validações, cálculo, relatório e testes próprios.
 
 ## Recorte quinquenal e prescrição
 
