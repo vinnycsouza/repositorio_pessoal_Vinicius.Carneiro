@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from io import BytesIO
 import unittest
 
@@ -55,16 +55,39 @@ class RelatorioExcelTest(unittest.TestCase):
             )
         livro = load_workbook(BytesIO(dados), read_only=False, data_only=False)
         self.assertEqual(livro.sheetnames, ["Resumo_Executivo", "Memoria_Mensal", "Conferencia_NF"])
-        self.assertEqual(livro["Resumo_Executivo"]["B12"].value, 1.32)
-        self.assertEqual(livro["Resumo_Executivo"]["C12"].value, 6.08)
-        self.assertEqual(livro["Resumo_Executivo"]["B18"].data_type, "f")
+        resumo = livro["Resumo_Executivo"]
+        linha_total = next(linha for linha in resumo if linha[0].value == "Total")
+        self.assertEqual(linha_total[1].value, 1.32)
+        self.assertEqual(linha_total[2].value, 6.08)
+        linha_documentada = next(linha for linha in resumo if linha[0].value == "Após conferência manual")
+        self.assertEqual(linha_documentada[1].data_type, "f")
         nf = livro["Conferencia_NF"]
-        self.assertEqual(nf["F2"].value, 2)
-        self.assertEqual(nf["I2"].value, 80)
-        self.assertEqual(nf["Q2"].value, "Apto para conferência")
+        self.assertEqual(nf["AB2"].value, 2)
+        self.assertEqual(nf["K2"].value, 80)
+        self.assertEqual(nf["F2"].value, "Apto para conferência")
         self.assertEqual(nf["T2"].value, "Pendente")
         self.assertTrue(nf["U2"].value.startswith("=IF("))
-        self.assertEqual(nf["AG2"].value, "Pendente")
-        self.assertIn('AG2="Conferido"', nf["U2"].value)
+        self.assertEqual(nf["S2"].value, "Pendente")
+        self.assertIn('S2="Conferido"', nf["U2"].value)
+        self.assertIn('MIN(P2,K2)*M2/100', nf["U2"].value)
+        self.assertEqual(nf["Y1"].value, "Aba de origem")
+        self.assertEqual(livro["Memoria_Mensal"]["G1"].value, "Registros de origem")
+        self.assertEqual(nf.freeze_panes, "D2")
+        self.assertEqual(nf["O2"].fill.fgColor.rgb[-6:], "FFF2CC")
         self.assertEqual(len(nf.data_validations.dataValidation), 2)
+        self.assertEqual(len(nf.conditional_formatting), 2)
+        livro.close()
+
+    def test_cobertura_sinaliza_mes_sem_grupo_sem_inventar_valor(self):
+        vazio = pd.DataFrame()
+        dados = gerar_relatorio_excel(
+            [], vazio, vazio, vazio, vazio, vazio, "A confirmar",
+            data_referencia=date(2026, 10, 22),
+        )
+        livro = load_workbook(BytesIO(dados), read_only=True, data_only=True)
+        memoria = livro["Memoria_Mensal"]
+        meses_sem_grupo = [linha for linha in memoria.values if linha[0] == "2025-01"]
+        self.assertEqual(len(meses_sem_grupo), 1)
+        self.assertIsNone(meses_sem_grupo[0][13])
+        self.assertIn("Sem grupo no filtro", meses_sem_grupo[0][17])
         livro.close()

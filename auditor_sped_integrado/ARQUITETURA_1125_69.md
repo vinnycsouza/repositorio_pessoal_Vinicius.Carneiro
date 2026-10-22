@@ -19,6 +19,12 @@ aplicativo já calcula do que ainda depende de fonte ou conferência adicional.
    Ela não estima tempo restante: arquivos grandes podem demorar mais em uma
    única etapa. O botão "Nova análise · limpar tudo" reinicia entradas,
    contexto, pré-análise e resultados da sessão para outro levantamento.
+7. Os dois Excel seguem Resumo → Memória mensal → Conferência. O resumo separa
+   valor preliminar, grupos pendentes, origem do ICMS e rastreabilidade; a
+   memória mostra meses sem grupo no filtro e saídas mapeadas nas fontes.
+   Essas contagens não permitem concluir, sozinhas, que faltou escrituração.
+   Na conferência, campos de revisão ficam próximos ao valor e marcados em
+   amarelo claro; a origem técnica permanece à direita da linha.
 
 Cada bloco representa uma possível linha de investigação, não um crédito
 automaticamente devido. Para ativar outro bloco no futuro, será preciso

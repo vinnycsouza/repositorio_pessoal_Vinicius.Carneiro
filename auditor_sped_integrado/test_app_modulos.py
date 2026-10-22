@@ -41,6 +41,10 @@ class FluxoModulosTest(unittest.TestCase):
             app.run()
             next(botao for botao in app.button if "Ler documentos" in botao.label).click().run()
             self.assertFalse(app.exception)
+            self.assertEqual(
+                app.session_state["preanalise_auditoria"]["cobertura_fontes"]["EFD-Contribuições"],
+                {"2023-08": 2},
+            )
             botoes = {botao.key: botao for botao in app.button if botao.key}
             self.assertEqual(set(botoes), {"nova_analise", "executar_tema_1125", "executar_tema_69"})
 

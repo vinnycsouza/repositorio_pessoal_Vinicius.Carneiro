@@ -29,7 +29,7 @@ from auditor_sped_integrado.premissas_icms import (
 from auditor_sped_integrado.prazo import classificar_competencia, data_corte
 from auditor_sped_integrado.relatorio_excel import gerar_relatorio_excel, resumir_candidatos
 
-VERSAO_RESULTADO = 9
+VERSAO_RESULTADO = 10
 
 
 def limpar_resultado() -> None:
@@ -224,11 +224,15 @@ with aba_entrada:
                 progresso.iniciar("Mapeando C190 e consolidando a pré-análise")
                 mapa_cfop = Counter()
                 recorte_prazo = Counter()
+                cobertura_pis = Counter()
                 for parte in partes:
                     mapa_cfop.update(parte.attrs.get("mapa_cfop", {}))
                     recorte_prazo.update(parte.attrs.get("recorte_prazo", {}))
+                    cobertura_pis.update(parte.attrs.get("cobertura_mensal", {}))
+                cobertura_icms = Counter()
                 mapa_c190 = (
-                    mapear_saidas_c190(arquivo_icms[0], data_referencia=data_referencia)
+                    mapear_saidas_c190(arquivo_icms[0], data_referencia=data_referencia,
+                                       cobertura_mensal=cobertura_icms)
                     if arquivo_icms is not None and any(
                         nome.casefold().startswith("c190") for nome in abas.get("EFD ICMS/IPI", ())
                     ) else []
@@ -241,6 +245,11 @@ with aba_entrada:
                     "vendas_c175": vendas_previas,
                     "data_referencia": data_referencia,
                     "recorte_prazo": dict(recorte_prazo),
+                    "cobertura_fontes": {
+                        "EFD-Contribuições": dict(cobertura_pis),
+                        "EFD ICMS/IPI": dict(cobertura_icms),
+                        "icms_fornecido": arquivo_icms is not None,
+                    },
                     "mapa_cfop": [
                         {"Registro": fonte, "CFOP": cfop, "CST PIS": cst_pis,
                          "CST COFINS": cst_cofins, "Linhas": total,
@@ -498,6 +507,7 @@ with aba_entrada:
                                     uf_selecionada=uf_selecionada, conferencia_nfe=conferencia_nfe,
                                     data_referencia=data_referencia,
                                     recorte_prazo=preanalise.get("recorte_prazo", {}),
+                                    cobertura_fontes=preanalise.get("cobertura_fontes"),
                                 )
                                 progresso.concluir()
                         except Exception as erro:
@@ -525,7 +535,11 @@ with aba_entrada:
                                 candidatos_69, qualidade_69 = levantar_tema_69(arquivo_icms[0], arquivo_pis[0], data_referencia=data_referencia)
                                 progresso.concluir()
                                 progresso.iniciar("Gerando o Excel do Tema 69")
-                                relatorio_69 = gerar_relatorio_69(inventario, candidatos_69, qualidade_69, data_referencia=data_referencia)
+                                relatorio_69 = gerar_relatorio_69(
+                                    inventario, candidatos_69, qualidade_69,
+                                    data_referencia=data_referencia,
+                                    cobertura_fontes=preanalise.get("cobertura_fontes"),
+                                )
                                 progresso.concluir()
                             except Exception as erro:
                                 erro_69 = str(erro)

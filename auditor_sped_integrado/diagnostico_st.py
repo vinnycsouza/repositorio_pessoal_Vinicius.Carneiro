@@ -224,6 +224,7 @@ def diagnosticar_vendas_st_c175(
         regimes = _regimes_0110(livro)
         from auditor_sped_integrado.prazo import classificar_competencia
         mapa_cfop = Counter()
+        cobertura_mensal = Counter()
         recorte = Counter()
         assinaturas_primeira_aba = {}
         grupos = defaultdict(lambda: {"registros": 0, "operacao": Decimal("0"), "base_pis": Decimal("0"),
@@ -268,6 +269,7 @@ def diagnosticar_vendas_st_c175(
                 if len(cfop) == 4 and cfop[0] in {"5", "6"} and str(linha[situacao_i] or "").strip().removesuffix(".0").zfill(2) in {"00", "01"}:
                     mapa_cfop[("C175", cfop, str(linha[cst_pis_i] or "").strip().removesuffix(".0").zfill(2),
                                str(linha[cst_cofins_i] or "").strip().removesuffix(".0").zfill(2))] += 1
+                    cobertura_mensal[periodo] += 1
                 if cfop not in cfops:
                     continue
                 if str(linha[situacao_i] if linha[situacao_i] is not None else "").strip().zfill(2) not in {"00", "01"}:
@@ -398,6 +400,7 @@ def diagnosticar_vendas_st_c175(
             ["competencia", "cnpj_estabelecimento", "cfop", "cst_pis", "cst_cofins"], ignore_index=True
         ) if saida else pd.DataFrame(columns=COLUNAS_C175)
         resultado.attrs["mapa_cfop"] = mapa_cfop
+        resultado.attrs["cobertura_mensal"] = dict(cobertura_mensal)
         resultado.attrs["recorte_prazo"] = dict(recorte)
         return resultado
     finally:
@@ -423,6 +426,7 @@ def diagnosticar_vendas_st_c170(
         regimes = _regimes_0110(livro)
         from auditor_sped_integrado.prazo import classificar_competencia
         mapa_cfop = Counter()
+        cobertura_mensal = Counter()
         recorte = Counter()
         grupos = defaultdict(lambda: {
             "registros": 0, "operacao": Decimal(0), "desconto": Decimal(0),
@@ -461,6 +465,7 @@ def diagnosticar_vendas_st_c170(
                         and str(linha[sit_i] or "").strip().removesuffix(".0").zfill(2) in {"00", "01"}):
                     mapa_cfop[("C170", cfop, str(linha[cst_pis_i] or "").strip().removesuffix(".0").zfill(2),
                                str(linha[cst_cof_i] or "").strip().removesuffix(".0").zfill(2))] += 1
+                    cobertura_mensal[periodo] += 1
                 if cfop != "5405" or str(linha[op_i] or "").strip().removesuffix(".0") != "1":
                     continue
                 if str(linha[sit_i] or "").strip().removesuffix(".0").zfill(2) not in {"00", "01"}:
@@ -572,6 +577,7 @@ def diagnosticar_vendas_st_c170(
             })
         resultado = pd.DataFrame(saida, columns=COLUNAS_C175)
         resultado.attrs["mapa_cfop"] = mapa_cfop
+        resultado.attrs["cobertura_mensal"] = dict(cobertura_mensal)
         resultado.attrs["recorte_prazo"] = dict(recorte)
         return resultado
     finally:
@@ -631,7 +637,8 @@ def diagnosticar_st_c190(arquivo: str | Path | bytes) -> pd.DataFrame:
         livro.close()
 
 
-def mapear_saidas_c190(arquivo: str | Path | bytes, data_referencia=None) -> list[dict]:
+def mapear_saidas_c190(arquivo: str | Path | bytes, data_referencia=None,
+                       cobertura_mensal: Counter | None = None) -> list[dict]:
     """Mostra CFOPs de saída do C190 sem supor CST de PIS/COFINS."""
     fonte = BytesIO(arquivo) if isinstance(arquivo, bytes) else Path(arquivo)
     livro = load_workbook(fonte, read_only=True, data_only=True)
@@ -656,6 +663,8 @@ def mapear_saidas_c190(arquivo: str | Path | bytes, data_referencia=None) -> lis
                 cfop = re.sub(r"\D", "", str(linha[cfop_i] or ""))
                 if len(cfop) == 4 and cfop[0] in {"5", "6"}:
                     contagens[cfop] += 1
+                    if cobertura_mensal is not None:
+                        cobertura_mensal[_competencia(linha[mes_i], linha[ano_i])] += 1
         return [
             {"Registro": "C190 ICMS/IPI", "CFOP": cfop, "CST PIS": "Não consta",
              "CST COFINS": "Não consta", "Linhas": total, "No cálculo 1125": False}

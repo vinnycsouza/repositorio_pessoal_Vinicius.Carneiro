@@ -47,6 +47,7 @@ class DiagnosticoSTTest(unittest.TestCase):
             self.assertEqual(set(resultado["cst_pis"]), {"01", "04"})
             self.assertAlmostEqual(resultado["valor_pis"].sum(), 1.65)
             self.assertEqual(resultado["registros_duplicados_entre_abas"].sum(), 1)
+            self.assertEqual(resultado.attrs["cobertura_mensal"], {"2023-08": 4})
             self.assertEqual(len(notas), 1)
             self.assertEqual(notas[0][10], 1)  # Uma linha válida; a cópia não aumenta o valor.
             self.assertEqual(notas[0][18], 1)

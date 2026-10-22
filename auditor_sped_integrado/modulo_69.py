@@ -15,9 +15,14 @@ import re
 import pandas as pd
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell import WriteOnlyCell
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
+from auditor_sped_integrado.apresentacao_relatorios import (
+    PREENCHIMENTOS, cobertura_do_mes, competencias_esperadas, estilizar_cabecalho, lacunas_competencia,
+)
 from auditor_sped_integrado.diagnostico_st import CODIGOS_UF, _decimal, _indice, _slug
 from auditor_sped_integrado.motor import _cnpj, _competencia
 from auditor_sped_integrado.premissas_icms import UFS, buscar_premissa
@@ -37,6 +42,12 @@ COLUNAS_69 = (
 
 def _arredondar(valor: Decimal) -> Decimal:
     return valor.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _celula_cabecalho(aba, valor: str, grupo: str = "cabecalho"):
+    celula = WriteOnlyCell(aba, value=valor)
+    estilizar_cabecalho(celula, grupo)
+    return celula
 
 
 def _fonte(arquivo: str | Path | bytes):
@@ -384,72 +395,213 @@ def levantar_tema_69(
     return pd.DataFrame(resultado, columns=COLUNAS_69), dict(contagens)
 
 
-def gerar_relatorio_69(inventario: list[dict], candidatos: pd.DataFrame, contagens: dict[str, int], data_referencia=None) -> bytes:
-    """Excel independente do Tema 1125, com memória por nota e pendências."""
+def gerar_relatorio_69(inventario: list[dict], candidatos: pd.DataFrame, contagens: dict[str, int],
+                      data_referencia=None, cobertura_fontes: dict | None = None) -> bytes:
+    """Excel independente do Tema 1125, com resumo, memória e conferência."""
     livro = Workbook(write_only=True)
     resumo = livro.create_sheet("Resumo_Tema_69")
+    memoria = livro.create_sheet("Memoria_Mensal_69")
     notas = livro.create_sheet("Conferencia_Tema_69")
-    def cabecalho(aba, valores):
-        celulas = []
-        for valor in valores:
-            celula = WriteOnlyCell(aba, value=valor)
-            celula.font = Font(bold=True, color="FFFFFF")
-            celula.fill = PatternFill("solid", fgColor="17365D")
-            celula.alignment = Alignment(wrap_text=True, vertical="center")
-            celulas.append(celula)
-        aba.append(celulas)
+    resumo.column_dimensions["A"].width = 57
+    resumo.column_dimensions["B"].width = 84
+    resumo.column_dimensions["C"].width = 28
+    resumo.column_dimensions["D"].width = 58
+    resumo.column_dimensions["E"].width = 38
+    resumo.freeze_panes = "B5"
+    resumo.sheet_view.showGridLines = False
+    resumo.page_setup.orientation = "landscape"
+    resumo.page_setup.fitToWidth = 1
 
-    cabecalho(resumo, ["TEMA 69 | ICMS PRÓPRIO NA BASE DE PIS/COFINS"])
-    resumo.append(["Natureza", "Possível valor identificado na escrituração; depende de NF-e, apuração e exclusões anteriores."])
+    colunas_memoria = ["Competência", "CNPJ estabelecimento", "Origem receita", "Origem ICMS",
+                       "Grupos no filtro", "Grupos com valor", "Grupos pendentes", "Base PIS (R$)",
+                       "Base COFINS (R$)", "ICMS próprio (R$)", "Possível PIS (R$)",
+                       "Possível COFINS (R$)", "Possível total (R$)", "Saídas Contribuições no mês",
+                       "Saídas C190 ICMS/IPI no mês", "Situação da cobertura"]
+    for indice, nome in enumerate(colunas_memoria, 1):
+        memoria.column_dimensions[get_column_letter(indice)].width = min(max(len(nome) + 3, 17), 48)
+    memoria.freeze_panes = "C2"
+    memoria.sheet_view.showGridLines = False
+
+    colunas_conferencia = ["competencia", "cnpj_estabelecimento", "chave_nfe", "uf", "cfop",
+                           "fonte_receita", "fonte_icms", "estado", "motivos", "base_pis",
+                           "pis_escriturado", "base_cofins", "cofins_escriturada",
+                           "icms_proprio_escriturado", "pis_potencial", "cofins_potencial",
+                           "total_potencial", "conferencia_manual", "conferencia_prazo",
+                           "data_extincao_tributo", "medida_que_afete_prazo", "revisor", "observacoes",
+                           "modelo", "itens", "aliquota_icms_geral_referencia", "aba_contribuicoes",
+                           "primeira_linha_contribuicoes", "aba_icms", "primeira_linha_icms"]
+    for indice, nome in enumerate(colunas_conferencia, 1):
+        notas.column_dimensions[get_column_letter(indice)].width = min(max(len(nome) + 3, 17), 50)
+    notas.column_dimensions["C"].width = 48
+    notas.column_dimensions["I"].width = 65
+    notas.column_dimensions["U"].width = 45
+    notas.freeze_panes = "D2"
+    notas.sheet_view.showGridLines = False
+
+    linha_resumo = 0
+    def adicionar_resumo(valores, estilo=None, moedas=()):
+        nonlocal linha_resumo
+        linha_resumo += 1
+        if estilo == "titulo":
+            resumo.row_dimensions[linha_resumo].height = 34
+        elif estilo == "cabecalho":
+            resumo.row_dimensions[linha_resumo].height = 34
+        elif any(isinstance(v, str) and len(v) > 100 for v in valores):
+            resumo.row_dimensions[linha_resumo].height = 58
+        celulas = []
+        for indice, valor in enumerate(valores, 1):
+            celula = WriteOnlyCell(resumo, value=valor)
+            if estilo == "titulo":
+                celula.font = Font(size=16, bold=True, color="FFFFFF")
+                celula.fill = PREENCHIMENTOS["titulo"]
+            elif estilo == "cabecalho":
+                estilizar_cabecalho(celula)
+            elif estilo == "destaque":
+                celula.font = Font(bold=True, color="17365D")
+                celula.fill = PREENCHIMENTOS["calculo"]
+            if isinstance(valor, str) and len(valor) > 65 and estilo != "titulo":
+                celula.alignment = Alignment(wrap_text=True, vertical="center")
+            if indice in moedas:
+                celula.number_format = '#,##0.00'
+            celulas.append(celula)
+        resumo.append(celulas)
+
+    meses = candidatos["competencia"].astype(str).tolist() if not candidatos.empty else []
+    faltantes = lacunas_competencia(data_referencia, meses)
+    anos = sorted({mes[:4] for mes in competencias_esperadas(data_referencia, meses)} | {mes[:4] for mes in meses})
+    aptos = candidatos["total_potencial"].notna() if not candidatos.empty else pd.Series(dtype=bool)
+    adicionar_resumo(["TEMA 69 | ICMS próprio na base de PIS/COFINS"], "titulo")
+    adicionar_resumo(["Levantamento preliminar para conferência documental"])
     if data_referencia is not None:
-        resumo.append(["Data de referência", data_referencia.strftime("%d/%m/%Y")])
-        resumo.append(["Corte operacional de 5 anos", data_corte(data_referencia).strftime("%d/%m/%Y")])
-        resumo.append(["Prescrição", "Competência do mês do corte e anteriores fora do cálculo automático. Conferir data de pagamento, ajuizamento, modulações e aproveitamentos antes de concluir o prazo."])
-    resumo.append(["Fonte do ICMS", "C170 por item ou C190 por chave e CFOP da EFD ICMS/IPI; sem somar ambos."])
-    resumo.append(["Alíquota geral da UF", "Apenas referência de conferência; o cálculo utiliza o ICMS próprio escriturado no item."])
-    resumo.append(["Cobertura", "Saídas C170/C175 da EFD-Contribuições, CFOP 5xxx/6xxx e CST PIS/COFINS 01 ou 02, conciliadas com C170/C190 do ICMS/IPI."])
-    resumo.append(["Limites", "Não confere automaticamente apuração M210/M610, recolhimento, exclusão anterior nem autenticidade da NF-e."])
-    resumo.append([])
-    cabecalho(resumo, ["INDICADOR", "VALOR"])
-    resumo.append(["Grupos NF/CFOP sob análise", len(candidatos)])
-    resumo.append(["Grupos com cálculo preliminar", int(candidatos["total_potencial"].notna().sum()) if not candidatos.empty else 0])
-    resumo.append(["PIS potencial sob conferência", float(candidatos["pis_potencial"].sum()) if not candidatos.empty else 0])
-    resumo.append(["COFINS potencial sob conferência", float(candidatos["cofins_potencial"].sum()) if not candidatos.empty else 0])
-    resumo.append(["Total potencial sob conferência", float(candidatos["total_potencial"].sum()) if not candidatos.empty else 0])
-    resumo.append([])
-    cabecalho(resumo, ["CHECAGEM", "QUANTIDADE"])
+        adicionar_resumo(["Data de referência", data_referencia.strftime("%d/%m/%Y"),
+                          "Corte operacional", data_corte(data_referencia).strftime("%d/%m/%Y")])
+    adicionar_resumo([])
+    adicionar_resumo(["RESULTADO PRELIMINAR", "Quantidade ou valor (R$)"], "cabecalho")
+    adicionar_resumo(["Grupos NF-e/CFOP no filtro", len(candidatos)])
+    adicionar_resumo(["Grupos com valor preliminar", int(aptos.sum())])
+    adicionar_resumo(["Grupos pendentes de revisão", int((~aptos).sum()) if not candidatos.empty else 0])
+    adicionar_resumo(["Possível PIS", float(candidatos["pis_potencial"].sum()) if not candidatos.empty else 0], moedas=(2,))
+    adicionar_resumo(["Possível COFINS", float(candidatos["cofins_potencial"].sum()) if not candidatos.empty else 0], moedas=(2,))
+    adicionar_resumo(["Possível total sob conferência", float(candidatos["total_potencial"].sum()) if not candidatos.empty else 0], "destaque", (2,))
+    adicionar_resumo(["Situação", "Os valores dependem de NF-e, apuração, recolhimento e exclusões anteriores. Conferências manual e de prazo ainda devem ser preenchidas."])
+    adicionar_resumo(["Competências sem grupo no filtro", ", ".join(faltantes) or "Nenhuma no intervalo de meses completos."])
+    adicionar_resumo([])
+    adicionar_resumo(["ORIGEM DO ICMS NESTE LEVANTAMENTO", "Grupos", "Com valor", "Possível total (R$)"], "cabecalho")
+    if not candidatos.empty:
+        for origem, dados in candidatos.groupby("fonte_icms", dropna=False):
+            adicionar_resumo([origem or "Não identificada", len(dados), int(dados["total_potencial"].notna().sum()),
+                              float(dados["total_potencial"].sum())], moedas=(4,))
+    adicionar_resumo([])
+    adicionar_resumo(["ANO", "Grupos", "Com valor", "Possível total (R$)", "Cobertura do filtro"], "cabecalho")
+    for ano in anos:
+        dados = candidatos.loc[candidatos["competencia"].astype(str).str.startswith(ano)] if not candidatos.empty else candidatos
+        adicionar_resumo([int(ano), len(dados), int(dados["total_potencial"].notna().sum()) if not dados.empty else 0,
+                          float(dados["total_potencial"].sum()) if not dados.empty else None,
+                          "Com grupos no filtro" if not dados.empty else "Sem grupo no filtro; verificar fontes"], moedas=(4,))
+    adicionar_resumo([])
+    adicionar_resumo(["MÉTODO E LIMITES", "DETALHE"], "cabecalho")
+    adicionar_resumo(["Cobertura", "Saídas C170/C175 da EFD-Contribuições, CFOP 5xxx/6xxx e CST 01/02 em PIS e COFINS, conciliadas com ICMS/IPI."])
+    adicionar_resumo(["Fonte do ICMS", "C170 por item ou C190 por chave e CFOP, conforme a coluna de origem acima. Os registros não são somados entre si."])
+    adicionar_resumo(["Alíquota geral da UF", "Apenas referência; o cálculo usa o ICMS próprio escriturado na fonte indicada por grupo."])
+    adicionar_resumo(["Prescrição", "O corte de cinco anos é operacional. Conferir pagamento, medidas judiciais, modulação e aproveitamentos anteriores antes de concluir o prazo."])
+    adicionar_resumo(["Pendências", "A memória traz valores por competência, estabelecimento e origem; a conferência reúne notas, motivos e campos de revisão."])
+    adicionar_resumo(["Cobertura das fontes", "A memória conta saídas mapeadas em C170/C175 de Contribuições e C190 de ICMS/IPI; a ausência de grupo no filtro não prova ausência de escrituração."])
+    adicionar_resumo([])
+    adicionar_resumo(["CHECAGENS DA TRIAGEM", "Quantidade", "Unidade", "Código interno"], "cabecalho")
+    nomes = {
+        "c170_sem_icms_proprio_identificado": ("C170 sem ICMS próprio correspondente", "linhas C170"),
+        "c175_sem_icms_proprio_c190": ("C175 sem ICMS próprio C190 correspondente", "linhas C175"),
+        "grupos_com_calculo_c190": ("C190 com cálculo intermediário, antes dos bloqueios finais", "grupos"),
+        "grupos_tributados_c175": ("C175 tributados com par C190", "linhas C175"),
+        "itens_tributados_c170": ("C170 tributados com ICMS identificado", "itens C170"),
+        "sem_par_c170_verificar_c190": ("C170 encaminhados ao C190", "itens C170"),
+    }
     for nome, total in sorted(contagens.items()):
-        resumo.append([nome, total])
-    resumo.append([])
-    cabecalho(resumo, ["ARQUIVO", "SHA-256"])
+        rotulo, unidade = nomes.get(nome, (nome.replace("_", " ").capitalize(),
+                                          "linhas" if nome.startswith("prazo_") else "ocorrências"))
+        adicionar_resumo([rotulo, total, unidade, nome])
+    adicionar_resumo([])
+    adicionar_resumo(["ARQUIVOS-FONTE", "Nome", "SHA-256"], "cabecalho")
     for item in inventario:
-        resumo.append([item["arquivo"], item["sha256"]])
-    colunas_conferencia = [*COLUNAS_69, "data_extincao_tributo", "medida_que_afete_prazo",
-                           "conferencia_prazo", "conferencia_manual", "revisor", "observacoes"]
-    cabecalho(notas, colunas_conferencia)
+        adicionar_resumo([item["tipo"], item["arquivo"], item["sha256"]])
+
+    linha_memoria = []
+    if not candidatos.empty:
+        trabalho = candidatos.copy()
+        trabalho["_com_valor"] = trabalho["total_potencial"].notna().astype(int)
+        trabalho["_pendente"] = 1 - trabalho["_com_valor"]
+        grupos = trabalho.groupby(["competencia", "cnpj_estabelecimento", "fonte_receita", "fonte_icms"],
+                                  dropna=False, sort=True).agg(
+            grupos=("chave_nfe", "size"), com_valor=("_com_valor", "sum"),
+            pendentes=("_pendente", "sum"), base_pis=("base_pis", "sum"),
+            base_cofins=("base_cofins", "sum"), icms=("icms_proprio_escriturado", "sum"),
+            pis=("pis_potencial", "sum"), cofins=("cofins_potencial", "sum"),
+            total=("total_potencial", "sum"),
+        ).reset_index()
+        linha_memoria = grupos.to_dict("records")
+    linha_memoria.extend({"competencia": mes, "cobertura": "Sem grupo no filtro; verificar fontes"} for mes in faltantes)
+    linha_memoria.sort(key=lambda item: (str(item["competencia"]), str(item.get("cnpj_estabelecimento", ""))))
+    memoria.row_dimensions[1].height = 52
+    memoria.append([_celula_cabecalho(memoria, nome) for nome in colunas_memoria])
+    for item in linha_memoria:
+        saidas_pis, saidas_icms, cobertura = cobertura_do_mes(
+            str(item["competencia"]), "grupos" in item, cobertura_fontes,
+        )
+        valores = [item.get("competencia"), item.get("cnpj_estabelecimento"), item.get("fonte_receita"),
+                   item.get("fonte_icms"), item.get("grupos"), item.get("com_valor"), item.get("pendentes"),
+                   item.get("base_pis"), item.get("base_cofins"), item.get("icms"), item.get("pis"),
+                   item.get("cofins"), item.get("total"), saidas_pis, saidas_icms, cobertura]
+        linha = []
+        for indice, valor in enumerate(valores, 1):
+            celula = WriteOnlyCell(memoria, value=valor)
+            if 8 <= indice <= 13:
+                celula.number_format = '#,##0.00'
+            linha.append(celula)
+        memoria.append(linha)
+    memoria.auto_filter.ref = f"A1:P{max(2, len(linha_memoria) + 1)}"
+
+    notas.row_dimensions[1].height = 56
+    notas.append([_celula_cabecalho(notas, nome, "entrada" if 18 <= indice <= 23 else
+                                    "tecnico" if indice >= 24 else "cabecalho")
+                  for indice, nome in enumerate(colunas_conferencia, 1)])
     moedas = {"base_pis", "pis_escriturado", "base_cofins", "cofins_escriturada",
               "icms_proprio_escriturado", "pis_potencial", "cofins_potencial", "total_potencial"}
-    for valores in candidatos.itertuples(index=False, name=None):
+    for dados in candidatos.to_dict("records"):
+        dados = {**dados, "conferencia_manual": "Pendente", "conferencia_prazo": "Pendente"}
         linha = []
-        for nome, valor in zip(COLUNAS_69, valores):
-            if pd.isna(valor):
+        for indice, nome in enumerate(colunas_conferencia, 1):
+            valor = dados.get(nome)
+            if valor is not None and pd.isna(valor):
                 valor = None
             elif isinstance(valor, str) and valor.startswith(("=", "+", "-", "@")):
                 valor = "'" + valor
             celula = WriteOnlyCell(notas, value=valor)
             if nome in moedas:
                 celula.number_format = '#,##0.00'
+            if 18 <= indice <= 23:
+                celula.fill = PREENCHIMENTOS["entrada"]
             linha.append(celula)
-        notas.append(linha + [None, None, "Pendente", "Pendente", None, None])
-    for aba in (resumo, notas):
-        aba.freeze_panes = "B2"
-        aba.sheet_view.showGridLines = False
-    resumo.column_dimensions["A"].width = 42
-    resumo.column_dimensions["B"].width = 95
-    for indice, nome in enumerate(colunas_conferencia, 1):
-        notas.column_dimensions[get_column_letter(indice)].width = min(max(len(nome) + 3, 17), 50)
-    notas.column_dimensions["C"].width = 48
-    notas.auto_filter.ref = f"A1:{get_column_letter(len(COLUNAS_69) + 3)}{max(2, len(candidatos) + 1)}"
+        notas.append(linha)
+    notas.auto_filter.ref = f"A1:AD{max(2, len(candidatos) + 1)}"
+    validacao_manual = DataValidation(type="list", formula1='"Pendente,Confirmado,Rejeitado"')
+    validacao_manual.add(f"R2:R{max(2, len(candidatos) + 1)}")
+    notas.data_validations.append(validacao_manual)
+    validacao_prazo = DataValidation(type="list", formula1='"Pendente,Conferido,Rejeitado"')
+    validacao_prazo.add(f"S2:S{max(2, len(candidatos) + 1)}")
+    notas.data_validations.append(validacao_prazo)
+    ultima_linha = max(2, len(candidatos) + 1)
+    notas.conditional_formatting.add(
+        f"H2:H{ultima_linha}", FormulaRule(formula=['$H2="Possível valor sob conferência"'],
+                                            fill=PREENCHIMENTOS["calculo"]),
+    )
+    notas.conditional_formatting.add(
+        f"H2:H{ultima_linha}", FormulaRule(formula=['$H2="Pendente de revisão"'],
+                                            fill=PREENCHIMENTOS["pendencia"]),
+    )
+    notas.conditional_formatting.add(
+        f"R2:R{ultima_linha}", FormulaRule(formula=['AND($R2="Confirmado",$S2="Conferido")'],
+                                            fill=PREENCHIMENTOS["confirmado"]),
+    )
     arquivo = BytesIO()
     livro.save(arquivo)
     return arquivo.getvalue()

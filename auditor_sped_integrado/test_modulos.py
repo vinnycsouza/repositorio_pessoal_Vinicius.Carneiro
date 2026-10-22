@@ -89,9 +89,20 @@ class ModulosTest(unittest.TestCase):
             self.assertAlmostEqual(resultado.iloc[0]["pis_potencial"], 0.30)
             self.assertAlmostEqual(resultado.iloc[0]["cofins_potencial"], 1.37)
             self.assertEqual(contagens["itens_com_calculo_preliminar"], 1)
-            relatorio = load_workbook(BytesIO(gerar_relatorio_69([], resultado, contagens)), read_only=True)
-            self.assertEqual(relatorio.sheetnames, ["Resumo_Tema_69", "Conferencia_Tema_69"])
+            relatorio = load_workbook(BytesIO(gerar_relatorio_69([], resultado, contagens)))
+            self.assertEqual(relatorio.sheetnames, ["Resumo_Tema_69", "Memoria_Mensal_69", "Conferencia_Tema_69"])
             self.assertEqual(relatorio["Conferencia_Tema_69"].cell(2, 3).value, CHAVE_55)
+            self.assertEqual(relatorio["Memoria_Mensal_69"].cell(2, 13).value, 1.67)
+            resumo_69 = relatorio["Resumo_Tema_69"]
+            total_69 = next(linha for linha in resumo_69 if linha[0].value == "Possível total sob conferência")
+            self.assertEqual(total_69[1].value, 1.67)
+            notas_69 = relatorio["Conferencia_Tema_69"]
+            self.assertEqual(notas_69.freeze_panes, "D2")
+            self.assertEqual(notas_69["R2"].value, "Pendente")
+            self.assertEqual(notas_69["S2"].value, "Pendente")
+            self.assertEqual(notas_69["R2"].fill.fgColor.rgb[-6:], "FFF2CC")
+            self.assertEqual(len(notas_69.data_validations.dataValidation), 2)
+            self.assertEqual(len(notas_69.conditional_formatting), 2)
             relatorio.close()
 
             with pd.ExcelWriter(pis) as livro:
