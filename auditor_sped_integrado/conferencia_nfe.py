@@ -1,4 +1,4 @@
-"""Acumula vendas C175 por NF-e sem manter todas as linhas em memória."""
+"""Acumula vendas C170/C175 por NF-e sem manter todas as linhas em memória."""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ class ConferenciaNFe:
             regime TEXT, aliquota_pis REAL, aliquota_cofins REAL,
             operacao INTEGER, desconto INTEGER, base_pis INTEGER, pis INTEGER,
             base_cofins INTEGER, cofins INTEGER, base_ok INTEGER, duplicado INTEGER,
-            aba TEXT, linha INTEGER, fonte_pis TEXT, fonte_cofins TEXT
+            aba TEXT, linha INTEGER, fonte_pis TEXT, fonte_cofins TEXT,
+            fonte_registro TEXT
         )""")
         self._pendentes: list[tuple] = []
 
@@ -32,6 +33,7 @@ class ConferenciaNFe:
         base_cofins: Decimal, cofins: Decimal, base_ok: bool,
         duplicado: bool, aba: str, linha: int,
         fonte_pis: str = "C175", fonte_cofins: str = "C175",
+        fonte_registro: str = "C175",
     ) -> None:
         # Uma linha sem chave fica identificável individualmente para revisão.
         identificador = chave or f"SEM_CHAVE:{aba}:{linha}"
@@ -40,13 +42,14 @@ class ConferenciaNFe:
             float(aliquota_pis), float(aliquota_cofins),
             *(_centavos(v) for v in (operacao, desconto, base_pis, pis, base_cofins, cofins)),
             int(base_ok), int(duplicado), aba, linha, fonte_pis, fonte_cofins,
+            fonte_registro,
         ))
         if len(self._pendentes) >= 5000:
             self._gravar()
 
     def _gravar(self) -> None:
         if self._pendentes:
-            self._conexao.executemany("INSERT INTO vendas VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", self._pendentes)
+            self._conexao.executemany("INSERT INTO vendas VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", self._pendentes)
             self._pendentes.clear()
 
     def linhas(self):
@@ -59,12 +62,23 @@ class ConferenciaNFe:
             SUM(base_pis), SUM(pis), SUM(base_cofins), SUM(cofins),
             SUM(CASE WHEN base_ok=0 AND duplicado=0 THEN 1 ELSE 0 END),
             SUM(duplicado), MIN(aba), MIN(linha),
-            MAX(CASE WHEN fonte_pis='C175' THEN '' ELSE fonte_pis END),
-            MAX(CASE WHEN fonte_cofins='C175' THEN '' ELSE fonte_cofins END)
+            MIN(fonte_registro),
+            CASE WHEN MIN(fonte_registro)<>MAX(fonte_registro) THEN 1 ELSE 0 END,
+            MAX(CASE WHEN fonte_pis IN ('C170','C175') THEN '' ELSE fonte_pis END),
+            MAX(CASE WHEN fonte_cofins IN ('C170','C175') THEN '' ELSE fonte_cofins END)
             FROM vendas GROUP BY competencia, cnpj, chave
             ORDER BY competencia, cnpj, chave"""
         for linha in self._conexao.execute(consulta):
             yield linha
+
+    def sobreposicoes(self) -> set[tuple[str, str, str]]:
+        """NF-e presentes em mais de um tipo de registro de venda."""
+        self._gravar()
+        consulta = """SELECT competencia, cnpj, chave FROM vendas
+            WHERE chave NOT LIKE 'SEM_CHAVE:%'
+            GROUP BY competencia, cnpj, chave
+            HAVING MIN(fonte_registro) <> MAX(fonte_registro)"""
+        return set(self._conexao.execute(consulta))
 
     def fechar(self) -> None:
         self._conexao.close()

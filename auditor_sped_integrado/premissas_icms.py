@@ -113,7 +113,7 @@ COLUNAS_SIMULACAO = (
     "aliquota_icms_referencia", "parcela_icms_simulada",
     "pis_simulado", "cofins_simulada", "total_simulado",
     "estado_simulacao", "fonte_premissa",
-    "fonte_aliquota_pis", "fonte_aliquota_cofins",
+    "fonte_aliquota_pis", "fonte_aliquota_cofins", "fonte_registro",
 )
 
 
@@ -194,15 +194,16 @@ def simular_potencial(
         declarados = [p.regime for p in historico_regime if p.inicio <= str(item["competencia"]) <= p.fim]
         declarado = declarados[0] if declarados else ""
         aliquotas = (Decimal(str(item["aliquota_pis"])), Decimal(str(item["aliquota_cofins"])))
-        fonte_pis = str(item.get("fonte_aliquota_pis") or "C175")
-        fonte_cofins = str(item.get("fonte_aliquota_cofins") or "C175")
+        fonte_registro = str(item.get("fonte_registro") or "C175")
+        fonte_pis = str(item.get("fonte_aliquota_pis") or fonte_registro)
+        fonte_cofins = str(item.get("fonte_aliquota_cofins") or fonte_registro)
         codigo_pelas_aliquotas = next(
             (codigo for codigo, par in ALIQUOTAS_BASICAS.items() if aliquotas == par), ""
         )
         codigo_calculo = regime or codigo_pelas_aliquotas
         fonte_regime = "0110" if regime else (
             "Alíquota informada pelo usuário" if "Informada pelo usuário" in (fonte_pis, fonte_cofins) else
-            "Alíquotas C175" if codigo_pelas_aliquotas else "Não informado"
+            f"Alíquotas {fonte_registro}" if codigo_pelas_aliquotas else "Não informado"
         )
         pares_permitidos = (
             tuple(ALIQUOTAS_BASICAS.values()) if codigo_calculo == "3"
@@ -223,11 +224,11 @@ def simular_potencial(
         elif not regra:
             estado = f"Sem premissa histórica verificada para UF {codigo_uf or '?'} / {item['competencia']}"
         elif duplicados:
-            estado = "Registros repetidos entre abas; simulação bloqueada"
+            estado = "Registros repetidos entre abas; cálculo bloqueado"
         elif chaves_invalidas:
             estado = "Chave NF-e inválida ou incompatível; conferir UF"
         elif "Ausente" in (fonte_pis, fonte_cofins):
-            estado = "Alíquota não escriturada no C175; informar para simular"
+            estado = "Alíquota não escriturada; informar para calcular"
         elif codigo_calculo not in REGIMES_0110:
             estado = "Regime por competência não disponível"
         elif not aliquotas_compativeis:
@@ -235,9 +236,9 @@ def simular_potencial(
         elif conferidos == 0:
             estado = "Bases C175 pendentes de conferência"
         elif divergentes:
-            estado = "Simulação parcial; bases divergentes preservadas para revisão"
+            estado = "Cálculo parcial; bases divergentes preservadas para revisão"
         else:
-            estado = "Simulação preliminar; ICMS-ST documental pendente"
+            estado = "Possível crédito pela premissa estadual; ICMS-ST documental pendente"
         pode_simular = (
             regra is not None and (not uf_selecionada or uf_nfe == uf_selecionada)
             and not duplicados and not chaves_invalidas
@@ -281,6 +282,7 @@ def simular_potencial(
             "total_simulado": float(pis + cofins) if pis is not None else None,
             "estado_simulacao": estado, "fonte_premissa": regra.fonte if regra else "",
             "fonte_aliquota_pis": fonte_pis, "fonte_aliquota_cofins": fonte_cofins,
+            "fonte_registro": fonte_registro,
         })
     return pd.DataFrame(linhas, columns=COLUNAS_SIMULACAO).sort_values(
         ["competencia", "cnpj_estabelecimento", "aliquota_pis", "aliquota_cofins"],

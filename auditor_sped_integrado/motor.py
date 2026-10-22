@@ -22,7 +22,7 @@ from projeto_icms_piscofins.core.normalize import normalize_icms_items, normaliz
 
 TIPOS = ("EFD ICMS/IPI", "EFD-Contribuições", "ECD", "ECF")
 COLUNAS = (
-    "regra", "estado", "motivo", "chave_nfe", "item", "linha_pis", "linha_icms",
+    "regra", "estado", "motivo", "chave_nfe", "item", "aba_pis", "linha_pis", "aba_icms", "linha_icms",
     "cnpj_pis", "cnpj_icms", "competencia_pis", "competencia_icms", "cfop_pis", "cfop_icms",
     "base_icms", "valor_icms", "valor_icms_st", "base_pis", "base_cofins",
     "diferenca_pis", "diferenca_cofins", "arquivo_pis_sha256", "arquivo_icms_sha256",
@@ -157,10 +157,16 @@ def _cobertura_icms(arquivo: str | Path | bytes) -> set[tuple[str, str]]:
 def _ler_c170(arquivo: str | Path | bytes, nome: str) -> pd.DataFrame:
     fonte = BytesIO(arquivo) if isinstance(arquivo, bytes) else Path(arquivo)
     with pd.ExcelFile(fonte) as livro:
-        aba = next((nome_aba for nome_aba in livro.sheet_names if "c170" in nome_aba.casefold()), None)
-        if not aba:
+        abas = [nome_aba for nome_aba in livro.sheet_names if nome_aba.casefold().startswith("c170")]
+        if not abas:
             raise ValueError(f"Aba C170 não encontrada em {nome}.")
-        return pd.read_excel(livro, sheet_name=aba)
+        quadros = []
+        for aba in abas:
+            quadro = pd.read_excel(livro, sheet_name=aba)
+            quadro["_aba_origem"] = aba
+            quadro["_linha_origem"] = range(2, len(quadro) + 2)
+            quadros.append(quadro)
+        return pd.concat(quadros, ignore_index=True)
 
 
 def triagem_c170(
@@ -206,8 +212,10 @@ def triagem_c170(
         referencia = grupo.iloc[0] if len(grupo) == 1 else None
         evidencias = {
             "regra": "CONCILIACAO_C170", "chave_nfe": chave_item.split(":")[0],
-            "item": int(linha["item"]), "linha_pis": int(indice) + 2,
-            "linha_icms": int(grupo.index[0]) + 2 if referencia is not None else None,
+            "item": int(linha["item"]), "aba_pis": pis_bruto.at[indice, "_aba_origem"],
+            "linha_pis": int(pis_bruto.at[indice, "_linha_origem"]),
+            "aba_icms": icms_bruto.at[grupo.index[0], "_aba_origem"] if referencia is not None else None,
+            "linha_icms": int(icms_bruto.at[grupo.index[0], "_linha_origem"]) if referencia is not None else None,
             "cnpj_pis": cnpj,
             "cnpj_icms": referencia["cnpj_estabelecimento"] if referencia is not None else None,
             "competencia_pis": competencia,
@@ -240,7 +248,7 @@ def triagem_c170(
             outra = grupo_mesmo.iloc[0] if len(grupo_mesmo) == 1 else None
             achados.append({**evidencias, "estado": "Operação diferente",
                             "motivo": "Saída em Contribuições sem saída correspondente no ICMS/IPI do mesmo estabelecimento e competência",
-                            "linha_icms": int(grupo_mesmo.index[0]) + 2 if outra is not None else None,
+                            "linha_icms": int(icms_bruto.at[grupo_mesmo.index[0], "_linha_origem"]) if outra is not None else None,
                             "cnpj_icms": outra["cnpj_estabelecimento"] if outra is not None else None,
                             "competencia_icms": outra["competencia"] if outra is not None else None,
                             "cfop_icms": outra["cfop"] if outra is not None else None})
@@ -256,7 +264,10 @@ def triagem_c170(
         base_pis, base_cofins = _numero(linha, "bc_pis"), _numero(linha, "bc_cofins")
         comum = {
             "chave_nfe": chave_item.split(":")[0], "item": int(linha["item"]),
-            "linha_pis": int(indice) + 2, "linha_icms": int(grupo_saida.index[0]) + 2,
+            "aba_pis": pis_bruto.at[indice, "_aba_origem"],
+            "linha_pis": int(pis_bruto.at[indice, "_linha_origem"]),
+            "aba_icms": icms_bruto.at[grupo_saida.index[0], "_aba_origem"],
+            "linha_icms": int(icms_bruto.at[grupo_saida.index[0], "_linha_origem"]),
             "cnpj_pis": cnpj, "cnpj_icms": outra["cnpj_estabelecimento"],
             "competencia_pis": competencia, "competencia_icms": outra["competencia"],
             "cfop_pis": linha["cfop"], "cfop_icms": outra["cfop"],

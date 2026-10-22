@@ -1,5 +1,10 @@
 # Auditor SPED integrado — versão inicial
 
+> **Atualização de 22/10/2026:** o fluxo atual separa os Temas 1125 e 69 e
+> lê saídas C170/C175, com mapa de C190. Consulte
+> [ARQUITETURA_1125_69.md](ARQUITETURA_1125_69.md) para o comportamento e os
+> limites atuais. As descrições abaixo registram a evolução da versão inicial.
+
 Projeto local para organizar análises de possíveis recuperações tributárias com trilha de evidências. Reaproveita o formato dos Excel C170 usado em `projeto_icms_piscofins`. A triagem usa **chave da NF-e + item + estabelecimento + competência + saída**, com bloqueio de pares ambíguos.
 
 ## Entradas

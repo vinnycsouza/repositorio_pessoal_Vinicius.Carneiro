@@ -112,7 +112,7 @@ class PremissasICMSTest(unittest.TestCase):
             self.assertAlmostEqual(simulado.loc["2024-01", "pis_simulado"], 0.34)
             self.assertEqual(
                 simulado.loc["2024-01", "estado_simulacao"],
-                "Simulação parcial; bases divergentes preservadas para revisão",
+                "Cálculo parcial; bases divergentes preservadas para revisão",
             )
             repetido = vendas.copy()
             repetido.loc[repetido["competencia"] == "2024-01", "registros_duplicados_entre_abas"] = 1
@@ -120,7 +120,7 @@ class PremissasICMSTest(unittest.TestCase):
             self.assertTrue(pd.isna(bloqueado.loc["2024-01", "total_simulado"]))
             self.assertEqual(
                 bloqueado.loc["2024-01", "estado_simulacao"],
-                "Registros repetidos entre abas; simulação bloqueada",
+                "Registros repetidos entre abas; cálculo bloqueado",
             )
 
 

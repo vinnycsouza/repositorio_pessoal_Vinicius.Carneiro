@@ -64,5 +64,7 @@ class RelatorioExcelTest(unittest.TestCase):
         self.assertEqual(nf["Q2"].value, "Apto para conferência")
         self.assertEqual(nf["T2"].value, "Pendente")
         self.assertTrue(nf["U2"].value.startswith("=IF("))
-        self.assertEqual(len(nf.data_validations.dataValidation), 1)
+        self.assertEqual(nf["AG2"].value, "Pendente")
+        self.assertIn('AG2="Conferido"', nf["U2"].value)
+        self.assertEqual(len(nf.data_validations.dataValidation), 2)
         livro.close()
