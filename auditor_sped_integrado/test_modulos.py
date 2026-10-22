@@ -79,7 +79,10 @@ class ModulosTest(unittest.TestCase):
             icms = Path(pasta) / "icms.xlsx"
             pis = Path(pasta) / "pis.xlsx"
             venda = item_c170(CHAVE_55, cfop=5102, icms=18)
-            pd.DataFrame([venda]).to_excel(icms, sheet_name="C170", index=False)
+            pd.DataFrame([venda]).rename(columns={
+                "CNPJ Estabelecimento(C010)": "CNPJ",
+                "Chave(C100)": "Chave de Acesso(C100)",
+            }).to_excel(icms, sheet_name="C170", index=False)
             pd.DataFrame([venda]).to_excel(pis, sheet_name="C170", index=False)
             resultado, contagens = levantar_tema_69(icms, pis)
             self.assertEqual(len(resultado), 1)

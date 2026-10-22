@@ -47,7 +47,8 @@ def _indices_identidade(h: tuple) -> tuple[int, int, int, int, int]:
     return (
         _indice(h, "Mês"), _indice(h, "Ano"),
         _indice(h, "CNPJ Estabelecimento(C010)", "CNPJ Estabelecimento", "CNPJ"),
-        _indice(h, "Chave(C100)", "Chave"), _indice(h, "Numeração Sequencial", "Item"),
+        _indice(h, "Chave(C100)", "Chave de Acesso(C100)", "Chave"),
+        _indice(h, "Numeração Sequencial", "Item"),
     )
 
 
