@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import asdict
 from datetime import date
+import os
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pandas as pd
 import streamlit as st
@@ -115,6 +116,16 @@ def filtrar_diagnostico(quadro: pd.DataFrame, coluna_periodo: str, referencia: d
     ].reset_index(drop=True)
 
 
+def normalizar_caminho_informado(valor: str) -> str:
+    """Remove caracteres de formatação que podem acompanhar um caminho copiado."""
+    return valor.strip().strip('"\'\ufeff\u200b\u200e\u200f\u2060').strip()
+
+
+def caminho_windows_indisponivel(caminho: str) -> bool:
+    """Um servidor Linux não tem acesso ao disco C: do navegador do usuário."""
+    return os.name != "nt" and bool(PureWindowsPath(caminho).drive)
+
+
 st.set_page_config(page_title="Auditor SPED integrado", layout="wide")
 st.title("Auditor SPED integrado")
 st.caption("Análise integrada dos Excel do Sysconv com relatório único de evidências.")
@@ -183,11 +194,18 @@ with aba_entrada:
             )
             entradas[tipo] = (arquivo.getvalue(), arquivo.name) if arquivo is not None else None
         else:
-            caminho = st.text_input(
+            caminho = normalizar_caminho_informado(st.text_input(
                 f"Caminho do Excel {tipo}", key=f"caminho_excel_{geracao_analise}_{i}",
                 placeholder=r"C:\Users\usuario\Downloads\arquivo.xlsx",
                 on_change=limpar_analises,
-            ).strip().strip('"')
+            ))
+            if caminho:
+                if caminho_windows_indisponivel(caminho):
+                    st.warning("Este caminho é do seu computador. No app online, use 'Selecionar arquivo' para enviar o Excel.")
+                elif Path(caminho).is_file():
+                    st.caption("Arquivo localizado no caminho informado.")
+                else:
+                    st.warning("Arquivo não localizado neste caminho. Confira o endereço ou selecione o arquivo acima.")
             entradas[tipo] = (caminho, Path(caminho).name) if caminho else None
 
     arquivo_icms = entradas["EFD ICMS/IPI"]
@@ -197,6 +215,11 @@ with aba_entrada:
         try:
             if arquivo_pis is None:
                 raise ValueError("Informe o Excel com EFD-Contribuições.")
+            if any(
+                isinstance(entrada[0], str) and caminho_windows_indisponivel(entrada[0])
+                for entrada in entradas.values() if entrada is not None
+            ):
+                raise ValueError("O app online não acessa caminhos C: do seu computador. Use 'Selecionar arquivo' para enviar os Excel.")
             with st.spinner("Lendo os Excel e levantando as alíquotas escrituradas..."):
                 arquivos_informados = [(tipo, entrada) for tipo, entrada in entradas.items() if entrada is not None]
                 progresso = ProgressoEtapas("Pré-análise", len(arquivos_informados) + 4)
