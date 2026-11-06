@@ -765,6 +765,10 @@ with st.sidebar:
             "fontes_recibos_v82",
         ]:
             st.session_state.pop(chave, None)
+        # A seleção do Levantamento fica na sessão, separada do resultado.
+        for chave in list(st.session_state):
+            if chave.startswith(("lev_", "levantamento_")):
+                st.session_state.pop(chave, None)
         st.rerun()
 
 
