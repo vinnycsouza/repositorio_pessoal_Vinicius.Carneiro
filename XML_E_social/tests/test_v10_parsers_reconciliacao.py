@@ -9,6 +9,9 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
+from openpyxl import load_workbook
+
 from modules.parser_xml import (
     parse_s1000_contexto,
     parse_s1010,
@@ -20,7 +23,10 @@ from modules.parser_xml import (
 )
 from modules.processador_zip import _montar_indice_rubricas, processar_fontes_esocial
 from modules.data_source import SQLiteDataSource, WorkspaceContext
-from modules.levantamento_sqlite import FiltrosLevantamento, consultar_levantamento, consultar_rubricas, obter_opcoes_filtros
+from modules.levantamento_sqlite import (
+    FiltrosLevantamento, consultar_levantamento, consultar_rubricas,
+    gerar_excel_levantamento_sqlite, obter_opcoes_filtros,
+)
 
 
 S1010 = """<eSocial><evtTabRubrica Id="I1010"><ideEvento/><ideEmpregador>
@@ -139,24 +145,49 @@ class IntegracaoV10Test(unittest.TestCase):
         resultado = processar_fontes_esocial([("empresa.zip", zip_xmls(**{
             "s1010.xml": S1010, "s1200.xml": S1200, "s2299.xml": S2299,
             "s2299b.xml": exclusivo,
+            "s1010b.xml": S1010.replace('Id="I1010"', 'Id="I1010B"').replace(
+                "<codRubr>100", "<codRubr>0292"
+            ).replace("<codIncCP>11", "<codIncCP>00"),
         }))])
         fonte = SQLiteDataSource(WorkspaceContext.from_path(resultado["db_path"]))
         self.assertEqual(obter_opcoes_filtros(fonte, "Completo")["competencias"], ["2026-01", "2026-02"])
         catalogo = consultar_rubricas(fonte, FiltrosLevantamento(origem="S-2299"))
         self.assertEqual(set(catalogo.chave_rubrica), {"100||1", "0292||1"})
         for origem, total, movimentos, cpp in [
-            ("S-1200", 100.0, 1, 20.0), ("S-2299", 151.0, 2, 0.0), ("Completo", 251.0, 3, 0.0),
+            ("S-1200", 100.0, 1, 20.0), ("S-2299", 151.0, 2, 30.2), ("Completo", 251.0, 3, 50.2),
         ]:
             with self.subTest(origem=origem):
                 dados = consultar_levantamento(
                     fonte, FiltrosLevantamento(origem=origem), ["100||1", "0292||1"], 20.0,
                 )
-                self.assertEqual((dados.total, dados.qtd_movimentos, dados.cpp), (total, movimentos, cpp))
+                self.assertEqual((dados.total, dados.qtd_movimentos), (total, movimentos))
+                self.assertAlmostEqual(dados.cpp, cpp)
+                if origem == "Completo":
+                    por_origem = dados.resumo_rubricas.groupby("origem_levantamento").cpp_estimado.sum()
+                    self.assertAlmostEqual(por_origem["S-1200"], 20.0)
+                    self.assertAlmostEqual(por_origem["S-2299"], 30.2)
+                    self.assertEqual(set(dados.movimentos_previa.cod_inc_cp), {"00", "11"})
         recorte = consultar_levantamento(
             fonte, FiltrosLevantamento(origem="Completo", competencias=("2026-01",)), ["100||1", "0292||1"], 20.0,
         )
         self.assertEqual(recorte.total, 175.5)
         self.assertEqual(set(recorte.movimentos_previa.origem_levantamento), {"S-1200", "S-2299"})
+        destino = Path(self.temp.name) / "completo.xlsx"
+        gerar_excel_levantamento_sqlite(
+            fonte, destino, FiltrosLevantamento(origem="Completo", competencias=("2026-01",)),
+            ["100||1", "0292||1"], recorte, resultado["empresa"], pd.DataFrame(), True,
+        )
+        wb = load_workbook(destino, read_only=True)
+        try:
+            linhas = wb["03_movimentos"].values
+            colunas = next(linhas)
+            self.assertEqual({(r[colunas.index("origem_levantamento")], r[colunas.index("ide_dm_dev")]) for r in linhas},
+                             {("S-1200", "D1"), ("S-2299", "D-RESC")})
+            resumo = wb["02_resumo_rubricas"].values
+            campos = next(resumo)
+            self.assertAlmostEqual(sum(r[campos.index("cpp_estimado")] for r in resumo), 35.1)
+        finally:
+            wb.close()
 
     def test_s1200_v10_so_assume_resultado_depois_da_equivalencia(self):
         with patch.dict(os.environ, {"ESOCIAL_V10_PARSER_S1200": "v10"}):

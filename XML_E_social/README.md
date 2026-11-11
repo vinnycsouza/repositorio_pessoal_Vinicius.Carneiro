@@ -41,6 +41,13 @@ XML/ZIP -> inventário/hash -> parser versionado -> SQLite/checkpoint -> reconci
 ```
 
 No módulo de Levantamento, as origens disponíveis são ZIP, Excel e Workspace.
+O seletor de movimentos oferece **Somente S-1200** (padrão), **Somente S-2299**
+e **Completo** quando a fonte disponibiliza a base de desligamentos. A busca
+e a seleção manual seguem o escopo. Nos modos com S-2299, os totais são de
+rubricas, separados por evento. A estimativa de CPP usa a alíquota escolhida
+sobre o recorte selecionado, inclusive CP 00 quando incluído pelos filtros.
+O modo Completo apresenta as estimativas por evento e o total consolidado.
+No Excel importado, a cobertura fica limitada às abas e filtros do arquivo.
 Quando existe um Workspace válido na sessão, ele é reutilizado automaticamente.
 Também é possível informar a pasta do Workspace ou seu `processamento.db`.
 

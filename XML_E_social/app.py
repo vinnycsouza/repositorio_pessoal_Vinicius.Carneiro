@@ -1468,7 +1468,7 @@ if modulo_ativo == "Levantamento de Verbas":
     st.session_state["lev_escopo_anterior"] = origem_lev
     outras_origens = origem_lev != "S-1200"
     if outras_origens:
-        st.caption("Os totais mostram valores de rubricas. A estimativa de CPP fica disponível apenas no escopo padrão S-1200.")
+        st.caption("A CPP estimada aplica a alíquota ao valor das rubricas selecionadas após os filtros, inclusive CP 00 quando estiver no recorte. É uma simulação, não a apuração oficial.")
     if levantamento_sqlite:
         opcoes_sqlite = _opcoes_levantamento_sqlite(
             str(Path(db_path_sqlite).resolve()), *assinatura_sqlite, origem_lev
@@ -1574,7 +1574,7 @@ if modulo_ativo == "Levantamento de Verbas":
             format_func=rotulo_competencia,
             help="Use o intervalo acima ou ajuste manualmente meses específicos. Vazio considera todo o período.",
         )
-        aliquota_lev = 0.0 if outras_origens else l6.number_input("Alíquota estimada CPP (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.5, key="lev_aliquota")
+        aliquota_lev = l6.number_input("Alíquota estimada CPP (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.5, key="lev_aliquota")
         positivos_lev = l7.checkbox("Apenas valores positivos", value=True, key="lev_positivos")
         if comp_lev:
             comp_ordenadas = sorted(comp_lev, key=chave_ordenacao_competencia)
@@ -1959,7 +1959,7 @@ if modulo_ativo == "Levantamento de Verbas":
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total levantado", f"R$ {decimal_br(total_lev)}")
-            m2.metric("CPP estimada", "Não apurada" if outras_origens else f"R$ {decimal_br(cpp_lev)}")
+            m2.metric("CPP estimada", f"R$ {decimal_br(cpp_lev)}")
             m3.metric("Rubricas", f"{qtd_rubricas_lev:,}".replace(",", "."))
             m4.metric("CPFs", f"{qtd_cpfs_lev:,}".replace(",", "."))
 
@@ -1996,11 +1996,15 @@ if modulo_ativo == "Levantamento de Verbas":
                 df_resumo_competencia_lev = df_resumo_competencia_lev.sort_values("Periodo de apuracao")
 
             if outras_origens:
-                df_resumo_lev = df_resumo_lev.drop(columns="cpp_estimado", errors="ignore")
-                df_resumo_competencia_rubrica_lev = df_resumo_competencia_rubrica_lev.drop(columns="cpp_estimado", errors="ignore")
-                df_resumo_competencia_lev = df_resumo_competencia_lev.drop(columns="CPP estimada", errors="ignore")
-                for evento, valor in df_resumo_lev.groupby("origem_levantamento")["valor_total"].sum().items():
-                    st.caption(f"Subtotal {evento}: R$ {decimal_br(valor)}")
+                subtotais_origem = (
+                    df_resumo_lev.groupby("origem_levantamento")[["valor_total", "cpp_estimado"]]
+                    .sum().reindex(["S-1200", "S-2299"] if origem_lev == "Completo" else ["S-2299"], fill_value=0)
+                )
+                for evento, valores in subtotais_origem.iterrows():
+                    st.caption(
+                        f"{evento}: R$ {decimal_br(valores['valor_total'])} em rubricas · "
+                        f"CPP estimada: R$ {decimal_br(valores['cpp_estimado'])}"
+                    )
             st.markdown("### Resumo das rubricas levantadas")
             st.dataframe(df_resumo_lev, use_container_width=True, hide_index=True)
 
@@ -2047,11 +2051,11 @@ if modulo_ativo == "Levantamento de Verbas":
 
 
             if outras_origens:
-                df_parametros_lev = df_parametros_lev[~df_parametros_lev["Indicador"].isin(["Alíquota CPP (%)", "CPP estimada"])]
                 parametros_escopo = [{"Indicador": "Origem dos movimentos", "Valor": rotulos_escopo[origem_lev]}]
                 parametros_escopo += [
-                    {"Indicador": f"Subtotal {evento}", "Valor": valor}
-                    for evento, valor in df_resumo_lev.groupby("origem_levantamento")["valor_total"].sum().items()
+                    {"Indicador": f"{rotulo} {evento}", "Valor": valores[campo]}
+                    for evento, valores in subtotais_origem.iterrows()
+                    for rotulo, campo in (("Subtotal", "valor_total"), ("CPP estimada", "cpp_estimado"))
                 ]
                 df_parametros_lev = pd.concat([df_parametros_lev, pd.DataFrame(parametros_escopo)], ignore_index=True)
 

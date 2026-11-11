@@ -208,34 +208,56 @@ def tem_base_desligamentos(fonte: SQLiteDataSource) -> bool:
         conn.close()
 
 
-def _fonte_movimentos(origem: str) -> str:
-    if origem == "S-1200":
-        return "rel_movimentos_cp"
-    if origem not in {"S-2299", "Completo"}:
+def _ramos_movimentos(origem: str, conn: sqlite3.Connection):
+    tabelas = {
+        "S-1200": [("S-1200", "rel_movimentos_cp")],
+        "S-2299": [("S-2299", "rel_movimentos_s2299")],
+        "Completo": [("S-1200", "rel_movimentos_cp"), ("S-2299", "rel_movimentos_s2299")],
+    }
+    if origem not in tabelas:
         raise ValueError("Escopo de movimentos inválido.")
-    # Projeção comum: os dois eventos têm esquemas de detalhe diferentes.
     campos = (
         "arquivo,cpf,matricula,per_apur,cod_categ,cod_lotacao,nr_insc_estab,"
         "cod_rubr,ide_tab_rubr,dsc_rubr,nat_rubr,cod_inc_cp,tp_rubr,"
         "status_cp,considerado_cp,carater_verba,tipo_verba,vr_rubr,nr_recibo_evento"
-    )
-    deslig = f"SELECT {campos},data_desligamento,ide_dm_dev,'S-2299' origem_levantamento FROM rel_movimentos_s2299"
-    if origem == "S-2299":
-        return "(" + deslig + ")"
-    folha = f"SELECT {campos},'' data_desligamento,'' ide_dm_dev,'S-1200' origem_levantamento FROM rel_movimentos_cp"
-    return f"({folha} UNION ALL {deslig})"
+    ).split(",")
+    for evento, tabela in tabelas[origem]:
+        if origem == "S-1200":
+            yield tabela, "m.*"
+            continue
+        colunas = {linha[1] for linha in conn.execute(f"PRAGMA table_info({tabela})")}
+        if not colunas:
+            raise ValueError(f"A fonte não disponibiliza movimentos de {evento}.")
+        opcionais = ("data_desligamento", "ide_dm_dev", "evento_id_origem", "caminho_item")
+        selecao = [f"m.{campo}" for campo in campos]
+        selecao += [
+            f"m.{campo}" if campo in colunas else f"NULL AS {campo}"
+            for campo in opcionais
+        ]
+        selecao.append(f"'{evento}' AS origem_levantamento")
+        yield tabela, ",".join(selecao)
 
 
-def _base_selecionada_sql(filtros: FiltrosLevantamento) -> tuple[str, tuple]:
+def _fonte_movimentos(origem: str, conn: sqlite3.Connection) -> str:
+    if origem == "S-1200":
+        return "rel_movimentos_cp"
+    return "(" + " UNION ALL ".join(
+        f"SELECT {projecao} FROM {tabela} m"
+        for tabela, projecao in _ramos_movimentos(origem, conn)
+    ) + ")"
+
+
+def _base_selecionada_sql(filtros: FiltrosLevantamento, conn: sqlite3.Connection) -> tuple[str, tuple]:
     where, params = _where_filtros(filtros, "m")
-    sql = (
-        f"SELECT m.* FROM {_fonte_movimentos(filtros.origem)} m "
+    ramos = [
+        f"SELECT {projecao} FROM {tabela} m "
         "JOIN temp.lev_rubricas_selecionadas s "
-        "ON m.cod_rubr=s.cod_rubr "
-        "AND m.ide_tab_rubr=s.ide_tab_rubr"
+        "ON m.cod_rubr=s.cod_rubr AND m.ide_tab_rubr=s.ide_tab_rubr"
         + where
-    )
-    return sql, params
+        for tabela, projecao in _ramos_movimentos(filtros.origem, conn)
+    ]
+    # Aplica o recorte em cada origem antes de combinar seus movimentos.
+    return " UNION ALL ".join(ramos), params * len(ramos)
 
 
 def obter_opcoes_filtros(fonte: SQLiteDataSource, origem: str = "S-1200") -> dict[str, list[str]]:
@@ -245,7 +267,7 @@ def obter_opcoes_filtros(fonte: SQLiteDataSource, origem: str = "S-1200") -> dic
             campos = ("status_cp", "carater_verba", "tipo_verba", "cod_inc_cp", "per_apur")
             valores = [set() for _ in campos]
             for linha in conn.execute(
-                f"SELECT DISTINCT {','.join(campos)} FROM {_fonte_movimentos(origem)}"
+                f"SELECT DISTINCT {','.join(campos)} FROM {_fonte_movimentos(origem, conn)}"
             ):
                 for i, valor in enumerate(linha):
                     if valor not in (None, ""):
@@ -269,7 +291,7 @@ def obter_opcoes_filtros(fonte: SQLiteDataSource, origem: str = "S-1200") -> dic
                 )
             ]
 
-        tabela_catalogo = "rel_rubricas_cp_base" if tem_catalogo else _fonte_movimentos(origem)
+        tabela_catalogo = "rel_rubricas_cp_base" if tem_catalogo else _fonte_movimentos(origem, conn)
         codigos = distintos("cod_inc_cp", tabela_catalogo)
         sem_s1010 = conn.execute(
             f"SELECT 1 FROM {tabela_catalogo} "
@@ -307,9 +329,9 @@ def obter_opcoes_filtros(fonte: SQLiteDataSource, origem: str = "S-1200") -> dic
                         competencias.append(periodo_anual)
                 competencias.sort(key=chave_ordenacao_competencia)
             else:
-                competencias = distintos("per_apur", _fonte_movimentos(origem))
+                competencias = distintos("per_apur", _fonte_movimentos(origem, conn))
         else:
-            competencias = distintos("per_apur", _fonte_movimentos(origem))
+            competencias = distintos("per_apur", _fonte_movimentos(origem, conn))
         competencias.sort(key=chave_ordenacao_competencia)
 
         return {
@@ -377,7 +399,7 @@ def consultar_rubricas(
                SUM(CAST(vr_rubr AS REAL)) valor_total,
                COUNT(*) qtd_lancamentos,
                COUNT(DISTINCT cpf) qtd_cpfs{origem_col}
-        FROM {_fonte_movimentos(filtros.origem)} m
+        FROM {_fonte_movimentos(filtros.origem, conn)} m
     """ + where + """
         GROUP BY cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
                  carater_verba,tipo_verba
@@ -402,13 +424,11 @@ def consultar_levantamento(
     aliquota: float,
     limite_previa: int = 5_000,
 ) -> ResultadoLevantamentoSQLite:
-    if filtros.origem != "S-1200":
-        aliquota = 0.0
     origem_cols = "origem_levantamento,ide_tab_rubr," if filtros.origem != "S-1200" else ""
     conn = fonte.conectar()
     try:
         _preparar_selecao(conn, chaves)
-        base_sql, params = _base_selecionada_sql(filtros)
+        base_sql, params = _base_selecionada_sql(filtros, conn)
         metricas = conn.execute(
             "SELECT COALESCE(SUM(CAST(vr_rubr AS REAL)),0),COUNT(*),"
             "COUNT(DISTINCT cod_rubr),COUNT(DISTINCT cpf) FROM ("
@@ -443,10 +463,9 @@ def consultar_levantamento(
 
     total = float(metricas[0] or 0)
     for df in (resumo_rubricas, resumo_comp_rubr):
-        if not df.empty:
-            df["cpp_estimado"] = pd.to_numeric(
-                df["valor_total"], errors="coerce"
-            ).fillna(0) * (float(aliquota) / 100.0)
+        df["cpp_estimado"] = pd.to_numeric(
+            df["valor_total"], errors="coerce"
+        ).fillna(0) * (float(aliquota) / 100.0)
     if resumo_comp_rubr.empty:
         matriz = pd.DataFrame(columns=["Periodo de apuracao", "Total", "CPP estimada"])
     else:
@@ -506,7 +525,7 @@ def gerar_excel_levantamento_sqlite(
     conn = fonte.conectar()
     try:
         _preparar_selecao(conn, chaves)
-        base_sql, params = _base_selecionada_sql(filtros)
+        base_sql, params = _base_selecionada_sql(filtros, conn)
         if incluir_movimentos:
             fonte_movimentos = FontePlanilha(
                 "03_movimentos", query=base_sql, params=params
@@ -535,10 +554,10 @@ def gerar_excel_levantamento_sqlite(
             [
                 FontePlanilha("00_empresa", dataframe=df_empresa),
                 FontePlanilha("01_resumo", dataframe=df_parametros),
-                FontePlanilha("02_resumo_rubricas", dataframe=resultado.resumo_rubricas if filtros.origem == "S-1200" else resultado.resumo_rubricas.drop(columns="cpp_estimado", errors="ignore")),
+                FontePlanilha("02_resumo_rubricas", dataframe=resultado.resumo_rubricas),
                 fonte_movimentos,
-                FontePlanilha("04_resumo_competencia", dataframe=resultado.resumo_competencia if filtros.origem == "S-1200" else resultado.resumo_competencia.drop(columns="CPP estimada", errors="ignore")),
-                FontePlanilha("05_competencia_rubrica", dataframe=resultado.resumo_competencia_rubrica if filtros.origem == "S-1200" else resultado.resumo_competencia_rubrica.drop(columns="cpp_estimado", errors="ignore")),
+                FontePlanilha("04_resumo_competencia", dataframe=resultado.resumo_competencia),
+                FontePlanilha("05_competencia_rubrica", dataframe=resultado.resumo_competencia_rubrica),
             ],
             conexao=conn,
             progress_callback=progress_callback,
