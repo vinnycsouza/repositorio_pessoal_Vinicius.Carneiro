@@ -19,6 +19,8 @@ from modules.parser_xml import (
     parse_s2299,
 )
 from modules.processador_zip import _montar_indice_rubricas, processar_fontes_esocial
+from modules.data_source import SQLiteDataSource, WorkspaceContext
+from modules.levantamento_sqlite import FiltrosLevantamento, consultar_levantamento, consultar_rubricas, obter_opcoes_filtros
 
 
 S1010 = """<eSocial><evtTabRubrica Id="I1010"><ideEvento/><ideEmpregador>
@@ -127,6 +129,34 @@ class IntegracaoV10Test(unittest.TestCase):
         self.assertEqual(s2299, 1)
         self.assertIn("s2299", parser)
         self.assertEqual(versao, "10.0.0")
+
+    def test_levantamento_escolhe_eventos_sem_alterar_a_folha_padrao(self):
+        exclusivo = S2299.replace('Id="I2299"', 'Id="I2299B"').replace(
+            "<nrRecibo>RD1", "<nrRecibo>RD2"
+        ).replace("<matricula>M1", "<matricula>M2").replace(
+            "2026-01-31", "2026-02-01"
+        ).replace("<codRubr>100", "<codRubr>0292")
+        resultado = processar_fontes_esocial([("empresa.zip", zip_xmls(**{
+            "s1010.xml": S1010, "s1200.xml": S1200, "s2299.xml": S2299,
+            "s2299b.xml": exclusivo,
+        }))])
+        fonte = SQLiteDataSource(WorkspaceContext.from_path(resultado["db_path"]))
+        self.assertEqual(obter_opcoes_filtros(fonte, "Completo")["competencias"], ["2026-01", "2026-02"])
+        catalogo = consultar_rubricas(fonte, FiltrosLevantamento(origem="S-2299"))
+        self.assertEqual(set(catalogo.chave_rubrica), {"100||1", "0292||1"})
+        for origem, total, movimentos, cpp in [
+            ("S-1200", 100.0, 1, 20.0), ("S-2299", 151.0, 2, 0.0), ("Completo", 251.0, 3, 0.0),
+        ]:
+            with self.subTest(origem=origem):
+                dados = consultar_levantamento(
+                    fonte, FiltrosLevantamento(origem=origem), ["100||1", "0292||1"], 20.0,
+                )
+                self.assertEqual((dados.total, dados.qtd_movimentos, dados.cpp), (total, movimentos, cpp))
+        recorte = consultar_levantamento(
+            fonte, FiltrosLevantamento(origem="Completo", competencias=("2026-01",)), ["100||1", "0292||1"], 20.0,
+        )
+        self.assertEqual(recorte.total, 175.5)
+        self.assertEqual(set(recorte.movimentos_previa.origem_levantamento), {"S-1200", "S-2299"})
 
     def test_s1200_v10_so_assume_resultado_depois_da_equivalencia(self):
         with patch.dict(os.environ, {"ESOCIAL_V10_PARSER_S1200": "v10"}):

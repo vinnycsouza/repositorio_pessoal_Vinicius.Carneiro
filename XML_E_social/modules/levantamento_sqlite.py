@@ -20,6 +20,7 @@ class FiltrosLevantamento:
     cod_inc_cp: str = "Todos"
     competencias: tuple[str, ...] = ()
     apenas_positivos: bool = True
+    origem: str = "S-1200"
 
 
 @dataclass
@@ -33,6 +34,73 @@ class ResultadoLevantamentoSQLite:
     resumo_competencia_rubrica: pd.DataFrame
     resumo_competencia: pd.DataFrame
     movimentos_previa: pd.DataFrame
+
+
+def cobertura_desligamentos_sqlite(
+    fonte: SQLiteDataSource, competencias: tuple[str, ...] = (),
+) -> tuple[int | None, pd.DataFrame]:
+    """Rubricas com movimento no desligamento, independentemente da incidência."""
+    conn = fonte.conectar()
+    try:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='rel_movimentos_s2299' AND type='table'"
+        ).fetchone():
+            return None, pd.DataFrame()
+        marcas = ",".join("?" for _ in competencias)
+        periodo = f" AND per_apur IN ({marcas})" if competencias else ""
+        periodo_folha = f" AND f.per_apur IN ({marcas})" if competencias else ""
+        dados = pd.read_sql_query(
+            "WITH desligamentos AS ("
+            " SELECT cod_rubr, COALESCE(ide_tab_rubr,'') ide_tab_rubr,"
+            " MAX(dsc_rubr) dsc_rubr FROM rel_movimentos_s2299"
+            " WHERE cod_rubr<>''" + periodo +
+            " GROUP BY cod_rubr, COALESCE(ide_tab_rubr,''))"
+            " SELECT d.*, NOT EXISTS (SELECT 1 FROM rel_movimentos_cp f"
+            " WHERE f.cod_rubr=d.cod_rubr AND COALESCE(f.ide_tab_rubr,'')=d.ide_tab_rubr"
+            + periodo_folha + ") exclusiva FROM desligamentos d ORDER BY d.cod_rubr,d.ide_tab_rubr",
+            conn, params=competencias + competencias,
+        )
+        return len(dados), dados.loc[dados["exclusiva"].eq(1)].drop(columns="exclusiva")
+    finally:
+        conn.close()
+
+
+def cobertura_desligamentos_excel(
+    xls: pd.ExcelFile, competencias: tuple[str, ...] = (),
+) -> tuple[int | None, pd.DataFrame]:
+    def abas(nome):
+        return [a for a in xls.sheet_names if re.fullmatch(rf"{nome}(?:_\d+)?", a)]
+
+    def catalogo(nomes):
+        chaves = {}
+        for nome in nomes:
+            linhas = xls.book[nome].iter_rows(values_only=True)
+            indices = {v: i for i, v in enumerate(next(linhas, ())) if v in colunas}
+            if not {"cod_rubr", "ide_tab_rubr", "per_apur"} <= indices.keys():
+                raise ValueError("A planilha não contém código, tabela e competência dos movimentos.")
+            for linha in linhas:
+                def valor(campo):
+                    i = indices.get(campo)
+                    return str(linha[i]) if i is not None and i < len(linha) and linha[i] is not None else ""
+
+                if periodos and valor("per_apur") not in periodos:
+                    continue
+                cod = valor("cod_rubr")
+                if cod:
+                    chaves[cod, valor("ide_tab_rubr")] = valor("dsc_rubr")
+        return chaves
+
+    colunas = {"cod_rubr", "ide_tab_rubr", "per_apur", "dsc_rubr"}
+    periodos = set(competencias)
+    origem = abas("apoio_s2299")
+    if not origem:
+        return None, pd.DataFrame()
+    desligamentos = catalogo(origem)
+    folha = catalogo(abas("03_movimentos_cp") or abas("apoio_s1200")) if desligamentos else {}
+    return len(desligamentos), pd.DataFrame(
+        [(cod, tab, desligamentos[cod, tab]) for cod, tab in sorted(desligamentos.keys() - folha.keys())],
+        columns=["cod_rubr", "ide_tab_rubr", "dsc_rubr"],
+    )
 
 
 def chave_ordenacao_competencia(valor: str) -> tuple[int, int, str]:
@@ -130,10 +198,38 @@ def _preparar_selecao(
     )
 
 
+def tem_base_desligamentos(fonte: SQLiteDataSource) -> bool:
+    conn = fonte.conectar()
+    try:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rel_movimentos_s2299'"
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _fonte_movimentos(origem: str) -> str:
+    if origem == "S-1200":
+        return "rel_movimentos_cp"
+    if origem not in {"S-2299", "Completo"}:
+        raise ValueError("Escopo de movimentos inválido.")
+    # Projeção comum: os dois eventos têm esquemas de detalhe diferentes.
+    campos = (
+        "arquivo,cpf,matricula,per_apur,cod_categ,cod_lotacao,nr_insc_estab,"
+        "cod_rubr,ide_tab_rubr,dsc_rubr,nat_rubr,cod_inc_cp,tp_rubr,"
+        "status_cp,considerado_cp,carater_verba,tipo_verba,vr_rubr,nr_recibo_evento"
+    )
+    deslig = f"SELECT {campos},data_desligamento,ide_dm_dev,'S-2299' origem_levantamento FROM rel_movimentos_s2299"
+    if origem == "S-2299":
+        return "(" + deslig + ")"
+    folha = f"SELECT {campos},'' data_desligamento,'' ide_dm_dev,'S-1200' origem_levantamento FROM rel_movimentos_cp"
+    return f"({folha} UNION ALL {deslig})"
+
+
 def _base_selecionada_sql(filtros: FiltrosLevantamento) -> tuple[str, tuple]:
     where, params = _where_filtros(filtros, "m")
     sql = (
-        "SELECT m.* FROM rel_movimentos_cp m "
+        f"SELECT m.* FROM {_fonte_movimentos(filtros.origem)} m "
         "JOIN temp.lev_rubricas_selecionadas s "
         "ON m.cod_rubr=s.cod_rubr "
         "AND m.ide_tab_rubr=s.ide_tab_rubr"
@@ -142,10 +238,24 @@ def _base_selecionada_sql(filtros: FiltrosLevantamento) -> tuple[str, tuple]:
     return sql, params
 
 
-def obter_opcoes_filtros(fonte: SQLiteDataSource) -> dict[str, list[str]]:
+def obter_opcoes_filtros(fonte: SQLiteDataSource, origem: str = "S-1200") -> dict[str, list[str]]:
     conn = fonte.conectar()
     try:
-        tem_catalogo = conn.execute(
+        if origem != "S-1200":
+            campos = ("status_cp", "carater_verba", "tipo_verba", "cod_inc_cp", "per_apur")
+            valores = [set() for _ in campos]
+            for linha in conn.execute(
+                f"SELECT DISTINCT {','.join(campos)} FROM {_fonte_movimentos(origem)}"
+            ):
+                for i, valor in enumerate(linha):
+                    if valor not in (None, ""):
+                        valores[i].add(str(valor))
+                    elif i == 3:
+                        valores[i].add("Sem S-1010")
+            opcoes = dict(zip(("status_cp", "carater", "tipo", "cod_inc_cp", "competencias"), map(sorted, valores)))
+            opcoes["competencias"].sort(key=chave_ordenacao_competencia)
+            return opcoes
+        tem_catalogo = origem == "S-1200" and conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='rel_rubricas_cp_base'"
         ).fetchone() is not None
@@ -159,7 +269,7 @@ def obter_opcoes_filtros(fonte: SQLiteDataSource) -> dict[str, list[str]]:
                 )
             ]
 
-        tabela_catalogo = "rel_rubricas_cp_base" if tem_catalogo else "rel_movimentos_cp"
+        tabela_catalogo = "rel_rubricas_cp_base" if tem_catalogo else _fonte_movimentos(origem)
         codigos = distintos("cod_inc_cp", tabela_catalogo)
         sem_s1010 = conn.execute(
             f"SELECT 1 FROM {tabela_catalogo} "
@@ -197,9 +307,9 @@ def obter_opcoes_filtros(fonte: SQLiteDataSource) -> dict[str, list[str]]:
                         competencias.append(periodo_anual)
                 competencias.sort(key=chave_ordenacao_competencia)
             else:
-                competencias = distintos("per_apur", "rel_movimentos_cp")
+                competencias = distintos("per_apur", _fonte_movimentos(origem))
         else:
-            competencias = distintos("per_apur", "rel_movimentos_cp")
+            competencias = distintos("per_apur", _fonte_movimentos(origem))
         competencias.sort(key=chave_ordenacao_competencia)
 
         return {
@@ -218,7 +328,7 @@ def consultar_rubricas(
 ) -> pd.DataFrame:
     conn = fonte.conectar()
     try:
-        tem_catalogo = conn.execute(
+        tem_catalogo = filtros.origem == "S-1200" and conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='rel_rubricas_cp_base'"
         ).fetchone() is not None
@@ -260,13 +370,14 @@ def consultar_rubricas(
             """
         else:
             where, params = _where_filtros(filtros, "m")
-            sql = """
+            origem_col = ", GROUP_CONCAT(DISTINCT origem_levantamento) origens" if filtros.origem != "S-1200" else ""
+            sql = f"""
         SELECT cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
                carater_verba,tipo_verba,
                SUM(CAST(vr_rubr AS REAL)) valor_total,
                COUNT(*) qtd_lancamentos,
-               COUNT(DISTINCT cpf) qtd_cpfs
-        FROM rel_movimentos_cp m
+               COUNT(DISTINCT cpf) qtd_cpfs{origem_col}
+        FROM {_fonte_movimentos(filtros.origem)} m
     """ + where + """
         GROUP BY cod_rubr,ide_tab_rubr,dsc_rubr,cod_inc_cp,status_cp,
                  carater_verba,tipo_verba
@@ -291,6 +402,9 @@ def consultar_levantamento(
     aliquota: float,
     limite_previa: int = 5_000,
 ) -> ResultadoLevantamentoSQLite:
+    if filtros.origem != "S-1200":
+        aliquota = 0.0
+    origem_cols = "origem_levantamento,ide_tab_rubr," if filtros.origem != "S-1200" else ""
     conn = fonte.conectar()
     try:
         _preparar_selecao(conn, chaves)
@@ -303,20 +417,20 @@ def consultar_levantamento(
             params,
         ).fetchone()
         resumo_rubricas = pd.read_sql_query(
-            "SELECT cod_rubr,dsc_rubr,nat_rubr,cod_inc_cp,status_cp,"
+            f"SELECT {origem_cols}cod_rubr,dsc_rubr,nat_rubr,cod_inc_cp,status_cp,"
             "carater_verba,tipo_verba,SUM(CAST(vr_rubr AS REAL)) valor_total,"
             "COUNT(*) qtd_lancamentos,COUNT(DISTINCT cpf) qtd_cpfs,"
             "MIN(per_apur) primeira_competencia,MAX(per_apur) ultima_competencia "
-            "FROM (" + base_sql + ") base GROUP BY cod_rubr,dsc_rubr,nat_rubr,"
+            "FROM (" + base_sql + f") base GROUP BY {origem_cols}cod_rubr,dsc_rubr,nat_rubr,"
             "cod_inc_cp,status_cp,carater_verba,tipo_verba ORDER BY valor_total DESC",
             conn,
             params=params,
         )
         resumo_comp_rubr = pd.read_sql_query(
-            "SELECT per_apur,cod_rubr,dsc_rubr,cod_inc_cp,status_cp,carater_verba,"
+            f"SELECT {origem_cols}per_apur,cod_rubr,dsc_rubr,cod_inc_cp,status_cp,carater_verba,"
             "tipo_verba,SUM(CAST(vr_rubr AS REAL)) valor_total,COUNT(*) qtd_lancamentos,"
             "COUNT(DISTINCT cpf) qtd_cpfs FROM (" + base_sql + ") base "
-            "GROUP BY per_apur,cod_rubr,dsc_rubr,cod_inc_cp,status_cp,carater_verba,"
+            f"GROUP BY {origem_cols}per_apur,cod_rubr,dsc_rubr,cod_inc_cp,status_cp,carater_verba,"
             "tipo_verba ORDER BY per_apur,valor_total DESC",
             conn,
             params=params,
@@ -342,6 +456,8 @@ def consultar_levantamento(
             + " - "
             + base_matriz["dsc_rubr"].fillna("").astype(str).str.strip()
         ).str.strip(" -")
+        if origem_cols:
+            base_matriz["rubrica_resumo"] = (base_matriz["origem_levantamento"] + " | " + base_matriz["ide_tab_rubr"].fillna("") + " | " + base_matriz["rubrica_resumo"])
         matriz = (
             base_matriz.pivot_table(
                 index="per_apur",
@@ -419,10 +535,10 @@ def gerar_excel_levantamento_sqlite(
             [
                 FontePlanilha("00_empresa", dataframe=df_empresa),
                 FontePlanilha("01_resumo", dataframe=df_parametros),
-                FontePlanilha("02_resumo_rubricas", dataframe=resultado.resumo_rubricas),
+                FontePlanilha("02_resumo_rubricas", dataframe=resultado.resumo_rubricas if filtros.origem == "S-1200" else resultado.resumo_rubricas.drop(columns="cpp_estimado", errors="ignore")),
                 fonte_movimentos,
-                FontePlanilha("04_resumo_competencia", dataframe=resultado.resumo_competencia),
-                FontePlanilha("05_competencia_rubrica", dataframe=resultado.resumo_competencia_rubrica),
+                FontePlanilha("04_resumo_competencia", dataframe=resultado.resumo_competencia if filtros.origem == "S-1200" else resultado.resumo_competencia.drop(columns="CPP estimada", errors="ignore")),
+                FontePlanilha("05_competencia_rubrica", dataframe=resultado.resumo_competencia_rubrica if filtros.origem == "S-1200" else resultado.resumo_competencia_rubrica.drop(columns="cpp_estimado", errors="ignore")),
             ],
             conexao=conn,
             progress_callback=progress_callback,
