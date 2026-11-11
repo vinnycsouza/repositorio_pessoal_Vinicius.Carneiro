@@ -121,6 +121,25 @@ def rotulo_competencia(valor: str) -> str:
     return texto
 
 
+def resumir_competencias_exportacao(competencias: Iterable[str]) -> str:
+    ordenadas = sorted(set(competencias), key=chave_ordenacao_competencia)
+    if not ordenadas:
+        return "Todas"
+    mensais = [c for c in ordenadas if re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", c)]
+    anuais = [c for c in ordenadas if re.fullmatch(r"\d{4}", c)]
+    indices = [int(c[:4]) * 12 + int(c[5:]) for c in mensais]
+    if (not mensais or len(mensais) + len(anuais) != len(ordenadas)
+            or indices[-1] - indices[0] + 1 != len(mensais)):
+        return ", ".join(rotulo_competencia(c) for c in ordenadas)
+
+    inicio, fim = (f"{c[5:]}/{c[:4]}" for c in (mensais[0], mensais[-1]))
+    intervalo = inicio if inicio == fim else f"{inicio} a {fim}"
+    quantidade = "1 competência mensal" if len(mensais) == 1 else f"{len(mensais)} competências mensais"
+    if anuais:
+        quantidade += f" + {len(anuais)} {'anual' if len(anuais) == 1 else 'anuais'} de 13º ({', '.join(anuais)})"
+    return f"{intervalo} · {quantidade}"
+
+
 def competencias_no_intervalo(
     competencias: Iterable[str],
     inicio: str,

@@ -44,6 +44,7 @@ from modules.levantamento_sqlite import (
     gerar_excel_levantamento_sqlite,
     obter_opcoes_filtros,
     rotulo_competencia,
+    resumir_competencias_exportacao,
 )
 from modules.processador_zip import (
     atualizar_workspace_incremental,
@@ -2039,7 +2040,7 @@ if modulo_ativo == "Levantamento de Verbas":
                     carater_lev,
                     tipo_lev,
                     cp_lev,
-                    ", ".join(comp_lev) if comp_lev else "Todas",
+                    resumir_competencias_exportacao(comp_lev),
                     "Sim" if positivos_lev else "Não",
                     float(aliquota_lev),
                     total_lev,
