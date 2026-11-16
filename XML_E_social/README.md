@@ -117,6 +117,11 @@ exclusão definitiva nessa ação.
 
 ## Atualização incremental
 
+Na tela principal, o ponto **2. Recibos do Workspace atual** mostra a empresa,
+o CNPJ e a pasta de destino. Ele envia somente os recibos à carga incremental.
+Para processar outra base com um Workspace aberto, marque **Iniciar nova carga**.
+Os recibos selecionados nesse formulário fazem parte da carga inicial.
+
 No painel **Gerenciar Workspace Atual**, a ação **Adicionar complementos ao
 Workspace** incorpora novos ZIP/XML ao mesmo `processamento.db`, por upload ou
 caminho local. Não é criado um segundo Workspace.

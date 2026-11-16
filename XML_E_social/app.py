@@ -164,20 +164,17 @@ with st.sidebar:
     arquivo_excel = None
     caminho_sqlite_existente = ""
     gerar_relatorio = False
-    workspace_levantamento_reutilizavel = None
-    if (
-        modulo_ativo == "Levantamento de Verbas"
-        and modo_entrada == "ZIP(s) do eSocial"
-        and st.session_state.get("resultado_v82")
-    ):
-        try:
-            workspace_levantamento_reutilizavel = WorkspaceContext.from_resultado(
-                st.session_state["resultado_v82"]
-            )
-        except (OSError, ValueError):
-            workspace_levantamento_reutilizavel = None
+    resultado_aberto = st.session_state.get("resultado_v82")
+    nova_carga_explicita = False
+    if st.session_state.pop("nova_carga_finalizada_v10", False):
+        st.session_state.pop("nova_carga_explicita_v10", None)
+    if modo_entrada == "ZIP(s) do eSocial" and resultado_aberto:
+        nova_carga_explicita = st.checkbox(
+            "Iniciar nova carga", key="nova_carga_explicita_v10",
+            help="Abre o formulário de carga inicial. Para acrescentar recibos, mantenha desmarcado.",
+        )
 
-    if modo_entrada == "ZIP(s) do eSocial" and workspace_levantamento_reutilizavel is None:
+    if modo_entrada == "ZIP(s) do eSocial" and (not resultado_aberto or nova_carga_explicita):
         st.subheader("1. Arquivos principais")
         st.caption("Obrigatório: downloads normais do eSocial, como S-1010, S-1200, S-5001, S-5011 e S-3000.")
         origem_principal = st.radio(
@@ -238,8 +235,8 @@ with st.sidebar:
                 ]
 
         st.markdown("---")
-        st.subheader("2. Complementação opcional")
-        st.caption("Recibos S-1010. Deixe vazio no primeiro relatório e use somente depois de identificar rubricas sem S-1010.")
+        st.subheader("2. Recibos da carga inicial (opcional)")
+        st.caption("Inclua aqui somente recibos já disponíveis antes da primeira carga. Este fluxo pode criar um Workspace.")
         origem_recibos = st.radio(
             "Origem dos recibos",
             ["Upload pelo navegador", "Arquivos/pasta local"],
@@ -259,12 +256,12 @@ with st.sidebar:
             )
             caminhos_recibos = [x.strip().strip('"') for x in texto_recibos.splitlines() if x.strip()]
 
-        gerar_relatorio = st.button("Gerar Relatório", type="primary", use_container_width=True)
+        gerar_relatorio = st.button("Processar nova carga" if nova_carga_explicita else "Gerar Relatório", type="primary", use_container_width=True)
     elif modo_entrada == "ZIP(s) do eSocial":
         st.success(
             "Workspace atual reutilizado automaticamente. Os XMLs não serão processados novamente."
         )
-        st.caption(f"SQLite: {workspace_levantamento_reutilizavel.db_path}")
+        st.caption(f"SQLite: {resultado_aberto.get('db_path', '')}")
     elif modo_entrada in {"SQLite existente", "Workspace (SQLite existente)"}:
         st.subheader("Banco já processado")
         contexto_ativo = None
@@ -1045,6 +1042,67 @@ def _resultado_levantamento_sqlite(
 
 
 
+def _adicionar_recibos_na_entrada(resultado_aberto):
+    st.sidebar.subheader("2. Recibos do Workspace atual")
+    try:
+        contexto = WorkspaceContext.from_resultado(resultado_aberto)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        st.sidebar.warning(f"Não foi possível confirmar um Workspace concluído: {exc}")
+        return
+    chave = str(contexto.db_path)
+    empresas = resultado_aberto.get("empresa", pd.DataFrame())
+    nome = cnpj = "Não identificado"
+    if not empresas.empty:
+        registro = empresas.iloc[0]
+        nome = registro.get("nome_empresa") or nome
+        cnpj = registro.get("cnpj_empregador") or cnpj
+    st.sidebar.caption(f"Destino: {nome} · CNPJ {cnpj} · {contexto.workspace_path.name}")
+    with st.sidebar.form(f"recibos_workspace_atual:{chave}:{st.session_state.get('recibos_envio_v10', 0)}"):
+        uploads = st.file_uploader("ZIP/XML de recibos", type=["zip", "xml"], accept_multiple_files=True)
+        texto = st.text_area("Arquivos ou pastas locais (um caminho por linha)")
+        aplicar = st.form_submit_button("Adicionar recibos ao Workspace atual", type="primary")
+    if not aplicar:
+        return
+    fontes, erros = _resolver_fontes_zip(
+        uploads, [linha.strip().strip('"') for linha in texto.splitlines() if linha.strip()],
+        prefixo="[RECIBOS] ",
+    )
+    if erros or not fontes:
+        st.error("; ".join(erros) if erros else "Selecione pelo menos um ZIP/XML de recibos.")
+        return
+
+    atualizar, _, status = _criar_progresso("Adicionando recibos ao Workspace atual")
+    try:
+        resultado = atualizar_workspace_incremental(
+            contexto.workspace_path, fontes, progress_callback=atualizar,
+            origem="Recibos do Workspace atual (ponto 2)",
+        )
+    except Exception as exc:
+        status.error(f"Não foi possível concluir a carga de recibos: {exc}")
+        st.stop()
+    st.session_state["resultado_v82"] = resultado
+    st.session_state["recibos_envio_v10"] = st.session_state.get("recibos_envio_v10", 0) + 1
+    for campo in ("relatorio_excel_path", "relatorio_excel_bytes", "relatorio_pacote_saida",
+                  "relatorio_excel_assinatura", "levantamento_excel_path",
+                  "levantamento_excel_bytes", "levantamento_ultima_geracao"):
+        st.session_state.pop(campo, None)
+    st.cache_data.clear()
+    resumo = resultado.get("carga_incremental", {})
+    st.session_state["mensagem_workspace_v952"] = (
+        "Recibos processados no mesmo Workspace. "
+        f"XMLs novos: {resumo.get('quantidade_xml_novos', 0)}; "
+        f"duplicados: {resumo.get('quantidade_duplicados', 0)}; "
+        f"erros: {resumo.get('quantidade_erros', 0)}."
+    )
+    st.rerun()
+
+
+if (resultado_aberto and modo_entrada != "Excel consolidado / levantamento"
+        and not nova_carga_explicita and not gerar_relatorio
+        and st.session_state.get("resultado_v82") is resultado_aberto):
+    _adicionar_recibos_na_entrada(resultado_aberto)
+
+
 MAX_LINHAS_DADOS_EXCEL = 1_048_575
 
 
@@ -1082,6 +1140,10 @@ if modo_entrada == "ZIP(s) do eSocial":
         st.session_state["fontes_historico_v82"] = len(fontes_historico)
         st.session_state["fontes_recibos_v82"] = len(fontes_recibos)
         status_proc.success("Processamento dos XMLs concluído.")
+        if nova_carga_explicita:
+            st.session_state["nova_carga_finalizada_v10"] = True
+        st.session_state["mensagem_workspace_v952"] = "Processamento dos XMLs concluído."
+        st.rerun()
 
     if "resultado_v82" not in st.session_state:
         st.info("Selecione os arquivos principais. Os recibos são opcionais. Depois clique em **Gerar Relatório**.")
