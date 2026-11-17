@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import date
 import os
 import sys
+from time import monotonic
 from pathlib import Path, PureWindowsPath
 
 import pandas as pd
@@ -30,7 +31,7 @@ from auditor_sped_integrado.premissas_icms import (
 from auditor_sped_integrado.prazo import classificar_competencia, data_corte
 from auditor_sped_integrado.relatorio_excel import gerar_relatorio_excel, resumir_candidatos
 
-VERSAO_RESULTADO = 10
+VERSAO_RESULTADO = 11
 
 
 def limpar_resultado() -> None:
@@ -61,19 +62,34 @@ class ProgressoEtapas:
         self.titulo = titulo
         self.total = total
         self.concluidas = 0
+        self.inicio = monotonic()
+        self.etapa_inicio = self.inicio
+        self.etapa_atual = ""
+        self.tempos: list[dict] = []
         self.barra = st.progress(0, text=f"{titulo}: 0/{total} etapas concluídas")
 
+    def _texto(self, descricao: str = "") -> str:
+        decorrido = int(monotonic() - self.inicio)
+        tempo = f"{decorrido // 60}min {decorrido % 60:02d}s"
+        sufixo = f" · {descricao}" if descricao else ""
+        return f"{self.titulo}: {self.concluidas}/{self.total} etapas concluídas · {tempo}{sufixo}"
+
     def iniciar(self, descricao: str) -> None:
+        self.etapa_atual = descricao
+        self.etapa_inicio = monotonic()
         self.barra.progress(
             self.concluidas / self.total,
-            text=f"{self.titulo}: {self.concluidas}/{self.total} etapas concluídas · {descricao}",
+            text=self._texto(descricao),
         )
 
     def concluir(self) -> None:
+        if self.etapa_atual:
+            self.tempos.append({"Etapa": self.etapa_atual, "Segundos": round(monotonic() - self.etapa_inicio, 1)})
+            self.etapa_atual = ""
         self.concluidas += 1
         self.barra.progress(
             self.concluidas / self.total,
-            text=f"{self.titulo}: {self.concluidas}/{self.total} etapas concluídas",
+            text=self._texto(),
         )
 
 
@@ -226,7 +242,7 @@ with aba_entrada:
                 inventario = []
                 for tipo, entrada in arquivos_informados:
                     progresso.iniciar(f"Inventariando {tipo}")
-                    inventario.append(inventariar_excel(entrada[0], tipo, entrada[1]))
+                    inventario.append(inventariar_excel(entrada[0], tipo, entrada[1], contar_linhas=False))
                     progresso.concluir()
                 progresso.iniciar("Conferindo abas disponíveis")
                 abas = {item["tipo"]: set(item["abas"]) for item in inventario}
@@ -281,6 +297,7 @@ with aba_entrada:
                     ] + mapa_c190,
                 }
                 progresso.concluir()
+                st.session_state["preanalise_auditoria"]["tempos"] = progresso.tempos
             st.rerun()
         except Exception as erro:
             st.error(f"Não foi possível ler os documentos: {erro}")
@@ -288,6 +305,9 @@ with aba_entrada:
     preanalise = st.session_state.get("preanalise_auditoria")
     if isinstance(preanalise, dict) and preanalise.get("versao") == VERSAO_RESULTADO:
         st.subheader("Pré-análise documental")
+        if preanalise.get("tempos"):
+            with st.expander("Tempo da pré-análise"):
+                st.dataframe(pd.DataFrame(preanalise["tempos"]), hide_index=True)
         st.info(
             f"Corte operacional em {data_corte(data_referencia):%d/%m/%Y}. "
             "O mês que cruza o corte e competências anteriores não entram nos valores automáticos; "
@@ -311,7 +331,7 @@ with aba_entrada:
         with st.expander("Mapa da escrituração: CFOP e CST por registro", expanded=True):
             st.caption("Confira registros fora do filtro principal antes de interpretar os totais. C100/C190 têm outra granularidade e não são somados às vendas C170/C175.")
             registros = [
-                {"Arquivo": item["tipo"], "Aba": aba, "Linhas no Excel": linhas}
+                {"Arquivo": item["tipo"], "Aba": aba, "Linhas no Excel": linhas if linhas is not None else "Não contadas"}
                 for item in preanalise["inventario"]
                 for aba, linhas in item["abas"].items()
                 if aba.casefold().startswith("c") and aba[1:4].isdigit() and int(aba[1:4]) >= 100
@@ -485,6 +505,8 @@ with aba_entrada:
                                 achados = triagem_c170(
                                     arquivo_icms[0], arquivo_pis[0], tolerancia,
                                     nome_icms=arquivo_icms[1], nome_pis=arquivo_pis[1],
+                                    hash_icms=next(item["sha256"] for item in inventario if item["tipo"] == "EFD ICMS/IPI"),
+                                    hash_pis=next(item["sha256"] for item in inventario if item["tipo"] == "EFD-Contribuições"),
                                 )
                                 achados = filtrar_diagnostico(achados, "competencia_pis", data_referencia)
                             else:
@@ -578,6 +600,7 @@ with aba_entrada:
                             "candidatos_69": candidatos_69,
                             "qualidade_69": qualidade_69, "relatorio_69": relatorio_69,
                         })
+                    resultado[f"tempos_{'1125' if executar_1125 else '69'}"] = progresso.tempos
                     st.session_state["resultado_auditoria"] = resultado
                 st.rerun()
             except Exception as erro:
@@ -594,6 +617,9 @@ with aba_entrada:
             else:
                 if resultado.get("erro_1125"):
                     st.error(f"Tema 1125 não concluído: {resultado['erro_1125']}")
+                if resultado.get("tempos_1125"):
+                    with st.expander("Tempo do Tema 1125"):
+                        st.dataframe(pd.DataFrame(resultado["tempos_1125"]), hide_index=True)
                 st.info(
                     "Possível crédito identificado nas receitas e contribuições escrituradas em C170/C175. "
                     "A parcela de ICMS-ST usa a premissa estadual até a conferência das notas de aquisição."
@@ -649,6 +675,9 @@ with aba_entrada:
             else:
                 if resultado.get("erro_69"):
                     st.error(f"Tema 69 não concluído: {resultado['erro_69']}")
+                if resultado.get("tempos_69"):
+                    with st.expander("Tempo do Tema 69"):
+                        st.dataframe(pd.DataFrame(resultado["tempos_69"]), hide_index=True)
                 elif resultado["relatorio_69"] is None:
                     st.warning("Para analisar o Tema 69, forneça as EFDs ICMS/IPI e Contribuições. O ICMS/IPI precisa trazer saídas em C170 ou C190.")
                 else:

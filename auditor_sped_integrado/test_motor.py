@@ -8,6 +8,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pandas as pd
 
 from auditor_sped_integrado.motor import _contar_linhas_aba, inventariar_excel, triagem_c170
+from auditor_sped_integrado.triagem_streaming import triagem_c170_streaming
 
 
 CHAVE = "1" * 44
@@ -172,6 +173,45 @@ class MotorTest(unittest.TestCase):
             self.assertEqual(inventario["abas"], {"C100": 2, "C170": 1})
             self.assertEqual(inventario["linhas"], 3)
             self.assertEqual(len(inventario["sha256"]), 64)
+
+    def test_inventario_rapido_identifica_abas_sem_contar_xml(self):
+        with pasta_temporaria() as tmp:
+            icms, _ = self._planilhas(Path(tmp))
+            inventario = inventariar_excel(icms, "EFD ICMS/IPI", contar_linhas=False)
+            self.assertEqual(inventario["abas"], {"0000": None, "C170": None})
+            self.assertIsNone(inventario["linhas"])
+            self.assertEqual(len(inventario["sha256"]), 64)
+
+    def test_triagem_em_lotes_preserva_achados_e_rastreio(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp), duplicar_icms=True)
+            esperado = triagem_c170(icms, pis)
+            obtido = triagem_c170_streaming(icms, pis, 0.01, icms.name, pis.name, "i" * 64, "p" * 64)
+            esperado["arquivo_icms_sha256"] = "i" * 64
+            esperado["arquivo_pis_sha256"] = "p" * 64
+            pd.testing.assert_frame_equal(obtido, esperado, check_dtype=False)
+
+    def test_triagem_em_lotes_preserva_contextos_de_filial_e_duplicacao(self):
+        with pasta_temporaria() as tmp:
+            icms, pis = self._planilhas(Path(tmp))
+            quadro_pis = pd.read_excel(pis, dtype={"Chave": str, "CNPJ": str})
+            saida_filial = quadro_pis.copy()
+            saida_filial["CNPJ Estabelecimento(C010)"] = "CNPJ: " + CNPJ_FILIAL
+            pd.concat([quadro_pis, saida_filial, quadro_pis], ignore_index=True).to_excel(
+                pis, sheet_name="C170", index=False,
+            )
+            esperado = triagem_c170(icms, pis)
+            obtido = triagem_c170_streaming(icms, pis, 0.01, icms.name, pis.name, "i" * 64, "p" * 64)
+            esperado["arquivo_icms_sha256"] = "i" * 64
+            esperado["arquivo_pis_sha256"] = "p" * 64
+            pd.testing.assert_frame_equal(obtido, esperado, check_dtype=False)
+
+            icms, pis = self._planilhas(Path(tmp))
+            esperado = triagem_c170(icms, pis)
+            obtido = triagem_c170_streaming(icms, pis, 0.01, icms.name, pis.name, "i" * 64, "p" * 64)
+            esperado["arquivo_icms_sha256"] = "i" * 64
+            esperado["arquivo_pis_sha256"] = "p" * 64
+            pd.testing.assert_frame_equal(obtido, esperado, check_dtype=False)
 
     def test_inventario_ignora_dimensao_incorreta_da_aba(self):
         with pasta_temporaria() as tmp:

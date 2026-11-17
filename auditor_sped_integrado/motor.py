@@ -48,8 +48,11 @@ def _contar_linhas_aba(pacote: ZipFile, caminho_aba: str) -> int:
     return max(total - 1, 0)  # Primeira linha: cabeçalho.
 
 
-def inventariar_excel(arquivo: str | Path | bytes, tipo: str, nome_arquivo: str | None = None) -> dict:
-    """Conta linhas de dados por aba do Excel convertido e registra seu hash."""
+def inventariar_excel(
+    arquivo: str | Path | bytes, tipo: str, nome_arquivo: str | None = None,
+    *, contar_linhas: bool = True,
+) -> dict:
+    """Identifica abas e hash; a contagem completa de linhas é opcional."""
     if tipo not in TIPOS:
         raise ValueError(f"Tipo de escrituração inválido: {tipo}")
     nome = nome_arquivo or ("arquivo.xlsx" if isinstance(arquivo, bytes) else Path(arquivo).name)
@@ -69,14 +72,17 @@ def inventariar_excel(arquivo: str | Path | bytes, tipo: str, nome_arquivo: str 
     finally:
         livro.close()
     abas = {}
-    with ZipFile(BytesIO(arquivo) if isinstance(arquivo, bytes) else fonte) as pacote:
-        for titulo, caminho_aba in planilhas:
-            abas[titulo] = _contar_linhas_aba(pacote, caminho_aba)
+    if contar_linhas:
+        with ZipFile(BytesIO(arquivo) if isinstance(arquivo, bytes) else fonte) as pacote:
+            for titulo, caminho_aba in planilhas:
+                abas[titulo] = _contar_linhas_aba(pacote, caminho_aba)
+    else:
+        abas = {titulo: None for titulo, _ in planilhas}
     return {
         "tipo": tipo,
         "arquivo": nome,
         "sha256": hash_arquivo(arquivo),
-        "linhas": sum(abas.values()),
+        "linhas": sum(abas.values()) if contar_linhas else None,
         "abas": abas,
     }
 
@@ -175,12 +181,23 @@ def triagem_c170(
     tolerancia: float = 0.01,
     nome_icms: str | None = None,
     nome_pis: str | None = None,
+    hash_icms: str | None = None,
+    hash_pis: str | None = None,
 ) -> pd.DataFrame:
     """Produz indícios documentados; nenhum valor é declarado recuperável."""
     if tolerancia < 0:
         raise ValueError("A tolerância não pode ser negativa.")
     nome_icms = nome_icms or ("ICMS/IPI.xlsx" if isinstance(caminho_icms, bytes) else Path(caminho_icms).name)
     nome_pis = nome_pis or ("Contribuições.xlsx" if isinstance(caminho_pis, bytes) else Path(caminho_pis).name)
+    tamanho_icms = len(caminho_icms) if isinstance(caminho_icms, bytes) else Path(caminho_icms).stat().st_size
+    tamanho_pis = len(caminho_pis) if isinstance(caminho_pis, bytes) else Path(caminho_pis).stat().st_size
+    if max(tamanho_icms, tamanho_pis) >= 50 * 1024 * 1024:
+        from auditor_sped_integrado.triagem_streaming import triagem_c170_streaming
+
+        return triagem_c170_streaming(
+            caminho_icms, caminho_pis, tolerancia, nome_icms, nome_pis,
+            hash_icms or hash_arquivo(caminho_icms), hash_pis or hash_arquivo(caminho_pis),
+        )
     icms_bruto = _ler_c170(caminho_icms, nome_icms)
     pis_bruto = _ler_c170(caminho_pis, nome_pis)
     icms = normalize_icms_items(icms_bruto)
@@ -200,7 +217,8 @@ def triagem_c170(
     pis_saida = pis[(pis["ind_oper_desc"] == "Saída") & pis["situacao_ok"] & (pis["_chave_item"] != "")]
     contagem_pis = pis_saida.groupby(["_chave_item", "cnpj_estabelecimento", "competencia"]).size()
     cobertura_icms = _cobertura_icms(caminho_icms)
-    hash_pis, hash_icms = hash_arquivo(caminho_pis), hash_arquivo(caminho_icms)
+    hash_pis = hash_pis or hash_arquivo(caminho_pis)
+    hash_icms = hash_icms or hash_arquivo(caminho_icms)
     achados = []
     for indice, linha in pis_saida.iterrows():
         chave_item = linha["_chave_item"]

@@ -26,6 +26,28 @@ aplicativo já calcula do que ainda depende de fonte ou conferência adicional.
    Na conferência, campos de revisão ficam próximos ao valor e marcados em
    amarelo claro; a origem técnica permanece à direita da linha.
 
+## Leitura de arquivos grandes (17/11/2026)
+
+- A pré-análise identifica todas as abas e registra o hash dos Excel, mas não
+  descompacta todas as abas apenas para contar linhas. A tabela de inventário
+  indica quando essa contagem não foi feita. Os mapas CFOP/CST e as contagens
+  do recorte continuam sendo apurados na leitura dos registros pertinentes.
+- A conciliação C170 de arquivos grandes (a partir de 50 MiB compactados em
+  qualquer das duas EFDs) normaliza lotes e usa um índice SQLite temporário,
+  preservando arquivo, aba e linha. Arquivos menores usam o caminho anterior.
+- O Tema 69 guarda itens C170 do ICMS/IPI e assinaturas C190 em um índice
+  SQLite temporário. Duplicidades do C190 continuam bloqueando o grupo.
+- Os bancos de trabalho e de conferência por NF-e usam a pasta temporária do
+  sistema, fora da pasta do projeto sincronizada pelo OneDrive, e são removidos
+  ao terminar a execução. A barra mostra tempo decorrido por etapa; a tela
+  apresenta tempos concluídos para orientar o teste com arquivos grandes.
+- Os cálculos e filtros fiscais não foram alterados. A comparação de resultados
+  com a execução anterior foi automatizada em casos sintéticos; o conjunto
+  grande ainda precisa da medição operacional planejada.
+- Ainda há leituras separadas de C170/C175/C190 entre a pré-análise e os dois
+  módulos. Uma base persistida compartilhada entre essas etapas requer medir
+  o espaço em disco e comparar resultados no conjunto grande antes de ativar.
+
 Cada bloco representa uma possível linha de investigação, não um crédito
 automaticamente devido. Para ativar outro bloco no futuro, será preciso
 implementar critérios, validações, cálculo, relatório e testes próprios.

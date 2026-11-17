@@ -76,13 +76,20 @@ def levantar_tema_69(
     arquivo_icms: str | Path | bytes, arquivo_contribuicoes: str | Path | bytes,
     data_referencia=None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
+    from auditor_sped_integrado.indice_69 import Indice69
+
+    with Indice69() as indice:
+        return _levantar_tema_69(arquivo_icms, arquivo_contribuicoes, data_referencia, indice)
+
+
+def _levantar_tema_69(
+    arquivo_icms: str | Path | bytes, arquivo_contribuicoes: str | Path | bytes,
+    data_referencia, indice,
+) -> tuple[pd.DataFrame, dict[str, int]]:
     """Cruza C170 por competência, CNPJ, chave e item, sem somar C100/C190."""
-    icms_por_item: dict[tuple[str, str, str, str], list[tuple[Decimal, str, int]]] = defaultdict(list)
     def no_recorte(periodo: str) -> bool:
         return data_referencia is None or classificar_competencia(periodo, data_referencia) == "dentro"
 
-    c190_por_grupo = defaultdict(lambda: {"icms": Decimal(0), "aba": "", "linha": None, "duplicado": False})
-    vistos_c190 = set()
     livro_icms = load_workbook(_fonte(arquivo_icms), read_only=True, data_only=True)
     try:
         abas_icms = [n for n in livro_icms.sheetnames if _slug(n).startswith("c170")]
@@ -101,7 +108,8 @@ def levantar_tema_69(
                 if not no_recorte(identidade[0]):
                     continue
                 if len(identidade[2]) == 44 and identidade[3].isdigit():
-                    icms_por_item[identidade].append((_decimal(linha[vl_i]), nome, n))
+                    indice.adicionar_item(identidade, _decimal(linha[vl_i]), nome, n)
+        indice.preparar_busca_itens()
         for nome in (n for n in livro_icms.sheetnames if _slug(n).startswith("c190")):
             aba = livro_icms[nome]
             aba.reset_dimensions()
@@ -133,14 +141,8 @@ def levantar_tema_69(
                 grupo_key = periodo, cnpj, chave, cfop
                 assinatura = (grupo_key, str(linha[cst_i]), str(linha[aliq_i]),
                               str(linha[base_i]), str(linha[vl_i]))
-                dados = c190_por_grupo[grupo_key]
-                if assinatura in vistos_c190:
-                    dados["duplicado"] = True
-                    continue
-                vistos_c190.add(assinatura)
-                dados["icms"] += valor
-                dados["aba"] = dados["aba"] or nome
-                dados["linha"] = dados["linha"] or n
+                indice.adicionar_c190(grupo_key, assinatura, valor, nome, n)
+        indice.preparar_busca_c190()
     finally:
         livro_icms.close()
 
@@ -190,8 +192,8 @@ def levantar_tema_69(
                     if estado_prazo != "dentro":
                         continue
                 total_linhas[("C170", periodo, cnpj, chave, cfop)] += 1
-                if (not any(v > 0 for v, _aba, _linha in icms_por_item.get((periodo, cnpj, chave, item), []))
-                        and (periodo, cnpj, chave, cfop) not in c190_por_grupo):
+                if (not any(v > 0 for v, _aba, _linha in indice.itens((periodo, cnpj, chave, item)))
+                        and indice.grupo_c190((periodo, cnpj, chave, cfop)) is None):
                     contagens["c170_sem_icms_proprio_identificado"] += 1
                     continue
                 cst_p = str(linha[cst_p_i] or "").strip().removesuffix(".0").zfill(2)
@@ -229,7 +231,7 @@ def levantar_tema_69(
                     contagens["duplicado_contribuicoes"] += 1
                     continue
                 vistos_contribuicoes[identidade] = chave_grupo
-                correspondencias = icms_por_item.get(identidade, [])
+                correspondencias = indice.itens(identidade)
                 if len(correspondencias) != 1:
                     if correspondencias:
                         grupo["motivos"].add("Item duplicado no ICMS/IPI")
@@ -297,7 +299,7 @@ def levantar_tema_69(
                     contagens["identificacao_incompleta_c175"] += 1
                     continue
                 total_linhas[("C175", periodo, cnpj, chave, cfop)] += 1
-                if (periodo, cnpj, chave, cfop) not in c190_por_grupo:
+                if indice.grupo_c190((periodo, cnpj, chave, cfop)) is None:
                     contagens["c175_sem_icms_proprio_c190"] += 1
                     continue
                 cst_p = str(linha[cst_p_i] or "").strip().removesuffix(".0").zfill(2)
@@ -351,7 +353,7 @@ def levantar_tema_69(
             elif len(d["taxas_pis"]) != 1 or len(d["taxas_cofins"]) != 1:
                 d["motivos"].add("Alíquotas distintas; C190 exige alocação")
             else:
-                c190 = c190_por_grupo.get((periodo, cnpj, chave, cfop))
+                c190 = indice.grupo_c190((periodo, cnpj, chave, cfop))
                 if not c190:
                     d["motivos"].add("Sem ICMS próprio C170/C190 correspondente")
                 elif c190["duplicado"]:

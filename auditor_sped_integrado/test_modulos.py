@@ -152,6 +152,24 @@ class ModulosTest(unittest.TestCase):
             self.assertTrue(duplicado["total_potencial"].isna().all())
             self.assertIn("duplicado", duplicado.iloc[0]["motivos"])
 
+    def test_tema_69_bloqueia_c190_repetido_em_abas_divididas(self):
+        with TemporaryDirectory(dir=Path(__file__).resolve().parent) as pasta:
+            icms = Path(pasta) / "icms.xlsx"
+            pis = Path(pasta) / "pis.xlsx"
+            c190 = {
+                "Mês": "Agosto", "Ano": 2023, "CNPJ": CNPJ,
+                "Indicador de Operação(C100)": 1, "Chave de Acesso(C100)": CHAVE_65,
+                "CFOP": 5102, "CST de ICMS": "000", "Alíquota de Icms": 18,
+                "Base de Icms": 100, "Valor de Icms": 18,
+            }
+            with pd.ExcelWriter(icms) as livro:
+                pd.DataFrame([c190]).to_excel(livro, sheet_name="C190", index=False)
+                pd.DataFrame([c190]).to_excel(livro, sheet_name="C190--2", index=False)
+            pd.DataFrame([linha_c175(CHAVE_65, 5102)]).to_excel(pis, sheet_name="C175", index=False)
+            resultado, _ = levantar_tema_69(icms, pis)
+            self.assertTrue(resultado["total_potencial"].isna().all())
+            self.assertIn("C190 duplicado", resultado.iloc[0]["motivos"])
+
     def test_tema_69_bloqueia_c190_quando_cfop_mistura_cst_tributado_e_nao_tributado(self):
         with TemporaryDirectory(dir=Path(__file__).resolve().parent) as pasta:
             icms = Path(pasta) / "icms.xlsx"

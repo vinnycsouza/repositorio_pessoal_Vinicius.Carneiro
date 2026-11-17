@@ -14,7 +14,7 @@ def _centavos(valor: Decimal) -> int:
 
 class ConferenciaNFe:
     def __init__(self) -> None:
-        self._diretorio = TemporaryDirectory(prefix="auditor_sped_nfe_", dir=Path(__file__).resolve().parent)
+        self._diretorio = TemporaryDirectory(prefix="auditor_sped_nfe_")
         self._conexao = sqlite3.connect(str(Path(self._diretorio.name) / "vendas.db"))
         self._conexao.execute("""CREATE TABLE vendas (
             competencia TEXT, cnpj TEXT, chave TEXT, chave_ok INTEGER, uf TEXT,
