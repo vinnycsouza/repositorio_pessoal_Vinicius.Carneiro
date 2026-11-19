@@ -29,6 +29,14 @@ def _chave_item(chave, item) -> str:
     return f"{digitos}:{numero}" if len(digitos) == 44 and numero > 0 else ""
 
 
+def _quadro_lote(lote: list[tuple], cabecalho: tuple) -> pd.DataFrame:
+    """Alinha linhas curtas ao cabeçalho sem deslocar as colunas seguintes."""
+    largura = max(len(cabecalho), *(len(linha) for linha in lote))
+    colunas = list(cabecalho) + [f"Unnamed: {indice}" for indice in range(len(cabecalho), largura)]
+    alinhadas = [tuple(linha) + (None,) * (largura - len(linha)) for linha in lote]
+    return pd.DataFrame(alinhadas, columns=colunas)
+
+
 def _lotes_c170(arquivo, tipo: str, nome_arquivo: str):
     # O normalizador original é aplicado em lotes para preservar aliases e
     # conversões sem manter o livro completo em DataFrames.
@@ -52,7 +60,7 @@ def _lotes_c170(arquivo, tipo: str, nome_arquivo: str):
                 lote.append(valores)
                 if len(lote) < 4000:
                     continue
-                bruto = pd.DataFrame(lote, columns=cabecalho)
+                bruto = _quadro_lote(lote, cabecalho)
                 normal = normalize_icms_items(bruto) if tipo == "icms" else normalize_piscofins_items(bruto)
                 ident = _identificar_linhas(bruto, tipo)
                 normal["cnpj_estabelecimento"] = ident["cnpj_estabelecimento"]
@@ -63,7 +71,7 @@ def _lotes_c170(arquivo, tipo: str, nome_arquivo: str):
                 lote.clear()
                 inicio = numero_linha + 1
             if lote:
-                bruto = pd.DataFrame(lote, columns=cabecalho)
+                bruto = _quadro_lote(lote, cabecalho)
                 normal = normalize_icms_items(bruto) if tipo == "icms" else normalize_piscofins_items(bruto)
                 ident = _identificar_linhas(bruto, tipo)
                 normal["cnpj_estabelecimento"] = ident["cnpj_estabelecimento"]

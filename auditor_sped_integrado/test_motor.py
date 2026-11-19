@@ -6,6 +6,7 @@ import unittest
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
+from openpyxl import load_workbook
 
 from auditor_sped_integrado.motor import _contar_linhas_aba, inventariar_excel, triagem_c170
 from auditor_sped_integrado.triagem_streaming import triagem_c170_streaming
@@ -191,6 +192,13 @@ class MotorTest(unittest.TestCase):
             esperado["arquivo_pis_sha256"] = "p" * 64
             pd.testing.assert_frame_equal(obtido, esperado, check_dtype=False)
 
+            icms, pis = self._planilhas(Path(tmp))
+            esperado = triagem_c170(icms, pis)
+            obtido = triagem_c170_streaming(icms, pis, 0.01, icms.name, pis.name, "i" * 64, "p" * 64)
+            esperado["arquivo_icms_sha256"] = "i" * 64
+            esperado["arquivo_pis_sha256"] = "p" * 64
+            pd.testing.assert_frame_equal(obtido, esperado, check_dtype=False)
+
     def test_triagem_em_lotes_preserva_contextos_de_filial_e_duplicacao(self):
         with pasta_temporaria() as tmp:
             icms, pis = self._planilhas(Path(tmp))
@@ -206,7 +214,15 @@ class MotorTest(unittest.TestCase):
             esperado["arquivo_pis_sha256"] = "p" * 64
             pd.testing.assert_frame_equal(obtido, esperado, check_dtype=False)
 
+    def test_triagem_em_lotes_aceita_linha_menor_que_cabecalho(self):
+        with pasta_temporaria() as tmp:
             icms, pis = self._planilhas(Path(tmp))
+            for caminho in (icms, pis):
+                livro = load_workbook(caminho)
+                aba = livro["C170"]
+                aba.cell(1, aba.max_column + 1, "Coluna final sem valor")
+                livro.save(caminho)
+                livro.close()
             esperado = triagem_c170(icms, pis)
             obtido = triagem_c170_streaming(icms, pis, 0.01, icms.name, pis.name, "i" * 64, "p" * 64)
             esperado["arquivo_icms_sha256"] = "i" * 64
