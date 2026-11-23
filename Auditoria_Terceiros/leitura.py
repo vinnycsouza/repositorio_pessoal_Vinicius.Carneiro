@@ -36,6 +36,7 @@ class Apuracao:
     lotacoes: tuple
     bases: tuple
     contribuicoes: tuple
+    classificacao: str = ""
 
 
 def xmls_zip(arquivo, prefixo):
@@ -111,7 +112,7 @@ def ler_receitas(grupos, estabelecimento):
             "Estabelecimento": estabelecimento,
             "Código de receita": grupo.findtext("tpCR", ""),
             "Apurado": numero(grupo.findtext("vrCR")),
-            "Suspenso": numero(grupo.findtext("vrSuspCR")),
+            "Suspenso": numero(grupo.findtext("vrCRSusp") or grupo.findtext("vrSuspCR")),
         }
         for grupo in grupos
     ]
@@ -172,12 +173,13 @@ def ler_xmls(fontes):
                     totalizadores[(empresa, id_evento)] = (
                         empresa, evento.findtext("ideEvento/perApur", ""), evento.findtext("ideEvento/indApuracao", ""),
                         vinculo, origem, lotacoes, bases, contribuicoes,
+                        evento.findtext("infoCS/infoContrib/classTrib", ""),
                     )
     apuracoes = []
-    for empresa, competencia, tipo, recibo, origem, lotacoes, bases, contribuicoes in totalizadores.values():
+    for empresa, competencia, tipo, recibo, origem, lotacoes, bases, contribuicoes, classificacao in totalizadores.values():
         data, fechamento = fechamentos.get((empresa, recibo), ("", ""))
         apuracoes.append(Apuracao(
-            empresa, competencia, tipo, recibo, data, origem, fechamento, lotacoes, bases, contribuicoes,
+            empresa, competencia, tipo, recibo, data, origem, fechamento, lotacoes, bases, contribuicoes, classificacao,
         ))
     apuracoes.sort(key=lambda a: (a.empresa, a.competencia, a.data_fechamento, a.recibo))
     return apuracoes, inventario, avisos, tuple(cadastro.values())
