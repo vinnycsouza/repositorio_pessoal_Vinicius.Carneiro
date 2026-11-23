@@ -118,3 +118,59 @@ def mudancas_lotacao(antes, depois):
                 "Variação da base": vd - va,
             })
     return sorted(linhas, key=lambda linha: (-linha["Variação da base"], linha["Lotação"]))
+
+
+def bases_por_categoria(apuracao):
+    grupos = defaultdict(list)
+    for linha in apuracao.bases:
+        chave = tuple(linha[campo] for campo in CHAVE)
+        valores = tuple(valor for campo, valor in linha.items() if campo not in CHAVE)
+        grupos[chave].append(valores)
+    return {chave: sorted(valores) for chave, valores in grupos.items()}
+
+
+def comparar_lotacoes_xml(antes, depois, calculo_antes=None, calculo_depois=None):
+    """Compara evidência do S-5011 sem depender da cobertura do cálculo por entidade."""
+    lot_antes, lot_depois = (
+        {tuple(linha[campo] for campo in CHAVE): linha for linha in apuracao.lotacoes}
+        for apuracao in (antes, depois)
+    )
+    categorias_antes, categorias_depois = bases_por_categoria(antes), bases_por_categoria(depois)
+    linhas = []
+    for chave in sorted(lot_antes.keys() | lot_depois.keys()):
+        a, d = lot_antes.get(chave, {}), lot_depois.get(chave, {})
+        ca, cd = a.get("Código de terceiros", ""), d.get("Código de terceiros", "")
+        if ca in {"", "0000"} and cd in {"", "0000"}:
+            continue
+        fa, fd = a.get("FPAS", ""), d.get("FPAS", "")
+        sa, sd = a.get("Código suspenso", ""), d.get("Código suspenso", "")
+        va, vd = a.get("Base previdenciária", ZERO), d.get("Base previdenciária", ZERO)
+        base_antes = calculo_antes.lotacoes[chave]["Base de terceiros"] if a and calculo_antes else (None if a else ZERO)
+        base_depois = calculo_depois.lotacoes[chave]["Base de terceiros"] if d and calculo_depois else (None if d else ZERO)
+        mudancas = [
+            rotulo for alterou, rotulo in (
+                (bool(a) != bool(d), "Presença da lotação"),
+                (ca != cd, "Código de terceiros"),
+                (fa != fd, "FPAS"),
+                (sa != sd, "Código suspenso"),
+                (va != vd, "Base no XML"),
+                (va == vd and categorias_antes.get(chave) != categorias_depois.get(chave), "Composição da base no XML"),
+                (antes.classificacao != depois.classificacao, "Classificação tributária"),
+                (base_antes is not None and base_depois is not None and base_antes != base_depois, "Base de terceiros"),
+            )
+            if alterou
+        ]
+        if not mudancas:
+            continue
+        linhas.append({
+            "Lotação": chave[2], "Estabelecimento": chave[1], "O que mudou": ", ".join(mudancas),
+            "FPAS antes → depois": f"{fa or '—'} → {fd or '—'}",
+            "Código antes → depois": f"{ca or '—'} → {cd or '—'}",
+            "Código suspenso antes → depois": f"{sa or '—'} → {sd or '—'}" if sa or sd else "",
+            "Base declarada antes": va, "Base declarada depois": vd, "Variação da base declarada": vd - va,
+            "Base de terceiros antes": base_antes, "Base de terceiros depois": base_depois,
+            "Variação da base de terceiros": (
+                base_depois - base_antes if base_antes is not None and base_depois is not None else None
+            ),
+        })
+    return linhas

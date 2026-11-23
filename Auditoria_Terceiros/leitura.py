@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -37,6 +38,7 @@ class Apuracao:
     bases: tuple
     contribuicoes: tuple
     classificacao: str = ""
+    alertas: tuple[str, ...] = ()
 
 
 def xmls_zip(arquivo, prefixo):
@@ -58,7 +60,10 @@ def xmls_zip(arquivo, prefixo):
 
 
 def numero(valor):
-    return Decimal(valor.replace(",", ".")) if valor else ZERO
+    numero_decimal = Decimal(valor.replace(",", ".")) if valor else ZERO
+    if not numero_decimal.is_finite():
+        raise ValueError("Valor numérico inválido no arquivo.")
+    return numero_decimal
 
 
 def ler_documento(xml):
@@ -120,6 +125,7 @@ def ler_receitas(grupos, estabelecimento):
 
 def ler_xmls(fontes):
     fechamentos, totalizadores, avisos = {}, {}, []
+    conflitos_fechamento, conflitos_totalizador = set(), set()
     cadastro = {}
     inventario = Counter()
     for fonte in fontes:
@@ -140,12 +146,20 @@ def ler_xmls(fontes):
                     evento_geral = next((no for no in raiz.iter() if no.tag.startswith("evt")), None)
                     tipo = EVENTOS.get(evento_geral.tag, evento_geral.tag) if evento_geral is not None else "Não identificado"
                 inventario[tipo] += 1
-                recibo = raiz.findtext(".//nrRecibo") or raiz.findtext(".//numeroRecibo") or ""
-                data = raiz.findtext(".//dhRecepcao") or raiz.findtext(".//dhProcessamento") or ""
+                recibo = (raiz.findtext(".//nrRecibo") or raiz.findtext(".//numeroRecibo") or "").strip()
+                data = (raiz.findtext(".//dhRecepcao") or raiz.findtext(".//dhProcessamento") or "").strip()
                 for evento in raiz.iter("evtFechaEvPer"):
                     empresa = evento.findtext("ideEmpregador/nrInsc", "")
                     if recibo:
-                        fechamentos[(empresa, recibo)] = (data, origem)
+                        chave = empresa, recibo
+                        competencia = evento.findtext("ideEvento/perApur", "")
+                        tipo_apuracao = evento.findtext("ideEvento/indApuracao", "")
+                        anterior = fechamentos.get(chave)
+                        if anterior and (anterior[2:] != (competencia, tipo_apuracao)
+                                         or (anterior[0] and data and anterior[0] != data)):
+                            conflitos_fechamento.add(chave)
+                        elif not anterior or not anterior[0]:
+                            fechamentos[chave] = (data, origem, competencia, tipo_apuracao)
                 for evento in raiz.iter("evtTabLotacao"):
                     empresa = evento.findtext("ideEmpregador/nrInsc", "")
                     for operacao in evento.findall("infoLotacao/*"):
@@ -163,26 +177,64 @@ def ler_xmls(fontes):
                         }
                 for evento in raiz.iter("evtCS"):
                     empresa = evento.findtext("ideEmpregador/nrInsc", "")
-                    vinculo = evento.findtext("infoCS/nrRecArqBase", "")
+                    vinculo = evento.findtext("infoCS/nrRecArqBase", "").strip()
                     id_evento = evento.get("Id") or origem
                     try:
                         lotacoes, bases, contribuicoes = totalizador(evento)
                     except (ValueError, ArithmeticError) as erro:
                         avisos.append(f"{origem}: {erro}")
                         continue
-                    totalizadores[(empresa, id_evento)] = (
+                    chave = empresa, id_evento
+                    novo = (
                         empresa, evento.findtext("ideEvento/perApur", ""), evento.findtext("ideEvento/indApuracao", ""),
                         vinculo, origem, lotacoes, bases, contribuicoes,
                         evento.findtext("infoCS/infoContrib/classTrib", ""),
                     )
+                    anterior = totalizadores.get(chave)
+                    if anterior and anterior[:4] + anterior[5:] != novo[:4] + novo[5:]:
+                        conflitos_totalizador.add(chave)
+                    elif not anterior:
+                        totalizadores[chave] = novo
     apuracoes = []
-    for empresa, competencia, tipo, recibo, origem, lotacoes, bases, contribuicoes, classificacao in totalizadores.values():
-        data, fechamento = fechamentos.get((empresa, recibo), ("", ""))
+    por_recibo = Counter((dados[0], dados[3]) for dados in totalizadores.values() if dados[3])
+    for chave, dados in totalizadores.items():
+        empresa, competencia, tipo, recibo, origem, lotacoes, bases, contribuicoes, classificacao = dados
+        if chave in conflitos_totalizador:
+            avisos.append(f"{origem}: o ID do S-5011 aparece com conteúdos diferentes. Totalizador excluído.")
+            continue
+        if not empresa or not (tipo == "1" and re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", competencia)
+                               or tipo == "2" and re.fullmatch(r"\d{4}", competencia)):
+            avisos.append(f"{origem}: empresa, competência ou tipo de apuração inválido no S-5011.")
+            continue
+        data, fechamento, alertas = vincular_fechamento(
+            empresa, competencia, tipo, recibo, fechamentos, conflitos_fechamento, por_recibo,
+        )
         apuracoes.append(Apuracao(
             empresa, competencia, tipo, recibo, data, origem, fechamento, lotacoes, bases, contribuicoes, classificacao,
+            alertas,
         ))
     apuracoes.sort(key=lambda a: (a.empresa, a.competencia, a.data_fechamento, a.recibo))
     return apuracoes, inventario, avisos, tuple(cadastro.values())
+
+
+def vincular_fechamento(empresa, competencia, tipo, recibo, fechamentos, conflitos, por_recibo):
+    chave = empresa, recibo
+    if not recibo:
+        return "", "", ("S-5011 sem recibo de fechamento.",)
+    if chave in conflitos or por_recibo[chave] > 1:
+        return "", "", ("Há XMLs conflitantes para este recibo.",)
+    if chave not in fechamentos:
+        return "", "", ("S-1299 correspondente ausente.",)
+    data, origem, periodo_fechamento, tipo_fechamento = fechamentos[chave]
+    if (periodo_fechamento, tipo_fechamento) != (competencia, tipo):
+        return "", "", ("Competência ou tipo de apuração diverge entre S-1299 e S-5011.",)
+    try:
+        if "T" not in data:
+            raise ValueError
+        datetime.fromisoformat(data)
+    except ValueError:
+        return "", origem, ("O S-1299 não tem data e hora de recebimento válidas.",)
+    return data, origem, ()
 
 
 def competencia_manad(valor):

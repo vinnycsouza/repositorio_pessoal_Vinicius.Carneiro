@@ -1,5 +1,6 @@
 from pathlib import Path
 from decimal import Decimal
+from hashlib import sha256
 from zipfile import BadZipFile
 import sys
 
@@ -10,13 +11,15 @@ PASTA_APP = str(Path(__file__).resolve().parent)
 if PASTA_APP not in sys.path:
     sys.path.insert(0, PASTA_APP)
 from leitura import Fonte, ler_manad, ler_xmls
-from calculo_terceiros import calcular, mudancas_lotacao
-from relatorio import adicionar_resumo_manad, gerar_excel, relatorio_geral
+from calculo_terceiros import calcular, comparar_lotacoes_xml
+from controle import ler_controle
+from relatorio import (
+    CHAVE_MANAD, adicionar_resumo_manad, conferir_bases_manad, gerar_excel, relatorio_geral, validar_fechamento,
+)
 
 
 CHAVE_XML = ["Tipo de inscrição", "Estabelecimento", "Lotação"]
 CHAVE_CR = ["Estabelecimento", "Código de receita"]
-CHAVE_MANAD = ["Estabelecimento", "Lotação MANAD", "Competência", "Tipo de folha", "Trabalhador"]
 COL_LOT = CHAVE_XML + ["FPAS", "Código de terceiros", "Código suspenso", "Base previdenciária"]
 COL_CR = CHAVE_CR + ["Apurado", "Suspenso"]
 
@@ -45,18 +48,23 @@ RECEITAS_TERCEIROS = {
 
 
 @st.cache_data(show_spinner=False, max_entries=3)
-def importar_xml(fontes, versoes):
+def importar_xml(fontes, versoes, revisao_leitura):
     return ler_xmls(fontes)
 
 
 @st.cache_data(show_spinner=False, max_entries=3)
-def importar_manad(fontes, versoes):
-    return ler_manad(fontes)
+def importar_manad(fontes, versoes, revisao_leitura):
+    mestres, itens = ler_manad(fontes)
+    return (mestres, itens), conferir_bases_manad(mestres, itens)
 
 
-def selecionar_fontes(rotulo, extensoes, chave):
+def revisao_codigo(*nomes):
+    return tuple(sha256((Path(PASTA_APP) / nome).read_bytes()).hexdigest() for nome in nomes)
+
+
+def selecionar_fontes(rotulo, extensoes, chave, local_recolhido=True):
     arquivos = st.file_uploader(rotulo, type=extensoes, accept_multiple_files=True, key=f"{chave}_upload")
-    with st.expander("Usar caminho local"):
+    with (st.expander("Usar caminho local") if local_recolhido else st.container()):
         caminhos = st.text_area(
             "Um caminho por linha", key=f"{chave}_local",
             help="Permite ler arquivos grandes diretamente no computador onde o Streamlit está rodando.",
@@ -105,37 +113,24 @@ def contribuicoes(apuracao):
     return dados[dados["Código de receita"].isin(RECEITAS_TERCEIROS)]
 
 
-def diferencas_calculo(apuracao, calculo):
-    informado = contribuicoes(apuracao)
-    informado = informado[informado["Estabelecimento"].eq("")].groupby("Código de receita")["Apurado"].sum().to_dict()
-    return [
-        {
-            "Código de receita": codigo, "Entidade ou fundo": RECEITAS_TERCEIROS.get(codigo, ""),
-            "Calculado": calculo.debitos.get(codigo, 0), "No S-5011": informado.get(codigo, 0),
-        }
-        for codigo in sorted(informado.keys() | calculo.debitos.keys())
-        if calculo.debitos.get(codigo, 0) != informado.get(codigo, 0)
-    ]
-
-
 def conferir_calculo(apuracao, calculo, chave):
-    diferencas = diferencas_calculo(apuracao, calculo)
-    if diferencas or calculo.pendencias:
+    validacao = validar_fechamento(apuracao, RECEITAS_TERCEIROS, calculo)
+    if not validacao.conciliado:
         with st.expander("Por que a base não foi conciliada"):
             for pendencia in calculo.pendencias:
                 st.write(pendencia)
-            if diferencas:
+            if validacao.diferencas_por_codigo:
+                diferencas = [
+                    {"Código de receita": codigo, "Entidade ou fundo": RECEITAS_TERCEIROS.get(codigo, ""),
+                     "Calculado": valores[0], "No S-5011": valores[1]}
+                    for codigo, valores in sorted(validacao.diferencas_por_codigo.items())
+                ]
                 tabela(pd.DataFrame(diferencas), "conferencia_calculo_terceiros", chave)
-        return False
-    return True
+    return validacao.conciliado
 
 
 def base_unica(calculo):
     return sum(linha["Base de terceiros"] for linha in calculo.lotacoes.values())
-
-
-def quadro_mudanca_base(antes, depois):
-    return pd.DataFrame(mudancas_lotacao(antes, depois))
 
 
 def quadro_por_entidade(dados, colunas):
@@ -166,8 +161,8 @@ def evidencias(apuracao):
     st.write("Totalizador S-5011", apuracao.arquivo)
     if apuracao.fechamento:
         st.write("Fechamento S-1299", apuracao.fechamento)
-    else:
-        st.caption("S-1299 correspondente ausente na importação. Confira o recibo para validar a posição no histórico.")
+    if apuracao.alertas:
+        st.caption(" ".join(apuracao.alertas))
 
 
 def terceiros_apurados(apuracao, rotulo_total="Total de terceiros apurado"):
@@ -250,15 +245,6 @@ def comparar_colunas(antes, depois, chave, numericas):
     return resultado
 
 
-def composicao_por_lotacao(apuracao):
-    grupos = {}
-    for linha in apuracao.bases:
-        chave = tuple(linha[campo] for campo in CHAVE_XML)
-        composicao = tuple(valor for campo, valor in linha.items() if campo not in CHAVE_XML)
-        grupos.setdefault(chave, []).append(composicao)
-    return {chave: sorted(grupo) for chave, grupo in grupos.items()}
-
-
 def comparar_xml(antes, depois):
     st.subheader("Outras Entidades e Fundos")
     receitas = comparar_colunas(contribuicoes(antes), contribuicoes(depois), CHAVE_CR, ["Apurado", "Suspenso"])
@@ -295,9 +281,12 @@ def comparar_xml(antes, depois):
         valores += suspensoes
     tabela(quadro_por_entidade(filtradas, valores), "comparacao_terceiros", "cmp_cr")
 
-    if com_bases:
-        st.subheader("Onde mudou a base de terceiros")
-        tabela(quadro_mudanca_base(calculo_antes, calculo_depois), "mudanca_base_terceiros", "cmp_base_lot")
+    st.subheader("Lotações alteradas no XML")
+    alteradas = pd.DataFrame(comparar_lotacoes_xml(
+        antes, depois, calculo_antes if com_base_antes else None, calculo_depois if com_base_depois else None,
+    ))
+    st.caption("A base declarada vem do S-5011. A base de terceiros aparece quando o cálculo foi conciliado.")
+    tabela(alteradas, "comparacao_lotacoes_terceiros", "cmp_lot")
     estabs = receitas[receitas["Estabelecimento"].ne("")].copy()
     if not estabs.empty:
         with st.expander("Diferenças por estabelecimento"):
@@ -306,28 +295,8 @@ def comparar_xml(antes, depois):
                    "comparacao_terceiros_estabelecimentos", "cmp_cr_estabs")
 
     dados = comparar_colunas(lotacoes(antes), lotacoes(depois), CHAVE_XML, ["Base previdenciária"])
-    comp_antes, comp_depois = composicao_por_lotacao(antes), composicao_por_lotacao(depois)
-    dados["Base por categoria ou incidência mudou"] = [
-        comp_antes.get(chave, []) != comp_depois.get(chave, [])
-        for chave in dados[CHAVE_XML].itertuples(index=False, name=None)
-    ]
-    dados["Mudou"] |= dados["Base por categoria ou incidência mudou"]
-    relevantes = codigo_configurado(dados["Código de terceiros antes"]) | codigo_configurado(dados["Código de terceiros depois"])
-    alteradas = dados[dados["Mudou"] & relevantes]
-    campos = [
-        "Lotação", "Estabelecimento", "FPAS antes", "FPAS depois",
-        "Código de terceiros antes", "Código de terceiros depois",
-        "Base previdenciária antes", "Base previdenciária depois", "Diferença de base previdenciária",
-        "Base por categoria ou incidência mudou",
-    ]
-    if alteradas[["Código suspenso antes", "Código suspenso depois"]].fillna("").ne("").any().any():
-        campos.extend(["Código suspenso antes", "Código suspenso depois"])
-    with st.expander("Lotações com alteração na base previdenciária ou no cadastro", expanded=not com_bases):
-        tabela(alteradas[campos], "comparacao_lotacoes_terceiros", "cmp_lot")
-
     with st.expander("Todas as lotações do comparativo"):
-        selecionadas = st.checkbox("Mostrar só lotações alteradas", value=True)
-        tabela(dados[dados["Mudou"]] if selecionadas else dados, "comparacao_lotacoes", "cmp_lot_todas")
+        tabela(dados, "comparacao_lotacoes", "cmp_lot_todas")
     with st.expander("XMLs do comparativo"):
         st.markdown("**Antes**")
         evidencias(antes)
@@ -456,24 +425,44 @@ def registrar_dctfweb(empresa, apuracoes):
 
 
 def formatar_competencia(periodo):
+    if not periodo:
+        return ""
     if len(periodo) == 4:
         return f"13º de {periodo}"
     return f"{periodo[5:]}/{periodo[:4]}"
 
 
 @st.cache_data(show_spinner=False, max_entries=3)
-def preparar_relatorio(empresa, apuracoes, cadastro, referencias, mestres=()):
-    abas = relatorio_geral(apuracoes, RECEITAS_TERCEIROS, cadastro, referencias)
+def preparar_relatorio(empresa, apuracoes, cadastro, referencias, mestres=(), controle=None,
+                       apenas_movimentos=False, filtrar_controle=False, versao=(),
+                       avisos_xml=(), conferencia_manad=None):
+    abas = relatorio_geral(apuracoes, RECEITAS_TERCEIROS, cadastro, referencias, controle, avisos_xml)
     if mestres:
-        adicionar_resumo_manad(abas, empresa, mestres)
-    return abas, gerar_excel(abas, empresa)
+        adicionar_resumo_manad(abas, empresa, mestres, conferencia_manad)
+    if not apenas_movimentos:
+        return abas, gerar_excel(abas, empresa)
+    nomes = (
+        "Movimentos", "Entidades", "Lotações", "Estabelecimentos", "Controle",
+        "DCTFWeb", "Simulações", "Lotações simuladas", "Entidades simuladas", "Verificação",
+    )
+    registro = {nome: abas[nome] for nome in nomes if nome in abas}
+    if filtrar_controle and controle:
+        registro = {nome: [linha for linha in linhas if not linha["Competência"] or linha["Competência"] in controle]
+                    for nome, linhas in registro.items()}
+    return {**abas, **registro}, gerar_excel(registro, empresa)
 
 
-def mostrar_consolidado(fluxo, empresa, apuracoes, cadastro, mestres=()):
+def mostrar_consolidado(fluxo, empresa, apuracoes, cadastro, mestres=(), controle=None, focar_controle=False,
+                        avisos_xml=(), conferencia_manad=None):
     st.subheader("Outras Entidades e Fundos por competência")
     referencias = st.session_state.get(f"referencias_dctfweb_{empresa}", {})
     with st.spinner("Consolidando fechamentos e preparando o Excel..."):
-        abas, excel = preparar_relatorio(empresa, apuracoes, cadastro, referencias, mestres)
+        abas, excel = preparar_relatorio(
+            empresa, apuracoes, cadastro, referencias, mestres, controle,
+            apenas_movimentos=fluxo == "XML × XML", filtrar_controle=focar_controle,
+            versao=revisao_codigo("relatorio.py", "calculo_terceiros.py"),
+            avisos_xml=avisos_xml, conferencia_manad=conferencia_manad,
+        )
     com_mudanca = {linha["Competência"] for linha in abas["Entidades"] if linha["Variação do débito"]}
     if fluxo == "MANAD × XML":
         comuns = sum(bool(linha["S-5011"]) for linha in abas["MANAD"])
@@ -483,11 +472,26 @@ def mostrar_consolidado(fluxo, empresa, apuracoes, cadastro, mestres=()):
         st.caption(f"{len(abas['Resumo'])} competências · {len(abas['Fechamentos'])} fechamentos · {len(com_mudanca)} competências com mudança no débito")
         nomes = ["Resumo", "Fechamentos"] if fluxo == "Apurar XML" else ["Movimentos", "Entidades", "Lotações"]
         if fluxo == "XML × XML":
-            nomes += [nome for nome in ("Simulações", "DCTFWeb") if nome in abas]
+            nomes += [nome for nome in ("Controle", "Simulações", "DCTFWeb") if abas.get(nome)]
+            sem_data = sum(linha["Recebido em"] is None for linha in abas["Fechamentos"])
+            if sem_data:
+                st.caption(f"{sem_data} totalizadores sem data de fechamento. Importe os S-1299 correspondentes para ordenar esses XMLs.")
     st.download_button(
-        "Baixar Excel completo", excel, file_name=f"auditoria_terceiros_{empresa}.xlsx",
+        "Baixar Excel das alterações" if fluxo == "XML × XML" else "Baixar Excel completo",
+        excel, file_name=f"{'registro' if fluxo == 'XML × XML' else 'auditoria'}_terceiros_{empresa}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", on_click="ignore", type="primary",
     )
+    with st.expander("Conferência dos dados"):
+        fechamentos = abas["Fechamentos"]
+        conciliados = sum(linha["Conferência da base"] == "Conciliada" for linha in fechamentos)
+        vinculados = sum(linha["Vínculo do fechamento"] == "Conferido" for linha in fechamentos)
+        st.write(f"{conciliados} de {len(fechamentos)} bases conciliadas por código de receita. "
+                 f"{vinculados} de {len(fechamentos)} vínculos S-1299/S-5011 conferidos.")
+        if abas.get("Verificação"):
+            tabela(pd.DataFrame(abas["Verificação"]), "verificacao_dos_dados", "visao_verificacao", baixar_csv=False)
+        if fluxo == "MANAD × XML":
+            divergencias = sum((linha["Chaves divergentes"] or 0) for linha in abas["MANAD"])
+            st.write(f"{divergencias} vínculos de trabalhador, lotação e tipo de folha divergentes entre K250 e K300.")
     paineis = st.tabs(nomes) if len(nomes) > 1 else [st.container()]
     for nome, painel in zip(nomes, paineis):
         with painel:
@@ -496,7 +500,20 @@ def mostrar_consolidado(fluxo, empresa, apuracoes, cadastro, mestres=()):
                 quadro["Competência"] = quadro["Competência"].map(formatar_competencia)
                 # Mostra a trilha de XML no Excel e na aba Fechamentos.
                 if nome == "Movimentos":
-                    quadro = quadro.drop(columns=["XML antes", "XML depois", "Recibo antes", "Recibo depois"])
+                    colunas = [
+                        "Competência", "Movimento", "Recebido depois em", "Débito antes", "Débito depois",
+                        "Variação do débito", "Códigos com débito alterado", "Lotações alteradas",
+                        "Variação da base", "Bases conciliadas",
+                    ]
+                    if quadro["Ordem dos XMLs"].eq("Parcial").any():
+                        colunas.append("Ordem dos XMLs")
+                    if controle:
+                        colunas.extend(["Data no controle", "Situação no controle"])
+                    quadro = quadro.loc[:, colunas].sort_values("Recebido depois em", ascending=False)
+                if nome == "Entidades" and not quadro["Variação do suspenso"].ne(0).any():
+                    quadro = quadro.drop(columns=["Suspenso antes", "Suspenso depois", "Variação do suspenso"])
+                if nome == "Lotações" and not quadro["Código suspenso antes → depois"].ne("").any():
+                    quadro = quadro.drop(columns="Código suspenso antes → depois")
                 if nome == "Resumo":
                     colunas = [
                         "Competência", "S-5011", "Base inicial", "Base recente", "Variação da base",
@@ -511,6 +528,10 @@ def mostrar_consolidado(fluxo, empresa, apuracoes, cadastro, mestres=()):
                 st.caption("Hipóteses de reenquadramento calculadas com o S-1020. O novo S-5011 confirma o que foi apurado.")
             if nome == "DCTFWeb":
                 st.caption("Os recibos candidatos coincidem pelo total. Confira os códigos de receita no detalhe do fechamento.")
+            if nome == "Controle":
+                st.caption("A planilha aponta as competências. Os valores e os recibos vêm do S-5011, vinculado ao fechamento pelo recibo.")
+            if nome == "Lotações":
+                st.caption("As mudanças de base declarada, FPAS e código são observadas no XML. A base efetiva de terceiros exige conciliação por entidade.")
             if nome == "MANAD":
                 st.caption("O K250 mostra a base previdenciária original. As colunas de terceiros vêm do último S-5011 disponível.")
             tabela(quadro, nome, f"visao_{nome}", baixar_csv=False)
@@ -535,7 +556,7 @@ def principal():
         if not fontes[0]:
             return
         with st.spinner("Localizando fechamentos e lendo totalizadores..."):
-            apuracoes, inventario, avisos, cadastro = importar_xml(*fontes)
+            apuracoes, inventario, avisos, cadastro = importar_xml(*fontes, revisao_codigo("leitura.py"))
         with st.expander("Arquivos lidos"):
             st.dataframe([{"Evento": tipo, "Arquivos": n} for tipo, n in sorted(inventario.items())], hide_index=True)
             for aviso in avisos:
@@ -545,16 +566,33 @@ def principal():
             return
         empresa = st.selectbox("Empresa", sorted({a.empresa for a in apuracoes}))
         arquivo_empresa = [a for a in apuracoes if a.empresa == empresa]
+        controle = {}
+        focar_controle = False
         if fluxo == "XML × XML":
             registrar_dctfweb(empresa, arquivo_empresa)
+            with st.expander("Usar planilha de controle da retificação"):
+                arquivos_controle, _ = selecionar_fontes("Controle de competências", ["xlsx"], "controle",
+                                                         local_recolhido=False)
+                if arquivos_controle:
+                    if len(arquivos_controle) != 1:
+                        st.warning("Importe uma planilha de controle por vez.")
+                    else:
+                        try:
+                            controle = ler_controle(arquivos_controle[0])
+                        except (ValueError, OSError, BadZipFile, KeyError) as erro:
+                            st.warning(f"Controle não importado: {erro}")
+                if controle:
+                    st.caption(f"{len(controle)} competências marcadas pela data ou situação da planilha.")
+                    focar_controle = st.checkbox("Mostrar e exportar só as competências marcadas")
         competencias = {a.competencia for a in arquivo_empresa}
         manad = None
         mestres = ()
+        conferencia_manad = None
         if fluxo == "MANAD × XML":
             fontes_manad = selecionar_fontes("MANAD original", ["txt"], "manad")
             if not fontes_manad[0]:
                 return
-            manad = importar_manad(*fontes_manad)
+            manad, conferencia_manad = importar_manad(*fontes_manad, revisao_codigo("leitura.py", "relatorio.py"))
             mestres, _ = manad
             if not mestres:
                 st.warning("Nenhum registro K250 foi encontrado no MANAD importado.")
@@ -566,7 +604,9 @@ def principal():
                 st.warning("O MANAD contém registros K250 de outro empregador. Confira a empresa selecionada.")
                 return
             competencias &= competencias_manad
-        mostrar_consolidado(fluxo, empresa, arquivo_empresa, cadastro, mestres)
+        mostrar_consolidado(
+            fluxo, empresa, arquivo_empresa, cadastro, mestres, controle, focar_controle, tuple(avisos), conferencia_manad,
+        )
         if not competencias or not st.checkbox("Detalhar uma competência", key=f"detalhar_{fluxo}"):
             return
         opcoes_competencia = sorted(competencias, reverse=True)
@@ -602,6 +642,8 @@ def principal():
                                             candidatos[-1] if candidatos else 0)
             if antes.data_fechamento and depois.data_fechamento and antes.data_fechamento > depois.data_fechamento:
                 st.warning("O fechamento selecionado como antes tem data posterior ao fechamento depois.")
+            if not antes.data_fechamento or not depois.data_fechamento or antes.data_fechamento == depois.data_fechamento:
+                st.warning("A ordem deste par não pôde ser confirmada pelos recibos. A comparação segue a seleção manual.")
             comparar_xml(antes, depois)
             referencias = (antes, depois)
         else:
